@@ -26,7 +26,12 @@ CREATE TABLE IF NOT EXISTS memories (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_fingerprint ON memories(fingerprint);
 CREATE INDEX IF NOT EXISTS idx_memories_task_type         ON memories(task_type);
 CREATE INDEX IF NOT EXISTS idx_memories_kind              ON memories(kind);
-CREATE INDEX IF NOT EXISTS idx_memories_task_kind         ON memories(task_type, kind);
+-- idx_memories_task_kind superseded by idx_memories_task_kind_created.
+-- The composite covers leftmost-prefix (task_type) and (task_type, kind)
+-- lookups AND eliminates the ORDER BY created_at DESC sort step for the
+-- session_summary prune (save.go), fetchLastSession, fetchAllUserRules.
+DROP INDEX IF EXISTS idx_memories_task_kind;
+CREATE INDEX IF NOT EXISTS idx_memories_task_kind_created ON memories(task_type, kind, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_created_at        ON memories(created_at DESC);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -59,7 +60,30 @@ func (s *Store) Context(req ContextRequest) (*ContextResponse, error) {
 		Browse:    []ContextMemory{},
 	}
 
-	last, err := s.fetchLastSession(taskType)
+	// All four reads run inside a single BEGIN DEFERRED on a dedicated
+	// connection so the returned bundle is a consistent snapshot. Without
+	// this, a concurrent writer could commit between fetchLastSession and
+	// fetchBrowseTier, producing a bundle that mixes pre- and post-write
+	// state (e.g. retention prune deleted the old session_summary, new one
+	// not yet committed → LastSession is stale or missing while browse-tier
+	// rows reference the new session_id).
+	ctx := context.Background()
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire conn: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "BEGIN DEFERRED"); err != nil {
+		return nil, fmt.Errorf("begin deferred: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			conn.ExecContext(ctx, "ROLLBACK")
+		}
+	}()
+
+	last, err := fetchLastSessionConn(ctx, conn, taskType)
 	if err != nil {
 		return nil, err
 	}
@@ -67,24 +91,29 @@ func (s *Store) Context(req ContextRequest) (*ContextResponse, error) {
 		resp.LastSession = last
 	}
 
-	rules, err := s.fetchAllUserRules(taskType)
+	rules, err := fetchAllUserRulesConn(ctx, conn, taskType)
 	if err != nil {
 		return nil, err
 	}
 	resp.UserRules = rules
 
-	browse, err := s.fetchBrowseTier(ftsQuery, taskType)
+	browse, err := fetchBrowseTierConn(ctx, conn, ftsQuery, taskType)
 	if err != nil {
 		return nil, err
 	}
 	resp.Browse = browse
 
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return nil, fmt.Errorf("commit context: %w", err)
+	}
+	committed = true
+
 	return resp, nil
 }
 
-func (s *Store) fetchLastSession(taskType string) (*ContextMemory, error) {
+func fetchLastSessionConn(ctx context.Context, conn *sql.Conn, taskType string) (*ContextMemory, error) {
 	var m ContextMemory
-	err := s.db.QueryRow(`
+	err := conn.QueryRowContext(ctx, `
 		SELECT id, kind, title, learned, created_at
 		FROM memories
 		WHERE task_type = ? AND kind = 'session_summary'
@@ -101,8 +130,8 @@ func (s *Store) fetchLastSession(taskType string) (*ContextMemory, error) {
 	return &m, nil
 }
 
-func (s *Store) fetchAllUserRules(taskType string) ([]ContextMemory, error) {
-	rows, err := s.db.Query(`
+func fetchAllUserRulesConn(ctx context.Context, conn *sql.Conn, taskType string) ([]ContextMemory, error) {
+	rows, err := conn.QueryContext(ctx, `
 		SELECT id, kind, title, learned, created_at
 		FROM memories
 		WHERE task_type = ? AND kind = 'user_rule'
@@ -124,15 +153,15 @@ func (s *Store) fetchAllUserRules(taskType string) ([]ContextMemory, error) {
 	return out, rows.Err()
 }
 
-// fetchBrowseTier returns top-N error_resolution and task_pattern memories
+// fetchBrowseTierConn returns top-N error_resolution and task_pattern memories
 // ranked by BM25, projected to {id, kind, title, snippet}. Snippet is the
-// first browseSnippetChars of `what`.
-func (s *Store) fetchBrowseTier(ftsQuery, taskType string) ([]ContextMemory, error) {
-	errs, err := s.fetchBrowseKind(ftsQuery, taskType, "error_resolution", browseErrorLimit)
+// first browseSnippetChars (runes) of `what`.
+func fetchBrowseTierConn(ctx context.Context, conn *sql.Conn, ftsQuery, taskType string) ([]ContextMemory, error) {
+	errs, err := fetchBrowseKindConn(ctx, conn, ftsQuery, taskType, "error_resolution", browseErrorLimit)
 	if err != nil {
 		return nil, err
 	}
-	patterns, err := s.fetchBrowseKind(ftsQuery, taskType, "task_pattern", browseTaskLimit)
+	patterns, err := fetchBrowseKindConn(ctx, conn, ftsQuery, taskType, "task_pattern", browseTaskLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -153,8 +182,8 @@ func (s *Store) fetchBrowseTier(ftsQuery, taskType string) ([]ContextMemory, err
 	return out, nil
 }
 
-func (s *Store) fetchBrowseKind(ftsQuery, taskType, kind string, limit int) ([]ContextMemory, error) {
-	rows, err := s.db.Query(`
+func fetchBrowseKindConn(ctx context.Context, conn *sql.Conn, ftsQuery, taskType, kind string, limit int) ([]ContextMemory, error) {
+	rows, err := conn.QueryContext(ctx, `
 		SELECT m.id, m.kind, m.title, m.what, m.created_at
 		FROM memories_fts fts
 		JOIN memories m ON m.rowid = fts.rowid
