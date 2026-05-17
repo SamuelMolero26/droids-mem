@@ -37,10 +37,17 @@ func Open() (*sql.DB, error) {
 // BuildDSN returns a modernc.org/sqlite DSN with the canonical pragma set.
 // Exposed so tests and the doctor command can open the same DB consistently.
 func BuildDSN(path string) string {
+	// cache_size=-4000 → 4 MB page cache (default is -2000 = 2 MB).
+	// Modest bump for the read-heavy context/search paths. Negative value
+	// means "KiB", positive would mean "pages". mmap_size deliberately
+	// omitted — measured benefit on a short-lived CLI is unproven and
+	// macOS + mmap on growing files has known sharp edges. Tracked in
+	// Future.md.
 	return "file:" + path + "?_pragma=journal_mode(WAL)" +
 		"&_pragma=busy_timeout(5000)" +
 		"&_pragma=synchronous(NORMAL)" +
-		"&_pragma=foreign_keys(ON)"
+		"&_pragma=foreign_keys(ON)" +
+		"&_pragma=cache_size(-4000)"
 }
 
 // DDL -> creates all tables, indexes, and triggers

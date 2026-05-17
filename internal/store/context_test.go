@@ -1,11 +1,19 @@
 package store_test
 
 import (
+	"database/sql"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/samuelmolero/droids-mem/internal/db"
 	"github.com/samuelmolero/droids-mem/internal/store"
 )
+
+func openProdDB(t *testing.T) (*sql.DB, error) {
+	t.Helper()
+	return db.Open()
+}
 
 func seedContextFixture(t *testing.T, s *store.Store) {
 	t.Helper()
@@ -206,6 +214,90 @@ func TestContext_Validation_MissingTaskType(t *testing.T) {
 		t.Error("expected validation error for missing task_type")
 	}
 }
+
+// TestContext_ConcurrentWritesNoCorruption stresses Context() against
+// concurrent writers. With BEGIN DEFERRED wrapping the 4 reads on a
+// dedicated conn (and SetMaxOpenConns(1) serializing the pool), every
+// Context response must be internally consistent — no errors, no missing
+// always-tier rows, no partial reads. Pre-fix, the 3 selects on the pool
+// could interleave with writer commits and produce inconsistent bundles.
+func TestContext_ConcurrentWritesNoCorruption(t *testing.T) {
+	// Concurrent goroutines need a shared backing DB; `:memory:` per-conn
+	// gives each pool conn its own database. Use a tempfile + the
+	// production db.Open() path so SetMaxOpenConns(1) and PRAGMAs apply.
+	dir := t.TempDir()
+	t.Setenv("DROIDS_MEM_DB", dir+"/mem.db")
+	conn, err := openProdDB(t)
+	if err != nil {
+		t.Fatalf("open prod db: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	s := store.New(conn)
+	seedContextFixture(t, s)
+
+	const (
+		readers   = 8
+		writers   = 4
+		iters     = 50
+	)
+	var wg sync.WaitGroup
+	errs := make(chan error, readers*iters+writers*iters)
+
+	for r := 0; r < readers; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iters; i++ {
+				resp, err := s.Context(store.ContextRequest{TaskType: "crm_upload", Query: "phone csv"})
+				if err != nil {
+					errs <- err
+					return
+				}
+				// invariant: user_rules + last_session always populated (seed has both)
+				if resp.LastSession == nil {
+					errs <- &snapshotErr{"last_session disappeared mid-snapshot"}
+					return
+				}
+				if len(resp.UserRules) == 0 {
+					errs <- &snapshotErr{"user_rules empty mid-snapshot"}
+					return
+				}
+			}
+		}()
+	}
+
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < iters; i++ {
+				// distinct content per iter to avoid Layer 1/2 dedupe
+				req := store.SaveRequest{
+					TaskType: "crm_upload",
+					Kind:     "error_resolution",
+					Title:    "concurrent write " + string(rune('A'+id)),
+					What:     "iteration body " + string(rune('a'+i%26)),
+					Learned:  "lesson " + string(rune('a'+i%26)) + string(rune('a'+id)),
+					Force:    true,
+				}
+				if _, err := s.Save(req); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}(w)
+	}
+
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("concurrent stress: %v", err)
+	}
+}
+
+type snapshotErr struct{ msg string }
+
+func (e *snapshotErr) Error() string { return e.msg }
 
 func TestContext_SessionSummaryRetention(t *testing.T) {
 	s := newTestStore(t)
