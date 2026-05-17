@@ -236,9 +236,9 @@ func TestContext_ConcurrentWritesNoCorruption(t *testing.T) {
 	seedContextFixture(t, s)
 
 	const (
-		readers   = 8
-		writers   = 4
-		iters     = 50
+		readers = 8
+		writers = 4
+		iters   = 50
 	)
 	var wg sync.WaitGroup
 	errs := make(chan error, readers*iters+writers*iters)
