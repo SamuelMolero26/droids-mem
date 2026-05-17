@@ -22,6 +22,11 @@ func Open() (*sql.DB, error) {
     if err != nil {
         return nil, fmt.Errorf("open sqlite: %w", err)
     }
+    // Single-writer SQLite: cap pool at 1 to guarantee BEGIN IMMEDIATE in
+    // save.go holds the only writer conn. Without this, the pool may open
+    // sibling conns that bypass the dedicated-conn lock semantics.
+    // Future.md tracks the dual-pool (writer + read-only readers) option.
+    db.SetMaxOpenConns(1)
 
     if err := Init(db); err != nil {
         db.Close()

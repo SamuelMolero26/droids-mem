@@ -115,6 +115,12 @@ func (s *Store) Search(req SearchRequest) (*SearchResponse, error) {
 // `*` is also stripped — trigram tokenizer (see schema.go) provides substring
 // match natively, so prefix wildcards are unnecessary and would cause the
 // FTS5 parser to error on bare `*`.
+//
+// Asymmetry with save.go nearDuplicateConn (which quotes every token as a
+// phrase literal): this path is caller-driven — the query string carries
+// caller intent and operator chars like `-` (NOT) are preserved on purpose.
+// nearDuplicateConn treats Memory content as the query (no operator intent),
+// so it locks down harder. See ADR-0003.
 func sanitizeFTSQuery(q string) string {
 	q = strings.NewReplacer(`"`, ``, `(`, ``, `)`, ``, `*`, ``, `^`, ``).Replace(q)
 	return strings.TrimSpace(reWhitespace.ReplaceAllString(q, " "))
