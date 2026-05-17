@@ -194,13 +194,17 @@ func orJoin(q string) string {
 	return strings.Join(parts, " OR ")
 }
 
+// snippet truncates s to at most n runes (NOT bytes) so multi-byte UTF-8
+// (CJK, emoji, accented Latin) is never cut mid-rune. CONTEXT.md defines
+// the budget as "120-char", interpreted as runes (Unicode code points).
 func snippet(s string, n int) string {
 	s = strings.TrimSpace(reWhitespace.ReplaceAllString(s, " "))
-	if len(s) <= n {
+	runes := []rune(s)
+	if len(runes) <= n {
 		return s
 	}
+	cut := string(runes[:n])
 	// trim to last space within budget so we don't cut mid-word
-	cut := s[:n]
 	if idx := strings.LastIndexByte(cut, ' '); idx > n/2 {
 		cut = cut[:idx]
 	}

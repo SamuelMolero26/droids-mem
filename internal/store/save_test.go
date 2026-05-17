@@ -232,9 +232,42 @@ func TestSave_BM25_NearDuplicateSkipped(t *testing.T) {
 		if resp.Reason != "near_duplicate" {
 			t.Errorf("expected near_duplicate reason, got %q", resp.Reason)
 		}
-		if resp.Score >= 0 {
-			t.Errorf("BM25 score should be negative, got %f", resp.Score)
+		if resp.Score < 0 || resp.Score > 1 {
+			t.Errorf("Jaccard score out of [0,1]: %f", resp.Score)
 		}
+	}
+}
+
+// TestSave_NearDuplicate_FTSOperatorsInContent verifies that Memory content
+// containing FTS5 operator keywords (NOT/AND/OR/NEAR, col:filter) does not
+// blow up the near-duplicate BM25 query. Pre-fix, nearDuplicateConn joined
+// raw terms with " OR ", so a title like "NOT working" produced a query
+// `not OR working` — `not` parses as the NOT operator → FTS5 syntax error
+// or wrong row set.
+func TestSave_NearDuplicate_FTSOperatorsInContent(t *testing.T) {
+	s := newTestStore(t)
+	hostile := store.SaveRequest{
+		TaskType: "crm_upload",
+		Kind:     "error_resolution",
+		Title:    "NOT working when OR fails",
+		What:     "AND clause triggered NEAR overflow in title:column",
+		Learned:  "Avoid OR NOT NEAR in titles",
+		Tags:     "fts operators",
+	}
+	if _, err := s.Save(hostile); err != nil {
+		t.Fatalf("first save with operator keywords: %v", err)
+	}
+	// Second save with same operator-heavy tokens — exercises nearDuplicateConn
+	// which builds an FTS query from req content. Must not error.
+	paraphrase := hostile
+	paraphrase.Title = "OR NEAR AND NOT keywords break query"
+	paraphrase.Learned = "AND OR NOT NEAR tokens must be quoted"
+	resp, err := s.Save(paraphrase)
+	if err != nil {
+		t.Fatalf("near-dup save with operator keywords must not error: %v", err)
+	}
+	if resp.Status != "saved" && resp.Status != "skipped" {
+		t.Errorf("unexpected status %q", resp.Status)
 	}
 }
 

@@ -237,7 +237,18 @@ func nearDuplicateConn(ctx context.Context, conn *sql.Conn, req SaveRequest) (ma
 	if len(terms) == 0 {
 		return "", 0, nil
 	}
-	query := strings.Join(terms, " OR ")
+	// Wrap each term as an FTS5 phrase literal ("term") so that any FTS5
+	// operator keywords (NOT/AND/OR/NEAR, col:filter) that happen to appear
+	// in saved Memory content are treated as literal tokens, not query
+	// operators. searchTerms() already lowercases + strips punctuation, but
+	// not operator keywords — quoting closes that gap.
+	// Threat model differs from search.go (caller-supplied query, operators
+	// intentional). See ADR-0003.
+	quoted := make([]string, len(terms))
+	for i, t := range terms {
+		quoted[i] = `"` + t + `"`
+	}
+	query := strings.Join(quoted, " OR ")
 
 	rows, err := conn.QueryContext(ctx, `
 		SELECT m.id, m.title, m.what, m.learned, m.tags
