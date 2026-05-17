@@ -6,15 +6,15 @@ import (
 )
 
 type DoctorReport struct {
-	Status        string `json:"status"`
-	IntegrityOK   bool   `json:"integrity_ok"`
-	Rebuilt       bool   `json:"rebuilt"`
-	Optimized     bool   `json:"optimized"`
-	Vacuumed      bool   `json:"vacuumed"`
-	BytesBefore   int64  `json:"bytes_before"`
-	BytesAfter    int64  `json:"bytes_after"`
-	BytesFreed    int64  `json:"bytes_freed"`
-	IntegrityErr  string `json:"integrity_error,omitempty"`
+	Status       string `json:"status"`
+	IntegrityOK  bool   `json:"integrity_ok"`
+	Rebuilt      bool   `json:"rebuilt"`
+	Optimized    bool   `json:"optimized"`
+	Vacuumed     bool   `json:"vacuumed"`
+	BytesBefore  int64  `json:"bytes_before"`
+	BytesAfter   int64  `json:"bytes_after"`
+	BytesFreed   int64  `json:"bytes_freed"`
+	IntegrityErr string `json:"integrity_error,omitempty"`
 }
 
 // Doctor runs FTS integrity-check, rebuilds the FTS index if divergent,
