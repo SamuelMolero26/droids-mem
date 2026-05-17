@@ -43,7 +43,7 @@ func BuildDSN(path string) string {
 		"&_pragma=foreign_keys(ON)"
 }
 
-//  DDL -> creates all tables, indexes, and triggers
+// DDL -> creates all tables, indexes, and triggers
 func Init(db *sql.DB) error {
 	if _, err := db.Exec(ddl); err != nil {
 		return fmt.Errorf("init schema: %w", err)
