@@ -40,6 +40,8 @@ start of each run — all via a local binary with zero external dependencies.`,
 		newGetCmd(s),
 		newDoctorCmd(s),
 		newSchemaCmd(),
+		newServeCmd(s),
+		newEnsureServerCmd(),
 	)
 
 	if err := root.Execute(); err != nil {

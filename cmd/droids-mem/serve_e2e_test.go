@@ -23,24 +23,6 @@ const (
 	requestTimeout = 5 * time.Second
 )
 
-var binaryPath string
-
-func TestMain(m *testing.M) {
-	tmp, err := os.MkdirTemp("", "droids-mem-mcp-e2e-*")
-	if err != nil {
-		panic("mktemp: " + err.Error())
-	}
-	defer os.RemoveAll(tmp)
-
-	binaryPath = filepath.Join(tmp, "droids-mem-mcp")
-	out, err := exec.Command("go", "build", "-o", binaryPath, ".").CombinedOutput()
-	if err != nil {
-		panic("build failed: " + string(out))
-	}
-
-	os.Exit(m.Run())
-}
-
 // pickFreePort grabs an ephemeral TCP port, then closes the listener so the
 // server can bind it. Race window is unavoidable but acceptable for tests.
 func pickFreePort(t *testing.T) int {
@@ -67,7 +49,8 @@ type server struct {
 func startServer(t *testing.T) *server {
 	t.Helper()
 	port := pickFreePort(t)
-	dbPath := filepath.Join(t.TempDir(), "mem.db")
+	workDir := t.TempDir()
+	dbPath := filepath.Join(workDir, "mem.db")
 
 	s := &server{
 		t:        t,
@@ -78,9 +61,10 @@ func startServer(t *testing.T) *server {
 		stderr:   &bytes.Buffer{},
 	}
 
-	s.cmd = exec.Command(binaryPath)
+	s.cmd = exec.Command(binaryPath, "serve")
 	s.cmd.Env = append(os.Environ(),
 		"DROIDS_MEM_DB="+dbPath,
+		"DROIDS_MEM_HOME="+workDir,
 		"DROIDS_MEM_MCP_TOKEN="+testToken,
 		"DROIDS_MEM_MCP_ADDR=:"+fmt.Sprintf("%d", port),
 	)
@@ -89,7 +73,6 @@ func startServer(t *testing.T) *server {
 		t.Fatalf("start: %v", err)
 	}
 
-	// Wait for /healthz to respond before returning.
 	deadline := time.Now().Add(bootDeadline)
 	for time.Now().Before(deadline) {
 		resp, err := http.Get("http://" + s.addr + "/healthz")
@@ -206,7 +189,6 @@ func (s *server) initSession(t *testing.T) string {
 	if sid == "" {
 		t.Fatalf("server did not return Mcp-Session-Id")
 	}
-	// Send the required initialized notification (no id, no response expected).
 	s.jsonRPC(t, sid, s.token, map[string]any{
 		"jsonrpc": "2.0",
 		"method":  "notifications/initialized",
@@ -242,13 +224,12 @@ func (s *server) callTool(t *testing.T, sid, name string, args map[string]any) m
 
 // ── tests ──────────────────────────────────────────────────────────────
 
-func TestE2E_AuthRejected(t *testing.T) {
+func TestServeE2E_AuthRejected(t *testing.T) {
 	s := startServer(t)
 	defer s.stop()
 
 	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize"})
 
-	// no token
 	resp, err := http.Post(s.url(), "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("post: %v", err)
@@ -258,7 +239,6 @@ func TestE2E_AuthRejected(t *testing.T) {
 		t.Fatalf("no-token want 401 got %d", resp.StatusCode)
 	}
 
-	// wrong token
 	req, _ := http.NewRequest("POST", s.url(), bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer wrong")
 	resp, err = http.DefaultClient.Do(req)
@@ -271,7 +251,7 @@ func TestE2E_AuthRejected(t *testing.T) {
 	}
 }
 
-func TestE2E_HealthzNoAuth(t *testing.T) {
+func TestServeE2E_HealthzNoAuth(t *testing.T) {
 	s := startServer(t)
 	defer s.stop()
 
@@ -285,7 +265,7 @@ func TestE2E_HealthzNoAuth(t *testing.T) {
 	}
 }
 
-func TestE2E_ToolsListExposesFourTools(t *testing.T) {
+func TestServeE2E_ToolsListExposesFourTools(t *testing.T) {
 	s := startServer(t)
 	defer s.stop()
 	sid := s.initSession(t)
@@ -312,7 +292,7 @@ func TestE2E_ToolsListExposesFourTools(t *testing.T) {
 	}
 }
 
-func TestE2E_ContextMintsSessionAndSaveReusesIt(t *testing.T) {
+func TestServeE2E_ContextMintsSessionAndSaveReusesIt(t *testing.T) {
 	s := startServer(t)
 	defer s.stop()
 	sid := s.initSession(t)
@@ -345,7 +325,7 @@ func TestE2E_ContextMintsSessionAndSaveReusesIt(t *testing.T) {
 	}
 }
 
-func TestE2E_DuplicateSaveSkipped(t *testing.T) {
+func TestServeE2E_DuplicateSaveSkipped(t *testing.T) {
 	s := startServer(t)
 	defer s.stop()
 	sid := s.initSession(t)
@@ -373,7 +353,7 @@ func TestE2E_DuplicateSaveSkipped(t *testing.T) {
 	}
 }
 
-func TestE2E_GracefulShutdownExitsZero(t *testing.T) {
+func TestServeE2E_GracefulShutdownExitsZero(t *testing.T) {
 	s := startServer(t)
 	if err := s.cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatalf("signal: %v", err)

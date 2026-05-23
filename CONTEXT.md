@@ -73,8 +73,12 @@ The default access path where the agent spawns the `droids-mem` CLI per call and
 _Avoid_: shell tool, exec tool
 
 **MCP bridge**:
-The alternate access path that exposes a fixed set of memory operations over JSON-RPC to remote agent runtimes.
+The alternate access path that exposes a fixed set of memory operations over JSON-RPC to remote agent runtimes. Started via `droids-mem serve` (same binary as the CLI).
 _Avoid_: API server, gateway, daemon
+
+**ensure-server**:
+The idempotent CLI operation an Agent client calls before MCP requests: pings `/healthz`, otherwise spawns `droids-mem serve` detached and waits for ready.
+_Avoid_: bootstrap, start, launch
 
 **Agent client**:
 Any program holding a Run that talks to the store via Subprocess transport or MCP bridge.
@@ -88,6 +92,7 @@ _Avoid_: caller, consumer, user (overloaded with end-user)
 - A `session_summary` **Memory** is scoped by **task_type**; only the 5 newest per task_type are retained
 - A **Context bundle** for a **task_type** has an always **Tier** (latest session_summary + all user_rules in full) and a browse **Tier** (top error_resolution + task_pattern as title + snippet, ranked by BM25)
 - An **Agent client** reaches the store through either **Subprocess transport** or the **MCP bridge** and owns the **Session** by threading `session_id` across saves
+- An **Agent client** using the **MCP bridge** calls **ensure-server** first to guarantee the bridge is up before issuing JSON-RPC requests
 
 ## Example dialogue
 
@@ -99,6 +104,8 @@ _Avoid_: caller, consumer, user (overloaded with end-user)
 > **Domain expert:** "If it's a `user_rule` or `session_summary`, the always **Tier** carries it in full. If it's an `error_resolution` or `task_pattern`, the browse Tier shows a snippet and the agent calls `mem_get` for the full body."
 > **Dev:** "Does it matter whether the **Agent client** is using **Subprocess transport** or the **MCP bridge**?"
 > **Domain expert:** "No — both wrap the same store. The only difference is who mints the `session_id`: in MCP, `mem_context` returns one; with Subprocess, `save` mints one on the first call. The Agent client is responsible for threading it through subsequent calls either way."
+> **Dev:** "What stops the **MCP bridge** from being down when an **Agent client** wakes up?"
+> **Domain expert:** "Nothing — the Agent client always calls **ensure-server** first. It's idempotent: if `/healthz` answers, it returns immediately; otherwise it spawns `droids-mem serve` detached and waits for ready."
 
 ## Flagged ambiguities
 

@@ -1,141 +1,17 @@
-// droids-mem-mcp is an MCP (Model Context Protocol) bridge for droids-mem.
-//
-// Architecture and rationale: see docs/adr/0003-mcp-bridge-for-agentspan.md.
-package main
+package mcpserver
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
-	"net/http"
-	"os"
-	"os/signal"
-	"syscall"
-	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/oklog/ulid/v2"
 
-	"github.com/samuelmolero/droids-mem/internal/db"
 	"github.com/samuelmolero/droids-mem/internal/store"
 )
-
-const shutdownGrace = 10 * time.Second
-
-const (
-	defaultAddr     = ":7777"
-	defaultEndpoint = "/mcp"
-	serverName      = "droids-mem-mcp"
-	serverVersion   = "0.1.0"
-)
-
-func main() {
-	addr := envOr("DROIDS_MEM_MCP_ADDR", defaultAddr)
-	endpoint := envOr("DROIDS_MEM_MCP_ENDPOINT", defaultEndpoint)
-	token := os.Getenv("DROIDS_MEM_MCP_TOKEN")
-	if token == "" {
-		log.Fatal("DROIDS_MEM_MCP_TOKEN is required (bearer auth)")
-	}
-
-	database, err := db.Open()
-	if err != nil {
-		log.Fatalf("open db: %v", err)
-	}
-	defer database.Close()
-
-	st := store.New(database)
-
-	s := server.NewMCPServer(serverName, serverVersion,
-		server.WithToolCapabilities(true),
-		server.WithLogging(),
-	)
-	registerTools(s, st)
-
-	mcpHandler := server.NewStreamableHTTPServer(s,
-		server.WithEndpointPath(endpoint),
-		server.WithHeartbeatInterval(30*time.Second),
-	)
-
-	mux := http.NewServeMux()
-	mux.Handle(endpoint, mcpHandler)
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	})
-
-	wrapped := bearerAuth(token, endpoint, mux)
-
-	log.Printf("%s %s listening on %s (endpoint=%s)", serverName, serverVersion, addr, endpoint)
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           wrapped,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-
-	// Graceful shutdown: SIGINT/SIGTERM triggers Shutdown(), which lets
-	// in-flight MCP calls complete within shutdownGrace before the process
-	// exits. The DB Close in main's deferred chain runs after Shutdown
-	// returns, so no writer txn is killed mid-flight.
-	stopCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	serveErr := make(chan error, 1)
-	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serveErr <- err
-			return
-		}
-		serveErr <- nil
-	}()
-
-	select {
-	case err := <-serveErr:
-		if err != nil {
-			log.Fatalf("serve: %v", err)
-		}
-	case <-stopCtx.Done():
-		log.Printf("shutdown signal received; draining (grace=%s)", shutdownGrace)
-		shutCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
-		defer cancel()
-		if err := srv.Shutdown(shutCtx); err != nil {
-			log.Printf("graceful shutdown failed: %v (forcing close)", err)
-			_ = srv.Close()
-		}
-		log.Printf("shutdown complete")
-	}
-}
-
-// bearerAuth gates the MCP endpoint with a constant-time bearer-token compare.
-// /healthz is intentionally exempt so liveness probes do not need credentials.
-func bearerAuth(expected, protectedPath string, next http.Handler) http.Handler {
-	want := []byte("Bearer " + expected)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != protectedPath {
-			next.ServeHTTP(w, r)
-			return
-		}
-		got := []byte(r.Header.Get("Authorization"))
-		if len(got) != len(want) || subtle.ConstantTimeCompare(got, want) != 1 {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="droids-mem-mcp"`)
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-
-// ---------- tool registration ----------
 
 func registerTools(s *server.MCPServer, st *store.Store) {
 	s.AddTool(saveToolDef(), mcp.NewTypedToolHandler(saveHandler(st)))
