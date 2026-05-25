@@ -92,7 +92,7 @@ _Avoid_: caller, consumer, user (overloaded with end-user)
 - A `session_summary` **Memory** is scoped by **task_type**; only the 5 newest per task_type are retained
 - A **Context bundle** for a **task_type** has an always **Tier** (latest session_summary + all user_rules in full) and a browse **Tier** (top error_resolution + task_pattern as title + snippet, ranked by BM25)
 - An **Agent client** reaches the store through either **Subprocess transport** or the **MCP bridge** and owns the **Session** by threading `session_id` across saves
-- An **Agent client** using the **MCP bridge** calls **ensure-server** first to guarantee the bridge is up before issuing JSON-RPC requests
+- The **MCP bridge** is kept alive by the host OS service manager (primary); an **Agent client** calls **ensure-server** as a fallback before issuing JSON-RPC requests in case the OS service is down
 
 ## Example dialogue
 
@@ -105,7 +105,7 @@ _Avoid_: caller, consumer, user (overloaded with end-user)
 > **Dev:** "Does it matter whether the **Agent client** is using **Subprocess transport** or the **MCP bridge**?"
 > **Domain expert:** "No — both wrap the same store. The only difference is who mints the `session_id`: in MCP, `mem_context` returns one; with Subprocess, `save` mints one on the first call. The Agent client is responsible for threading it through subsequent calls either way."
 > **Dev:** "What stops the **MCP bridge** from being down when an **Agent client** wakes up?"
-> **Domain expert:** "Nothing — the Agent client always calls **ensure-server** first. It's idempotent: if `/healthz` answers, it returns immediately; otherwise it spawns `droids-mem serve` detached and waits for ready."
+> **Domain expert:** "The host OS service manager keeps the bridge alive and restarts it on crash. If that's down for any reason, the Agent client calls **ensure-server** as a fallback — idempotent: if `/healthz` answers it returns immediately, otherwise it spawns `droids-mem serve` and waits for ready."
 
 ## Flagged ambiguities
 

@@ -1,7 +1,8 @@
 # 0003 — MCP bridge for agentspan integration
 
-**Status**: Accepted
+**Status**: Amended
 **Date**: 2026-05-17
+**Amended**: 2026-05-24
 
 ## Context
 
@@ -69,4 +70,18 @@ This means the `mem_context` response shape gains a `session_id` field — minor
 - **HTTP/REST API in Go (no MCP)** — needs OpenAPI authoring + client codegen on the agentspan side. More boilerplate than MCP for the same outcome.
 - **Per-connection session state on the server** — simpler for ephemeral agents but breaks the moment an agentspan worker pauses for approval and resumes elsewhere. The durability property of agentspan makes this a non-starter.
 - **Expose every CLI subcommand as an MCP tool (`mem_list`, `mem_schema`, `mem_doctor`)** — pollutes the agent's tool budget with operator commands the agent never needs. Hidden by default; can be added behind a flag later.
-- **Embed MCP transport into the existing `droids-mem` binary as a subcommand (`droids-mem serve --mcp`)** — viable; rejected to keep the CLI binary single-purpose and to allow the MCP server to be deployed independently (e.g., as a systemd unit or container) without dragging in CLI flag-parsing surface.
+- **Embed MCP transport into the existing `droids-mem` binary as a subcommand (`droids-mem serve --mcp`)** — viable; rejected to keep the CLI binary single-purpose and to allow the MCP server to be deployed independently (e.g., as a systemd unit or container) without dragging in CLI flag-parsing surface. **This alternative was later adopted — see Amendment below.**
+
+## Amendment — 2026-05-24: collapse to single binary
+
+`cmd/droids-mem-mcp/` has been deleted. `droids-mem serve` is now the canonical way to start the MCP bridge.
+
+**What changed:** The two-binary decision was reversed for two reasons:
+
+1. **`ensure-server` requires a single binary.** `ensure-server` achieves zero-config startup by re-executing its own path (`os.Executable()`) as `droids-mem serve`. With a separate `droids-mem-mcp` binary, `ensure-server` would need to know the path to a different artifact — breaking zero-config and requiring manual PATH or env-var setup. Single binary is the only layout where `ensure-server` works without configuration.
+
+2. **Two build artifacts were operationally painful.** Two binaries meant two install steps, two version-sync requirements, and two deployment surfaces. In V1 (single-machine, local-first), the independence this bought was never exercised.
+
+**Token contract — Agent client side:** `DROIDS_MEM_MCP_TOKEN` is no longer required as an env var for Agent clients. The fallback path reads `~/.droids-mem/token` (written by the bridge on first start); zero-config deployments need no env var at all. The server-side auth decision is unchanged — the bridge still validates a bearer token on every request.
+
+**What did not change:** Transport, tools, session ownership, and DB assumptions are unchanged. The `internal/mcpserver` package still isolates all bridge logic — the merge was a binary boundary change, not a package architecture change.

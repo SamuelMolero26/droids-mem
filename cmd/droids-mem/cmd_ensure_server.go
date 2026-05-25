@@ -151,4 +151,3 @@ func spawnDetached(addr, token string) (int, error) {
 
 	return pid, nil
 }
-
