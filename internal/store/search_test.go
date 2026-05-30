@@ -191,3 +191,54 @@ func TestSearch_TotalMatchesResultCount(t *testing.T) {
 		t.Errorf("total %d != len(results) %d", resp.Total, len(resp.Results))
 	}
 }
+
+// TestSearch_FTS5SpecialChars guards the regression where FTS5 syntax chars in a
+// user query were passed through to MATCH and crashed the parser, e.g.
+// `fts5: syntax error near ","`. phraseFTSQuery now quotes every token, so no
+// special char can be parsed as query syntax. Each query must parse and still
+// surface the seeded "phone mapping" memory.
+func TestSearch_FTS5SpecialChars(t *testing.T) {
+	s := newTestStore(t)
+	seedMemories(t, s)
+
+	queries := []string{
+		"phone, mapping",     // comma — the original crash
+		"phone: mapping",     // colon — column-filter syntax
+		"(phone) mapping",    // parens — grouping syntax
+		"phone OR mapping",   // OR keyword as literal text
+		"phone NOT mapping",  // NOT keyword as literal text
+		"phone NEAR mapping", // NEAR keyword as literal text
+		"phone^2 mapping",    // caret
+		"phone* mapping",     // trailing wildcard
+		`phone "mapping`,     // unbalanced double-quote
+		"-phone mapping",     // leading hyphen (old NOT operator)
+	}
+	for _, q := range queries {
+		resp, err := s.Search(store.SearchRequest{Query: q})
+		if err != nil {
+			t.Errorf("query %q errored (should parse): %v", q, err)
+			continue
+		}
+		if len(resp.Results) == 0 {
+			t.Errorf("query %q parsed but matched nothing (expected phone-mapping memory)", q)
+		}
+	}
+}
+
+// TestSearch_OnlyPunctuation returns empty (no tokens) rather than crashing on an
+// empty MATCH expression.
+func TestSearch_OnlyPunctuation(t *testing.T) {
+	s := newTestStore(t)
+	seedMemories(t, s)
+
+	resp, err := s.Search(store.SearchRequest{Query: ",,, ::: ()"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if resp.Results == nil {
+		t.Error("expected empty slice, got nil")
+	}
+	if len(resp.Results) != 0 {
+		t.Errorf("expected 0 results, got %d", len(resp.Results))
+	}
+}

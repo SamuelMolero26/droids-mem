@@ -52,7 +52,12 @@ func (s *Store) Context(req ContextRequest) (*ContextResponse, error) {
 	if rawQuery == "" {
 		rawQuery = taskType
 	}
-	ftsQuery := orJoin(sanitizeFTSQuery(rawQuery))
+	ftsQuery := phraseFTSQuery(rawQuery)
+	if ftsQuery == "" {
+		// rawQuery was all punctuation/no tokens; fall back to the task_type
+		// (always a non-empty alphanumeric slug) so the browse tier still ranks.
+		ftsQuery = phraseFTSQuery(taskType)
+	}
 
 	resp := &ContextResponse{
 		TaskType:  taskType,
@@ -209,18 +214,6 @@ func fetchBrowseKindConn(ctx context.Context, conn *sql.Conn, ftsQuery, taskType
 		out = append(out, m)
 	}
 	return out, rows.Err()
-}
-
-// orJoin converts a space-separated query into an FTS5 OR expression so a
-// browse-tier match surfaces on ANY term overlap. The default AND joiner is
-// too strict for orienting context retrieval — agents pass approximate
-// terms and want recall over precision here.
-func orJoin(q string) string {
-	parts := strings.Fields(q)
-	if len(parts) <= 1 {
-		return q
-	}
-	return strings.Join(parts, " OR ")
 }
 
 // snippet truncates s to at most n runes (NOT bytes) so multi-byte UTF-8

@@ -48,7 +48,12 @@ func (s *Store) Search(req SearchRequest) (*SearchResponse, error) {
 		limit = maxSearchLimit
 	}
 
-	ftsQuery := sanitizeFTSQuery(req.Query)
+	ftsQuery := phraseFTSQuery(req.Query)
+	if ftsQuery == "" {
+		// Query had no searchable tokens (e.g. all punctuation). Nothing can
+		// match; return empty rather than run MATCH on an empty expression.
+		return &SearchResponse{Results: []SearchResult{}, Total: 0}, nil
+	}
 
 	// build WHERE clause — only hardcoded strings in the format string, user values in args
 	conditions := []string{"memories_fts MATCH ?"}
@@ -108,20 +113,32 @@ func (s *Store) Search(req SearchRequest) (*SearchResponse, error) {
 	return &SearchResponse{Results: results, Total: total}, nil
 }
 
-// sanitizeFTSQuery strips FTS5 operator chars to prevent MATCH injection.
-// User values always go through ? placeholders; only the query string itself
-// needs sanitization.
+// phraseFTSQuery converts arbitrary user text into a safe FTS5 MATCH expression.
 //
-// `*` is also stripped — trigram tokenizer (see schema.go) provides substring
-// match natively, so prefix wildcards are unnecessary and would cause the
-// FTS5 parser to error on bare `*`.
+// Every whitespace-delimited token is wrapped as a quoted phrase literal and the
+// tokens are OR-joined. Quoting is the FTS5-sanctioned "treat as literal"
+// construct: inside "..." no character carries operator meaning, so no user input
+// — comma, colon, paren, or an OR/NOT/NEAR keyword — can be (mis)parsed as query
+// syntax. The only char that can escape a phrase is a literal double-quote, which
+// FTS5 expects doubled ("").
 //
-// Asymmetry with save.go nearDuplicateConn (which quotes every token as a
-// phrase literal): this path is caller-driven — the query string carries
-// caller intent and operator chars like `-` (NOT) are preserved on purpose.
-// nearDuplicateConn treats Memory content as the query (no operator intent),
-// so it locks down harder. See ADR-0003.
-func sanitizeFTSQuery(q string) string {
-	q = strings.NewReplacer(`"`, ``, `(`, ``, `)`, ``, `*`, ``, `^`, ``).Replace(q)
-	return strings.TrimSpace(reWhitespace.ReplaceAllString(q, " "))
+// This supersedes the earlier strip-operator-chars blocklist, which crashed on any
+// unlisted syntax char (e.g. `fts5: syntax error near ","`). Robustness is by
+// construction here, not by enumeration. No caller of Search or Context passes
+// FTS5 operator DSL — both feed free-text (user prompts, TUI search box) — so
+// OR-of-phrases loses no real capability. This also unifies with save.go's
+// nearDuplicateConn, which already quotes. See ADR-0003.
+//
+// Returns "" when the input has no tokens (e.g. all punctuation); callers MUST
+// treat that as "no searchable terms" and skip the MATCH rather than run it on "".
+func phraseFTSQuery(q string) string {
+	parts := strings.Fields(q)
+	if len(parts) == 0 {
+		return ""
+	}
+	quoted := make([]string, len(parts))
+	for i, p := range parts {
+		quoted[i] = `"` + strings.ReplaceAll(p, `"`, `""`) + `"`
+	}
+	return strings.Join(quoted, " OR ")
 }

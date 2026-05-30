@@ -77,6 +77,47 @@ func TestContext_ReturnsLastSession(t *testing.T) {
 	}
 }
 
+// TestContext_QueryWithSpecialChars is the direct regression for the reported
+// crash: a raw user prompt carrying a comma reached the browse-tier MATCH and
+// produced `fts5: syntax error near ","`, so mem_context returned isError and the
+// agent saw "no parseable payload". phraseFTSQuery now quotes every token; the
+// call must succeed and still surface the browse tier.
+func TestContext_QueryWithSpecialChars(t *testing.T) {
+	s := newTestStore(t)
+	seedContextFixture(t, s)
+
+	queries := []string{
+		"Research costs, OpenAI vs Anthropic", // the original comma crash
+		"map phone: field (hubspot)",          // colon + parens
+		"phone OR mapping NOT csv",            // operator keywords as literals
+	}
+	for _, q := range queries {
+		resp, err := s.Context(store.ContextRequest{TaskType: "crm_upload", Query: q})
+		if err != nil {
+			t.Errorf("Context query %q errored (should parse): %v", q, err)
+			continue
+		}
+		if resp == nil {
+			t.Errorf("Context query %q returned nil response", q)
+		}
+	}
+}
+
+// TestContext_OnlyPunctuationQuery falls back to task_type tokens when the query
+// has no real terms, rather than running MATCH on an empty expression.
+func TestContext_OnlyPunctuationQuery(t *testing.T) {
+	s := newTestStore(t)
+	seedContextFixture(t, s)
+
+	resp, err := s.Context(store.ContextRequest{TaskType: "crm_upload", Query: ",,, :::"})
+	if err != nil {
+		t.Fatalf("Context: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected response, got nil")
+	}
+}
+
 func TestContext_NoSessionSummary_LastSessionIsNil(t *testing.T) {
 	s := newTestStore(t)
 	s.Save(store.SaveRequest{
