@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/samuelmolero/droids-mem/internal/store"
+	"github.com/SamuelMolero26/droids-mem/internal/store"
 )
 
 func TestScrubStats_EmptyCorpus(t *testing.T) {

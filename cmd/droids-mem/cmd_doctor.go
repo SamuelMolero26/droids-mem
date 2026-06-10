@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/samuelmolero/droids-mem/internal/db"
+	"github.com/SamuelMolero26/droids-mem/internal/db"
 	"github.com/spf13/cobra"
 )
 

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/samuelmolero/droids-mem/internal/store"
+	"github.com/SamuelMolero26/droids-mem/internal/store"
 )
 
 // ---------- scope ----------
