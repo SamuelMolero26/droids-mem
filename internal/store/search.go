@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"fmt"
 	"strings"
 )
@@ -32,7 +33,7 @@ type SearchResponse struct {
 	Total   int            `json:"total"`
 }
 
-func (s *Store) Search(req SearchRequest) (*SearchResponse, error) {
+func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse, error) {
 	if strings.TrimSpace(req.Query) == "" {
 		return nil, &ValidationError{Field: "query", Message: "required"}
 	}
@@ -71,6 +72,8 @@ func (s *Store) Search(req SearchRequest) (*SearchResponse, error) {
 
 	// count total matches before pagination so callers can decide whether
 	// to fetch more pages. Same WHERE, no LIMIT.
+	// #nosec G201 -- whereClause is assembled from hardcoded condition
+	// strings only; every user value is bound via ? placeholders.
 	countStmt := fmt.Sprintf(`
 		SELECT count(*)
 		FROM memories_fts fts
@@ -78,11 +81,12 @@ func (s *Store) Search(req SearchRequest) (*SearchResponse, error) {
 		WHERE %s
 	`, whereClause)
 	var total int
-	if err := s.db.QueryRow(countStmt, args...).Scan(&total); err != nil {
+	if err := s.db.QueryRowContext(ctx, countStmt, args...).Scan(&total); err != nil {
 		return nil, fmt.Errorf("search count: %w", err)
 	}
 
 	pageArgs := append(args, limit)
+	// #nosec G201 -- same as above: hardcoded conditions, parameterized values.
 	stmt := fmt.Sprintf(`
 		SELECT m.id, m.kind, m.title, m.learned, m.task_type, m.created_at, fts.rank
 		FROM memories_fts fts
@@ -92,7 +96,7 @@ func (s *Store) Search(req SearchRequest) (*SearchResponse, error) {
 		LIMIT ?
 	`, whereClause)
 
-	rows, err := s.db.Query(stmt, pageArgs...)
+	rows, err := s.db.QueryContext(ctx, stmt, pageArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("search query: %w", err)
 	}

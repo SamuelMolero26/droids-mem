@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -32,7 +33,7 @@ type ListResponse struct {
 	Total    int      `json:"total"`
 }
 
-func (s *Store) List(req ListRequest) (*ListResponse, error) {
+func (s *Store) List(ctx context.Context, req ListRequest) (*ListResponse, error) {
 	if req.Kind != "" && !validKinds[req.Kind] {
 		return nil, &ValidationError{Field: "kind", Message: "must be one of: error_resolution, task_pattern, user_rule, session_summary"}
 	}
@@ -70,7 +71,7 @@ func (s *Store) List(req ListRequest) (*ListResponse, error) {
 		LIMIT ?
 	`, where)
 
-	rows, err := s.db.Query(stmt, args...)
+	rows, err := s.db.QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list query: %w", err)
 	}
@@ -91,13 +92,13 @@ func (s *Store) List(req ListRequest) (*ListResponse, error) {
 	return &ListResponse{Memories: memories, Total: len(memories)}, nil
 }
 
-func (s *Store) Get(id string) (*Memory, error) {
+func (s *Store) Get(ctx context.Context, id string) (*Memory, error) {
 	if strings.TrimSpace(id) == "" {
 		return nil, &ValidationError{Field: "id", Message: "required"}
 	}
 
 	var m Memory
-	err := s.db.QueryRow(`
+	err := s.db.QueryRowContext(ctx, `
 		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at
 		FROM memories WHERE id = ?
 	`, id).Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt)

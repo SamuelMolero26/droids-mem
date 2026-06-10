@@ -1,11 +1,13 @@
 package main
 
 import (
+	"errors"
+
 	"github.com/samuelmolero/droids-mem/internal/store"
 	"github.com/spf13/cobra"
 )
 
-func newContextCmd(s *store.Store) *cobra.Command {
+func newContextCmd(a *app) *cobra.Command {
 	var (
 		taskType string
 		query    string
@@ -23,12 +25,17 @@ deep-read any browse-tier item.`,
 		Example: `  droids-mem context --task-type crm_upload
   droids-mem context --task-type crm_upload --query "hubspot phone field mapping"`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resp, err := s.Context(store.ContextRequest{
+			s, err := a.store()
+			if err != nil {
+				return err
+			}
+			resp, err := s.Context(cmd.Context(), store.ContextRequest{
 				TaskType: taskType,
 				Query:    query,
 			})
 			if err != nil {
-				if ve, ok := err.(*store.ValidationError); ok {
+				var ve *store.ValidationError
+				if errors.As(err, &ve) {
 					writeError("validation_failed", ve.Message, false,
 						withField(ve.Field),
 						withSuggestion("provide --"+ve.Field),
@@ -46,7 +53,7 @@ deep-read any browse-tier item.`,
 	cmd.Flags().StringVar(&taskType, "task-type", "", "Task type to load context for (required)")
 	cmd.Flags().StringVar(&query, "query", "", "Optional FTS query for browse-tier ranking (defaults to task-type tokens)")
 
-	cmd.MarkFlagRequired("task-type")
+	_ = cmd.MarkFlagRequired("task-type")
 
 	return cmd
 }

@@ -1,0 +1,364 @@
+# Scrub fixture corpus — v1.0 pattern set.
+#
+# Categories:
+#   positive — input contains a real secret; expected MUST show the redaction
+#              token and counts MUST report the pattern that fired.
+#   negative — input looks secret-ish but should pass through untouched;
+#              expected == input and counts is empty.
+#
+# Defang convention: every secret-shaped fixture embeds a [CUT] marker just
+# after the token prefix (e.g. "ghp_[CUT]FIXTURE..."). Loaders (corpus.go +
+# scrub_test.go) strip it before running Scrub, so the at-rest YAML never
+# matches any secret scanner shape (GitHub push protection, GitGuardian)
+# while tests still exercise the real token shapes.
+#
+# Adding a case: pick a unique `name`, set `category`, write input/expected,
+# fill `counts` with {pattern_name: int}. Run `go test ./internal/store -run
+# TestScrub` to verify. False-positive sweeps: `go test -run TestScrub/negative`.
+
+cases:
+  # --- pem_key ---
+  - name: pem_key_rsa
+    category: positive
+    input: |-
+      key:
+      -----BEGIN RSA[CUT] PRIVATE KEY-----
+      FIXTURE_NOTAREAL_RSA_PRIVATE_KEY_BODY_DEFANGED_LINE_ONE
+      FIXTURE_NOTAREAL_RSA_PRIVATE_KEY_BODY_DEFANGED_LINE_TWO
+      -----END RSA[CUT] PRIVATE KEY-----
+      eof
+    expected: |-
+      key:
+      [PEM_KEY]
+      eof
+    counts:
+      pem_key: 1
+
+  - name: pem_key_ec
+    category: positive
+    input: |-
+      -----BEGIN EC[CUT] PRIVATE KEY-----
+      FIXTURE_NOTAREAL_EC_PRIVATE_KEY_BODY_DEFANGED
+      -----END EC[CUT] PRIVATE KEY-----
+    expected: "[PEM_KEY]"
+    counts:
+      pem_key: 1
+
+  - name: pem_key_negative_public
+    category: negative
+    input: |-
+      -----BEGIN PUBLIC KEY-----
+      abc
+      -----END PUBLIC KEY-----
+    expected: |-
+      -----BEGIN PUBLIC KEY-----
+      abc
+      -----END PUBLIC KEY-----
+    counts: {}
+
+  # --- jwt ---
+  - name: jwt_three_parts
+    category: positive
+    input: "token: eyJ[CUT]FIXTURE_HEADER_NOTAREAL.eyJ[CUT]FIXTURE_PAYLOAD_NOTAREAL.FIXTURE_SIGNATURE_NOTAREAL done"
+    expected: "token: [JWT] done"
+    counts:
+      jwt: 1
+
+  - name: jwt_negative_one_segment
+    category: negative
+    input: "eyJ_only_one_segment_here"
+    expected: "eyJ_only_one_segment_here"
+    counts: {}
+
+  # --- aws_key ---
+  - name: aws_access_key_akia
+    category: positive
+    input: "aws_key=AKIAIOSFODNN7EXAMPLE in config"
+    expected: "aws_key=[AWS_KEY] in config"
+    counts:
+      aws_key: 1
+
+  - name: aws_session_asia
+    category: positive
+    input: "session=ASIAIOSFODNN7EXAMPLE here"
+    expected: "session=[AWS_KEY] here"
+    counts:
+      aws_key: 1
+
+  - name: aws_negative_lowercase
+    category: negative
+    input: "akiaiosfodnn7example is lowercase"
+    expected: "akiaiosfodnn7example is lowercase"
+    counts: {}
+
+  - name: aws_negative_wrong_length
+    category: negative
+    input: "AKIA0123 too short"
+    expected: "AKIA0123 too short"
+    counts: {}
+
+  # --- github_token ---
+  - name: github_pat
+    category: positive
+    input: "ghp_[CUT]FIXTURENOTAREALGITHUBPERSONALACCESSTOKENABCDEF use this"
+    expected: "[GITHUB_TOKEN] use this"
+    counts:
+      github_token: 1
+
+  - name: github_oauth
+    category: positive
+    input: "token=gho_[CUT]FIXTURENOTAREALGITHUBOAUTHTOKENABCDEFGHIJ"
+    expected: "token=[GITHUB_TOKEN]"
+    counts:
+      github_token: 1
+
+  - name: github_negative_short
+    category: negative
+    input: "ghp_short"
+    expected: "ghp_short"
+    counts: {}
+
+  # --- stripe_key ---
+  - name: stripe_test_secret
+    category: positive
+    input: "stripe=sk_test_[CUT]FIXTURENOTAREALSTRIPESECRET01"
+    expected: "stripe=[STRIPE_KEY]"
+    counts:
+      stripe_key: 1
+
+  - name: stripe_test_publishable
+    category: positive
+    input: "pk_test_[CUT]FIXTURENOTAREALSTRIPEPUBLISHABLE01 here"
+    expected: "[STRIPE_KEY] here"
+    counts:
+      stripe_key: 1
+
+  - name: stripe_negative_no_env
+    category: negative
+    input: "sk_abcdefghijklmnopqrst missing env segment"
+    expected: "sk_abcdefghijklmnopqrst missing env segment"
+    counts: {}
+
+  # --- slack_token ---
+  - name: slack_bot_token
+    category: positive
+    input: "slack=xoxb-[CUT]EXAMPLE-FIXTURE-NOTAREAL-SLACK-TOKEN"
+    expected: "slack=[SLACK_TOKEN]"
+    counts:
+      slack_token: 1
+
+  - name: slack_negative_short
+    category: negative
+    input: "xoxb-short"
+    expected: "xoxb-short"
+    counts: {}
+
+  # --- anthropic_key ---
+  - name: anthropic_api_key
+    category: positive
+    input: "key=sk-ant-[CUT]FIXTURE-NOTAREAL-ANTHROPIC-API-KEY-EXAMPLE-FIXTURE-12345 done"
+    expected: "key=[ANTHROPIC_KEY] done"
+    counts:
+      anthropic_key: 1
+
+  - name: anthropic_wins_over_openai
+    category: positive
+    input: "sk-ant-[CUT]FIXTURE-NOTAREAL-ANTHROPIC-API-KEY-EXAMPLE-FIXTURE-67890-A"
+    expected: "[ANTHROPIC_KEY]"
+    counts:
+      anthropic_key: 1
+
+  # --- openai_key ---
+  - name: openai_secret
+    category: positive
+    input: "openai sk-[CUT]FIXTURE-NOTAREAL-OPENAI-KEY-EX01 leak"
+    expected: "openai [OPENAI_KEY] leak"
+    counts:
+      openai_key: 1
+
+  - name: openai_negative_too_short
+    category: negative
+    input: "sk-short"
+    expected: "sk-short"
+    counts: {}
+
+  # --- phone (E.164 strict) ---
+  - name: phone_e164
+    category: positive
+    input: "call +14155552671 anytime"
+    expected: "call [PHONE] anytime"
+    counts:
+      phone: 1
+
+  - name: phone_negative_no_plus
+    category: negative
+    input: "14155552671 missing plus"
+    expected: "14155552671 missing plus"
+    counts: {}
+
+  - name: phone_negative_separators
+    category: negative
+    input: "+1-415-555-2671 has dashes"
+    expected: "+1-415-555-2671 has dashes"
+    counts: {}
+    # Strict E.164 needs ≥2 digits after '+' before non-digit; "+1-" breaks
+    # at the dash so no match fires. Separators block detection on purpose.
+
+  # --- private_ipv4 ---
+  - name: private_ip_10
+    category: positive
+    input: "host 10.0.0.5 unreachable"
+    expected: "host [PRIVATE_IP] unreachable"
+    counts:
+      private_ipv4: 1
+
+  - name: private_ip_192
+    category: positive
+    input: "192.168.1.1 router"
+    expected: "[PRIVATE_IP] router"
+    counts:
+      private_ipv4: 1
+
+  - name: private_ip_172
+    category: positive
+    input: "172.16.0.10 internal"
+    expected: "[PRIVATE_IP] internal"
+    counts:
+      private_ipv4: 1
+
+  - name: private_ip_127
+    category: positive
+    input: "127.0.0.1 localhost"
+    expected: "[PRIVATE_IP] localhost"
+    counts:
+      private_ipv4: 1
+
+  - name: private_ip_negative_public
+    category: negative
+    input: "8.8.8.8 is public"
+    expected: "8.8.8.8 is public"
+    counts: {}
+
+  - name: private_ip_negative_172_outside_range
+    category: negative
+    input: "172.15.0.1 outside private range"
+    expected: "172.15.0.1 outside private range"
+    counts: {}
+
+  - name: private_ip_negative_octet_overflow
+    category: negative
+    input: "10.0.0.999 invalid octet"
+    expected: "10.0.0.999 invalid octet"
+    counts: {}
+
+  # --- email ---
+  - name: email_basic
+    category: positive
+    input: "ping alice@example.com please"
+    expected: "ping [EMAIL] please"
+    counts:
+      email: 1
+
+  - name: email_plus_address
+    category: positive
+    input: "bob+filter@sub.example.co.uk"
+    expected: "[EMAIL]"
+    counts:
+      email: 1
+
+  - name: email_negative_missing_tld
+    category: negative
+    input: "alice@local incomplete"
+    expected: "alice@local incomplete"
+    counts: {}
+
+  # --- combo / interaction ---
+  - name: combo_email_and_ip
+    category: positive
+    input: "alice@example.com from 10.0.0.5"
+    expected: "[EMAIL] from [PRIVATE_IP]"
+    counts:
+      email: 1
+      private_ipv4: 1
+
+  - name: combo_two_emails
+    category: positive
+    input: "a@b.co talks to c@d.io"
+    expected: "[EMAIL] talks to [EMAIL]"
+    counts:
+      email: 2
+
+  - name: combo_overlap_anthropic_vs_openai
+    category: positive
+    input: "leak sk-ant-[CUT]FIXTURE-NOTAREAL-OVERLAP-VS-OPENAI-EXAMPLE-12345-FIXTURE rest"
+    expected: "leak [ANTHROPIC_KEY] rest"
+    counts:
+      anthropic_key: 1
+
+  - name: empty_input
+    category: negative
+    input: ""
+    expected: ""
+    counts: {}
+
+  - name: no_match_passthrough
+    category: negative
+    input: "just normal text with numbers 123 and words"
+    expected: "just normal text with numbers 123 and words"
+    counts: {}
+
+  # --- github_pat (v2) ---
+  - name: github_pat_fine_grained
+    category: positive
+    input: "auth failed with github_pat_[CUT]FIXTURE_NOTAREAL_FINE_GRAINED_PAT_EXAMPLE_DEFANGED retry"
+    expected: "auth failed with [GITHUB_TOKEN] retry"
+    counts:
+      github_pat: 1
+
+  - name: github_pat_too_short
+    category: negative
+    input: "mentioned github_pat_short in docs"
+    expected: "mentioned github_pat_short in docs"
+    counts: {}
+
+  # --- gitlab_pat (v2) ---
+  - name: gitlab_pat_basic
+    category: positive
+    input: "CI used glpat-[CUT]FIXTURE-NOTAREAL-GITLAB-PAT token"
+    expected: "CI used [GITLAB_TOKEN] token"
+    counts:
+      gitlab_pat: 1
+
+  - name: gitlab_pat_too_short
+    category: negative
+    input: "glpat-short is not a token"
+    expected: "glpat-short is not a token"
+    counts: {}
+
+  # --- google_api_key (v2) ---
+  - name: google_api_key_basic
+    category: positive
+    input: "maps key AIza[CUT]SyFIXTURENOTAREALGOOGLEAPIKEY012345 used"
+    expected: "maps key [GOOGLE_KEY] used"
+    counts:
+      google_api_key: 1
+
+  - name: google_api_key_wrong_length
+    category: negative
+    input: "AIzaShort is fine"
+    expected: "AIzaShort is fine"
+    counts: {}
+
+  # --- npm_token (v2) ---
+  - name: npm_token_basic
+    category: positive
+    input: "publish used npm_[CUT]FIXTURENOTAREALNPMTOKEN0123456789ABC then failed"
+    expected: "publish used [NPM_TOKEN] then failed"
+    counts:
+      npm_token: 1
+
+  - name: npm_token_package_name
+    category: negative
+    input: "installed npm_package_helper from registry"
+    expected: "installed npm_package_helper from registry"
+    counts: {}

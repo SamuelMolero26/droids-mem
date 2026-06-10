@@ -98,5 +98,8 @@ func explainPlan(t *testing.T, conn *sql.DB, q string, args ...any) string {
 		sb.WriteString(detail)
 		sb.WriteByte('\n')
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("EQP rows: %v", err)
+	}
 	return sb.String()
 }

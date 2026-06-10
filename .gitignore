@@ -1,0 +1,41 @@
+# Compiled binary
+/droids-mem
+*.exe
+
+# Test artifacts
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Local DBs / runtime state
+*.db
+*.db-wal
+*.db-shm
+
+# CodeGraph index (regenerable)
+.codegraph/
+
+# Claude configuration and skills (local/regenerable)
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Env (defensive — repo doesn't currently use .env but cheap insurance)
+.env
+.env.*
+!.env.example
+
+# Documentation and files (regenerable / personal)
+/docs/
+/files/
+future.todo
+CONTEXT.md

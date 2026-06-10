@@ -42,7 +42,7 @@ type ContextResponse struct {
 	Browse      []ContextMemory `json:"browse"`
 }
 
-func (s *Store) Context(req ContextRequest) (*ContextResponse, error) {
+func (s *Store) Context(ctx context.Context, req ContextRequest) (*ContextResponse, error) {
 	taskType := strings.ToLower(strings.TrimSpace(req.TaskType))
 	if taskType == "" {
 		return nil, &ValidationError{Field: "task_type", Message: "required"}
@@ -72,7 +72,6 @@ func (s *Store) Context(req ContextRequest) (*ContextResponse, error) {
 	// state (e.g. retention prune deleted the old session_summary, new one
 	// not yet committed → LastSession is stale or missing while browse-tier
 	// rows reference the new session_id).
-	ctx := context.Background()
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("acquire conn: %w", err)
@@ -84,7 +83,8 @@ func (s *Store) Context(req ContextRequest) (*ContextResponse, error) {
 	committed := false
 	defer func() {
 		if !committed {
-			conn.ExecContext(ctx, "ROLLBACK")
+			// Background ctx so cleanup still runs after request cancellation.
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 		}
 	}()
 
@@ -135,13 +135,20 @@ func fetchLastSessionConn(ctx context.Context, conn *sql.Conn, taskType string) 
 	return &m, nil
 }
 
+// maxAlwaysTierUserRules bounds the always-tier user_rule slice so the
+// context bundle payload stays within the PRD §3.2 budget. Older rules stay
+// reachable via `mem_search kind=user_rule` — they're only dropped from the
+// auto-orientation tier, not from the database. Locked decision #20.
+const maxAlwaysTierUserRules = 5
+
 func fetchAllUserRulesConn(ctx context.Context, conn *sql.Conn, taskType string) ([]ContextMemory, error) {
 	rows, err := conn.QueryContext(ctx, `
 		SELECT id, kind, title, learned, created_at
 		FROM memories
 		WHERE task_type = ? AND kind = 'user_rule'
 		ORDER BY created_at DESC
-	`, taskType)
+		LIMIT ?
+	`, taskType, maxAlwaysTierUserRules)
 	if err != nil {
 		return nil, fmt.Errorf("fetch user rules: %w", err)
 	}

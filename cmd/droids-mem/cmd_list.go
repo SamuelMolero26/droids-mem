@@ -1,11 +1,13 @@
 package main
 
 import (
+	"errors"
+
 	"github.com/samuelmolero/droids-mem/internal/store"
 	"github.com/spf13/cobra"
 )
 
-func newListCmd(s *store.Store) *cobra.Command {
+func newListCmd(a *app) *cobra.Command {
 	var (
 		taskType string
 		kind     string
@@ -19,13 +21,18 @@ func newListCmd(s *store.Store) *cobra.Command {
   droids-mem list --task-type crm_upload
   droids-mem list --kind error_resolution --limit 10`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resp, err := s.List(store.ListRequest{
+			s, err := a.store()
+			if err != nil {
+				return err
+			}
+			resp, err := s.List(cmd.Context(), store.ListRequest{
 				TaskType: taskType,
 				Kind:     kind,
 				Limit:    limit,
 			})
 			if err != nil {
-				if ve, ok := err.(*store.ValidationError); ok {
+				var ve *store.ValidationError
+				if errors.As(err, &ve) {
 					writeError("validation_failed", ve.Message, false,
 						withField(ve.Field),
 						withSuggestion("check --"+ve.Field+" value"),

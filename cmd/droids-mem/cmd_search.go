@@ -1,11 +1,13 @@
 package main
 
 import (
+	"errors"
+
 	"github.com/samuelmolero/droids-mem/internal/store"
 	"github.com/spf13/cobra"
 )
 
-func newSearchCmd(s *store.Store) *cobra.Command {
+func newSearchCmd(a *app) *cobra.Command {
 	var (
 		query    string
 		taskType string
@@ -20,14 +22,19 @@ func newSearchCmd(s *store.Store) *cobra.Command {
   droids-mem search --query "phone" --task-type crm_upload --kind error_resolution
   droids-mem search --query "auth failure" --limit 10`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resp, err := s.Search(store.SearchRequest{
+			s, err := a.store()
+			if err != nil {
+				return err
+			}
+			resp, err := s.Search(cmd.Context(), store.SearchRequest{
 				Query:    query,
 				TaskType: taskType,
 				Kind:     kind,
 				Limit:    limit,
 			})
 			if err != nil {
-				if ve, ok := err.(*store.ValidationError); ok {
+				var ve *store.ValidationError
+				if errors.As(err, &ve) {
 					writeError("validation_failed", ve.Message, false,
 						withField(ve.Field),
 						withSuggestion("provide --"+ve.Field),
@@ -47,7 +54,7 @@ func newSearchCmd(s *store.Store) *cobra.Command {
 	cmd.Flags().StringVar(&kind, "kind", "", "Filter by kind: error_resolution|task_pattern|user_rule|session_summary")
 	cmd.Flags().IntVar(&limit, "limit", 5, "Max results to return (default 5, max 20)")
 
-	cmd.MarkFlagRequired("query")
+	_ = cmd.MarkFlagRequired("query")
 
 	return cmd
 }

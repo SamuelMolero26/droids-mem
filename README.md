@@ -1,0 +1,259 @@
+# droids-mem
+
+Persistent memory for AI agents. SQLite + FTS5, single binary, zero external
+dependencies. CLI for humans; an MCP bridge for agents.
+
+- **What it stores:** structured lessons — session summaries, task patterns,
+  error resolutions, user rules — written by an agent and replayed at the start
+  of the next run.
+- **What it does on save:** validates → scrubs PII → fingerprint-dedupes →
+  near-dup-dedupes (BM25 + Jaccard) → persists. All inside one
+  `BEGIN IMMEDIATE` transaction.
+- **What it does on read:** a two-tier context bundle — `always` (last session
+  + user rules, full body) + `browse` (top error resolutions + task patterns,
+  snippets) — keyed on `task_type`.
+
+Single global DB at `~/.droids-mem/mem.db`. No service, no daemon required;
+the MCP bridge spawns on demand via `ensure-server`.
+
+> Status: **v1.0.0** (2026-06-09). Workspaces (ADR-0005) and git-JSONL sync
+> (ADR-0006) ship in v1.1 / v1.2. See [CHANGELOG.md](CHANGELOG.md).
+
+---
+
+## Install
+
+### `go install`
+
+```
+go install github.com/samuelmolero/droids-mem/cmd/droids-mem@latest
+```
+
+Requires Go 1.25+. The binary is pure-Go (`modernc.org/sqlite`), so it builds
+without CGO.
+
+### Prebuilt binaries
+
+Each release attaches binaries + `.sha256` checksums for
+`linux/{amd64,arm64}` and `darwin/{amd64,arm64}` on the
+[Releases page](https://github.com/samuelmolero/droids-mem/releases).
+
+```
+curl -L -o droids-mem \
+  https://github.com/samuelmolero/droids-mem/releases/download/v1.0.0/droids-mem-v1.0.0-darwin-arm64
+chmod +x droids-mem
+./droids-mem --version
+```
+
+### Build from source
+
+```
+git clone https://github.com/samuelmolero/droids-mem
+cd droids-mem
+go build ./cmd/droids-mem
+./droids-mem --version
+```
+
+---
+
+## Quick start
+
+```
+# Save a lesson the agent learned
+droids-mem save \
+  --task-type "go-backend" \
+  --kind error_resolution \
+  --title "modernc sqlite returns Error code 5 on FTS5 trigger rebuild" \
+  --what "memories_fts rebuild in same txn as ALTER TABLE deadlocked under contention" \
+  --learned "DROP + INSERT-SELECT must run after the parent ALTER commits"
+
+# Search by full-text
+droids-mem search --query "fts5 rebuild" --limit 5
+
+# Load context for the start of a run
+droids-mem context --task-type "go-backend"
+
+# Health check + scrub stats
+droids-mem doctor --scrub-stats
+```
+
+All output is JSON to stdout; errors are JSON to stderr. Exit codes:
+`0` ok, `1` runtime, `2` usage, `3` not found, `5` conflict/duplicate,
+`10` dry-run pass.
+
+### First run on an existing pre-v1.0 database
+
+v1.0 refuses to boot against a database that has not been baselined through
+the scrub pipeline. Pick one:
+
+```
+droids-mem migrate --rescrub      # rewrite every row through the scrub pipeline
+droids-mem migrate --no-rescrub   # acknowledge plaintext, set the sentinel only
+```
+
+Both forms are atomic per DB. After either completes, the v1.0 binary boots.
+Fresh installs do not need this step — the baseline sentinel is written by the
+first `db.Init` on a new file.
+
+---
+
+## PII scrub behaviour
+
+On every `save`, `title` / `what` / `learned` are scrubbed in a single pass.
+Tags are checked against the same patterns and the save is **rejected** if any
+tag matches (`tag_contains_secret`, `retryable:true`).
+
+Pattern set, in declaration order (longer wins, tie → earlier wins):
+
+| # | Pattern | Token |
+|---|---------|-------|
+| 1 | PEM private key block | `[PEM_KEY]` |
+| 2 | JWT (`xxx.yyy.zzz`) | `[JWT]` |
+| 3 | AWS access key (`AKIA…`, `ASIA…`) | `[AWS_KEY]` |
+| 4 | GitHub token (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`) | `[GITHUB_TOKEN]` |
+| 5 | Stripe key (`sk_live_`, `pk_live_`, …) | `[STRIPE_KEY]` |
+| 6 | Slack token (`xoxa-`, `xoxb-`, `xoxp-`, `xoxr-`, `xoxs-`) | `[SLACK_TOKEN]` |
+| 7 | Anthropic API key (`sk-ant-`) | `[ANTHROPIC_KEY]` |
+| 8 | OpenAI API key (`sk-`, `sk-proj-`) | `[OPENAI_KEY]` |
+| 9 | US SSN (`XXX-XX-XXXX`) | `[SSN]` |
+| 10 | Credit card (Luhn-validated) | `[CC]` |
+| 11 | Phone (E.164) | `[PHONE]` |
+| 12 | Private IPv4 (RFC 1918 + loopback) | `[PRIVATE_IP]` |
+| 13 | Email | `[EMAIL]` |
+
+Empty-after-scrub on `learned` rejects the save with `scrub_emptied_learned`.
+Save responses include a `scrub` block whenever `redaction_count > 0`.
+
+Ad-hoc check without touching the DB:
+
+```
+droids-mem scrub --check /path/to/some.log
+droids-mem scrub --test                  # run the fixture corpus
+droids-mem doctor --scrub-stats          # aggregate counts across DB rows
+```
+
+Field caps: `title=200`, `what=8192`, `learned=4096`, `tags=500`. Exceeding any
+returns `field_too_large`.
+
+---
+
+## Configuration
+
+All optional. Defaults match a single-user laptop install.
+
+| Var | Default | Notes |
+|-----|---------|-------|
+| `DROIDS_MEM_DB` | `~/.droids-mem/mem.db` | DB file path |
+| `DROIDS_MEM_HOME` | `~/.droids-mem/` | token, pid, log files |
+| `DROIDS_MEM_MCP_TOKEN` | auto-generated | Bearer token for `/mcp` |
+| `DROIDS_MEM_MCP_ADDR` | `127.0.0.1:7777` | Bind address (non-loopback logs a warning) |
+| `DROIDS_MEM_MCP_ENDPOINT` | `/mcp` | `/healthz` + `/identity` always unauthenticated |
+
+State dir layout: `mem.db` (0600), `token` (0600), `mcp.pid`, `mcp.log`.
+
+---
+
+## MCP bridge
+
+The agent-facing surface. Four tools:
+
+- `mem_save` — persist a lesson. Accepts an optional `scope` (`personal` |
+  `shared`, default `shared`).
+- `mem_search` — full-text search with BM25 ranking.
+- `mem_context` — two-tier context bundle for a `task_type`. Mints a stateless
+  `session_id` the agent threads through subsequent calls.
+- `mem_get` — fetch a single memory by ID.
+
+Operator commands (`list`, `schema`, `doctor`, `migrate`, `scrub`) are
+**intentionally** not exposed over MCP.
+
+```
+droids-mem ensure-server   # ping /healthz, spawn detached serve if down
+droids-mem serve           # foreground MCP bridge
+```
+
+Auth is `Authorization: Bearer <token>`. `/identity?nonce=<n>` answers
+`HMAC-SHA256(token, nonce)` so callers can verify the listener actually holds
+the token (anti port-squatting).
+
+---
+
+## Subcommand index
+
+| Command | Summary |
+|---------|---------|
+| `save` | Save a structured memory |
+| `search` | Search memories using full-text search |
+| `context` | Load start-of-run context bundle for a task type |
+| `get` | Get a single memory by ID |
+| `list` | List recent memories |
+| `doctor` | Check FTS integrity, rebuild if divergent, optimize, VACUUM, `--scrub-stats` |
+| `schema` | Show parameter schema for a command (or all commands) |
+| `scrub` | Run the v1.0 scrub engine ad-hoc (`--check`, `--test`) |
+| `migrate` | Establish the v1.0 scrub baseline on an existing database |
+| `serve` | Run the MCP bridge server |
+| `ensure-server` | Start the MCP bridge if it is not already running |
+
+Every command supports `--help`. `droids-mem schema` emits machine-readable
+parameter schemas for scripting.
+
+---
+
+## Architecture & decisions
+
+Single binary, layered. Don't bypass layers:
+
+1. `cmd/droids-mem/` — cobra subcommands. One `cmd_*.go` per command. No
+   business logic.
+2. `internal/mcpserver/` — MCP bridge (HTTP + bearer auth + 4 tools).
+3. `internal/store/` — all business logic shared by CLI and MCP (save,
+   search, context, doctor, scrub).
+4. `internal/db/` — connection + pragmas + DDL + `PRAGMA user_version`
+   migration ladder.
+5. `internal/state/` — bearer-token resolver, owns `~/.droids-mem/` file ops.
+
+Architecture decision records (ADRs) live under `docs/adr/`:
+
+- [0001 — Fingerprint excludes `what`](docs/adr/0001-fingerprint-excludes-what.md)
+- [0002 — Context bundle tier model](docs/adr/0002-context-bundle-tier-model.md)
+- [0003 — MCP transport, bearer auth, session ownership](docs/adr/0003-mcp-bridge-for-agentspan.md)
+- [0004 — Parent-as-memory-broker pattern](docs/adr/0004-agent-broker-pattern.md)
+- [0005 — Three-layer workspace model](docs/adr/0005-three-layer-workspace-model.md) (Deferred to v1.1)
+- [0006 — Git-native JSONL sync](docs/adr/0006-git-jsonl-sync-for-project-workspaces.md) (Deferred to v1.2)
+- [0007 — PII scrub pipeline](docs/adr/0007-pii-scrub-pipeline.md) (Accepted)
+
+Reference docs:
+
+- [files/Droids-mem-PRD.md](files/Droids-mem-PRD.md) — product spec.
+- [docs/v1.0-implementation-plan.md](docs/v1.0-implementation-plan.md) — locked v1.0 decisions.
+- [CONTEXT.md](CONTEXT.md) — domain language + term aliases.
+
+---
+
+## Troubleshooting
+
+**`boot_gate` error on start.** The database has not been baselined through
+the scrub pipeline. Run `droids-mem migrate --rescrub` (or `--no-rescrub` if
+the data is already trusted).
+
+**`db_init_failed`.** Check `DROIDS_MEM_DB` and that `~/.droids-mem/` is
+writable. State dir is created on first use.
+
+**`tag_contains_secret`.** A tag matched a scrub pattern. Tags are not
+auto-stripped — fix the tag and retry (`retryable:true`).
+
+**`scrub_emptied_learned`.** The `learned` field was 100% redaction after
+scrub. Rewrite the lesson without the PII.
+
+**MCP bridge will not bind.** Check `DROIDS_MEM_MCP_ADDR`. The default
+`127.0.0.1:7777` will conflict if another listener has the port; verify it
+actually holds your token via `curl /identity?nonce=...`.
+
+**FTS results look stale or wrong.** `droids-mem doctor` runs an integrity
+check and rebuilds `memories_fts` from `memories` if they diverge.
+
+---
+
+## License
+
+[MIT](LICENSE).

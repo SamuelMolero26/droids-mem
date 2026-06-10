@@ -29,27 +29,32 @@ type saveArgs struct {
 	Learned   string `json:"learned"`
 	TaskType  string `json:"task_type"`
 	Tags      string `json:"tags,omitempty"`
+	Scope     string `json:"scope,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
 	Force     bool   `json:"force,omitempty"`
 }
 
 func saveToolDef() mcp.Tool {
 	return mcp.NewTool("mem_save",
-		mcp.WithDescription("Persist a memory (lesson) for future agent runs. Returns the saved or matched memory id and the session_id used."),
+		mcp.WithDescription("Persist a memory (lesson) for future agent runs. Returns the saved or matched memory id, the session_id used, and a scrub block when any sensitive content was redacted before storage."),
 		mcp.WithString("kind", mcp.Required(),
 			mcp.Description("Memory kind. One of: error_resolution, task_pattern, user_rule, session_summary."),
 			mcp.Enum("error_resolution", "task_pattern", "user_rule", "session_summary"),
 		),
 		mcp.WithString("title", mcp.Required(),
-			mcp.Description("Short imperative summary of the lesson (1 line).")),
+			mcp.Description("Short imperative summary of the lesson (1 line). Max 200 characters.")),
 		mcp.WithString("what", mcp.Required(),
-			mcp.Description("What happened or what was attempted (factual context).")),
+			mcp.Description("What happened or what was attempted (factual context). Max 8192 characters.")),
 		mcp.WithString("learned", mcp.Required(),
-			mcp.Description("The reusable insight the agent should apply next time.")),
+			mcp.Description("The reusable insight the agent should apply next time. Max 4096 characters.")),
 		mcp.WithString("task_type", mcp.Required(),
 			mcp.Description("Free-form workflow tag (e.g. 'crm_upload'). Scopes context retrieval and session_summary retention.")),
 		mcp.WithString("tags",
-			mcp.Description("Space-delimited tokens.")),
+			mcp.Description("Space-delimited tokens. Max 500 characters. Tags are stored unscrubbed — never embed secrets in them.")),
+		mcp.WithString("scope",
+			mcp.Description("Memory scope. 'shared' (default) or 'personal'. Reserved for future workspace routing."),
+			mcp.Enum("personal", "shared"),
+		),
 		mcp.WithString("session_id",
 			mcp.Description("Session id from mem_context. Omit on first save in a Run to mint a new one.")),
 		mcp.WithBoolean("force",
@@ -58,8 +63,8 @@ func saveToolDef() mcp.Tool {
 }
 
 func saveHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, saveArgs) (*mcp.CallToolResult, error) {
-	return func(_ context.Context, _ mcp.CallToolRequest, a saveArgs) (*mcp.CallToolResult, error) {
-		resp, err := st.Save(store.SaveRequest{
+	return func(ctx context.Context, _ mcp.CallToolRequest, a saveArgs) (*mcp.CallToolResult, error) {
+		resp, err := st.Save(ctx, store.SaveRequest{
 			SessionID: a.SessionID,
 			TaskType:  a.TaskType,
 			Kind:      a.Kind,
@@ -67,6 +72,7 @@ func saveHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, sav
 			What:      a.What,
 			Learned:   a.Learned,
 			Tags:      a.Tags,
+			Scope:     a.Scope,
 			Force:     a.Force,
 		})
 		if err != nil {
@@ -104,8 +110,8 @@ func searchToolDef() mcp.Tool {
 }
 
 func searchHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, searchArgs) (*mcp.CallToolResult, error) {
-	return func(_ context.Context, _ mcp.CallToolRequest, a searchArgs) (*mcp.CallToolResult, error) {
-		resp, err := st.Search(store.SearchRequest{
+	return func(ctx context.Context, _ mcp.CallToolRequest, a searchArgs) (*mcp.CallToolResult, error) {
+		resp, err := st.Search(ctx, store.SearchRequest{
 			Query:    a.Query,
 			TaskType: a.TaskType,
 			Kind:     a.Kind,
@@ -147,8 +153,8 @@ func contextToolDef() mcp.Tool {
 }
 
 func contextHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, contextArgs) (*mcp.CallToolResult, error) {
-	return func(_ context.Context, _ mcp.CallToolRequest, a contextArgs) (*mcp.CallToolResult, error) {
-		resp, err := st.Context(store.ContextRequest{
+	return func(ctx context.Context, _ mcp.CallToolRequest, a contextArgs) (*mcp.CallToolResult, error) {
+		resp, err := st.Context(ctx, store.ContextRequest{
 			TaskType: a.TaskType,
 			Query:    a.Query,
 		})
@@ -178,8 +184,8 @@ func getToolDef() mcp.Tool {
 }
 
 func getHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, getArgs) (*mcp.CallToolResult, error) {
-	return func(_ context.Context, _ mcp.CallToolRequest, a getArgs) (*mcp.CallToolResult, error) {
-		m, err := st.Get(a.ID)
+	return func(ctx context.Context, _ mcp.CallToolRequest, a getArgs) (*mcp.CallToolResult, error) {
+		m, err := st.Get(ctx, a.ID)
 		if err != nil {
 			return toolErr(err), nil
 		}
@@ -202,13 +208,34 @@ func toolJSON(v any) (*mcp.CallToolResult, error) {
 
 // toolErr wraps store errors (validation + runtime) as MCP tool errors so the
 // agent receives a structured failure instead of a transport-level exception.
+// ValidationError fields are marshaled into a single JSON envelope so the
+// agent sees code/field/message/retryable/suggestion + optional metadata
+// (offending_tags, matched_patterns, scrub) without parsing prose.
 func toolErr(err error) *mcp.CallToolResult {
 	var ve *store.ValidationError
 	if errors.As(err, &ve) {
-		payload := map[string]string{
-			"error":   "validation_error",
-			"field":   ve.Field,
-			"message": ve.Message,
+		payload := struct {
+			Status          string             `json:"status"`
+			Error           string             `json:"error"`
+			Code            string             `json:"code,omitempty"`
+			Field           string             `json:"field,omitempty"`
+			Message         string             `json:"message"`
+			Retryable       bool               `json:"retryable"`
+			Suggestion      string             `json:"suggestion,omitempty"`
+			OffendingTags   []string           `json:"offending_tags,omitempty"`
+			MatchedPatterns []string           `json:"matched_patterns,omitempty"`
+			Scrub           *store.ScrubReport `json:"scrub,omitempty"`
+		}{
+			Status:          "error",
+			Error:           "validation_error",
+			Code:            ve.Code,
+			Field:           ve.Field,
+			Message:         ve.Message,
+			Retryable:       ve.Retryable,
+			Suggestion:      ve.Suggestion,
+			OffendingTags:   ve.OffendingTags,
+			MatchedPatterns: ve.MatchedPatterns,
+			Scrub:           ve.Scrub,
 		}
 		b, _ := json.Marshal(payload)
 		return mcp.NewToolResultError(string(b))

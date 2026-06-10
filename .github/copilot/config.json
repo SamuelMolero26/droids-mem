@@ -1,0 +1,28 @@
+[
+  {
+    "type": "mcp-server",
+    "uri": "mcp://oraios.serena"
+  },
+  {
+    "type": "mcp-server",
+    "uri": "mcp://playwright"
+  },
+  {
+    "type": "mcp-server",
+    "uri": "mcp://ssh",
+    "host": "100.121.235.17",
+    "user": "oosam",
+    "password": "${SSH_PASSWORD}"
+  },
+  {
+    "type": "mcp-server",
+    "uri": "mcp://context7",
+    "name": "context7-mcp-server",
+    "capabilities": {
+      "libraryResolve": true,
+      "docsFetch": true
+    }
+  }
+]
+
+

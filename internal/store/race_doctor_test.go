@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"context"
 	"database/sql"
 	"path/filepath"
 	"sync"
@@ -55,7 +56,7 @@ func TestSave_ConcurrentDedupe(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			resp, err := s.Save(req)
+			resp, err := s.Save(context.Background(), req)
 			if err != nil {
 				errs <- err
 				return
@@ -87,7 +88,7 @@ func TestSave_ConcurrentDedupe(t *testing.T) {
 
 func TestDoctor_HealthyDB(t *testing.T) {
 	s, dbPath := fileBackedStore(t)
-	s.Save(store.SaveRequest{
+	s.Save(context.Background(), store.SaveRequest{
 		TaskType: "crm_upload",
 		Kind:     "error_resolution",
 		Title:    "phone mapping",
@@ -132,7 +133,7 @@ func TestSearch_TotalReflectsFullMatchCount(t *testing.T) {
 		{"phone vs mobile column", "Excel imports conflated columns", "Map by header name not index"},
 	}
 	for _, c := range contexts {
-		s.Save(store.SaveRequest{
+		s.Save(context.Background(), store.SaveRequest{
 			TaskType: "crm_upload",
 			Kind:     "error_resolution",
 			Title:    c.title,
@@ -141,7 +142,7 @@ func TestSearch_TotalReflectsFullMatchCount(t *testing.T) {
 		})
 	}
 
-	resp, err := s.Search(store.SearchRequest{Query: "phone", Limit: 3})
+	resp, err := s.Search(context.Background(), store.SearchRequest{Query: "phone", Limit: 3})
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -153,23 +154,35 @@ func TestSearch_TotalReflectsFullMatchCount(t *testing.T) {
 	}
 }
 
-// TestSearch_TrigramSubstring confirms the trigram tokenizer matches
-// substrings like "bspot" inside "hubspot".
-func TestSearch_TrigramSubstring(t *testing.T) {
+// TestSearch_Unicode61KeepsIdentifierAtomic confirms the v1.0 tokenizer
+// (`unicode61 tokenchars=_-`) treats snake_case / kebab-case identifiers as
+// single tokens — the property we traded substring matching for. Decision
+// #17 in the v1.0 plan re-baselined this test off the previous trigram
+// behavior.
+func TestSearch_Unicode61KeepsIdentifierAtomic(t *testing.T) {
 	s := newTestStore(t)
-	s.Save(store.SaveRequest{
+	s.Save(context.Background(), store.SaveRequest{
 		TaskType: "crm_upload",
 		Kind:     "error_resolution",
-		Title:    "HubSpotPhone field bug",
-		What:     "HubSpot field rejected the value",
+		Title:    "field-mapping bug",
+		What:     "phone_number column rejected the value",
 		Learned:  "Strip leading plus before send",
+		Tags:     "hubspot field-mapping",
 	})
 
-	resp, err := s.Search(store.SearchRequest{Query: "bspot"})
+	respFull, err := s.Search(context.Background(), store.SearchRequest{Query: "phone_number"})
 	if err != nil {
-		t.Fatalf("Search: %v", err)
+		t.Fatalf("Search full identifier: %v", err)
 	}
-	if resp.Total == 0 {
-		t.Error("trigram tokenizer should match substring 'bspot' inside 'HubSpot'")
+	if respFull.Total == 0 {
+		t.Error("unicode61 tokenizer should index 'phone_number' as one token")
+	}
+
+	respHyphen, err := s.Search(context.Background(), store.SearchRequest{Query: "field-mapping"})
+	if err != nil {
+		t.Fatalf("Search kebab identifier: %v", err)
+	}
+	if respHyphen.Total == 0 {
+		t.Error("unicode61 tokenchars=_- should keep 'field-mapping' atomic")
 	}
 }

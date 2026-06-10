@@ -1,0 +1,84 @@
+version: "2"
+
+# Correctness-first config. Style/complexity linters (wsl, revive, dupl,
+# funlen, gocyclo, ...) are deliberately omitted: the codebase predates them
+# and they produce hundreds of cosmetic findings with no bug-finding value.
+# Every enabled linter below catches real defects or resource leaks.
+
+run:
+  concurrency: 4
+  timeout: 5m
+  tests: true
+  build-tags:
+    - integration
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 50
+
+linters:
+  enable:
+    # correctness
+    - govet            # copylocks, printf formats, struct tags, unreachable code
+    - staticcheck      # deprecated APIs, common mistakes
+    - unused           # unused variables, functions, types
+    - errcheck         # unchecked error returns
+    - errorlint        # errors.Is/As + %w wrapping correctness
+    - nilerr           # returning nil error when err is non-nil
+    - copyloopvar      # loop variable copy issues (Go 1.22+)
+    - durationcheck    # time.Duration * time.Duration bugs
+    - ineffassign      # assignments never read
+    - unconvert        # unnecessary type conversions
+    - misspell         # misspellings in identifiers and comments
+    # security & resources
+    - gosec            # SQL injection, weak crypto, path traversal
+    - bidichk          # trojan-source bidirectional Unicode
+    - bodyclose        # unclosed HTTP response bodies
+    - sqlclosecheck    # unclosed sql.Rows / sql.Stmt
+    - rowserrcheck     # unchecked sql.Rows.Err()
+    # meta
+    - nolintlint       # nolint directives must be specific + explained
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      exclude-functions:
+        # Best-effort writes to stdout/stderr/log sinks — failure is unactionable.
+        - fmt.Fprintln
+        - fmt.Fprintf
+        - fmt.Fprint
+        # Idiomatic `defer x.Close()` — nothing actionable on failure for
+        # read paths; write paths that must flush check errors explicitly.
+        - (*database/sql.DB).Close
+        - (*database/sql.Conn).Close
+        - (*database/sql.Rows).Close
+        - (*database/sql.Stmt).Close
+        - (*database/sql.Tx).Rollback
+        - (*os.File).Close
+        - (io.ReadCloser).Close
+        - (io.Closer).Close
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+  exclusions:
+    paths:
+      - vendor$
+    rules:
+      # Tests spawn the built binary, write fixtures, and ignore cleanup
+      # errors by design — security and error-discipline linters add noise,
+      # not safety, there. Correctness linters stay on for tests.
+      - path: _test\.go
+        linters:
+          - gosec
+          - errcheck
+      # scrub.go declares the secret-DETECTION patterns; gosec's hardcoded-
+      # credential rule fires on the pattern table itself. Nothing secret here.
+      - path: internal/store/scrub\.go
+        text: "G101"
+        linters:
+          - gosec
+
+formatters:
+  enable:
+    - gofmt

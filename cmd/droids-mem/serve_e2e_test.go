@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -363,7 +364,8 @@ func TestServeE2E_GracefulShutdownExitsZero(t *testing.T) {
 	select {
 	case err := <-done:
 		if err != nil {
-			if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() != 0 {
+			var ee *exec.ExitError
+			if errors.As(err, &ee) && ee.ExitCode() != 0 {
 				t.Fatalf("exit code=%d, stderr=%s", ee.ExitCode(), s.stderr.String())
 			}
 		}

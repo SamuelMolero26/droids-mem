@@ -1,11 +1,13 @@
 package main
 
 import (
+	"errors"
+
 	"github.com/samuelmolero/droids-mem/internal/store"
 	"github.com/spf13/cobra"
 )
 
-func newGetCmd(s *store.Store) *cobra.Command {
+func newGetCmd(a *app) *cobra.Command {
 	var id string
 
 	cmd := &cobra.Command{
@@ -13,9 +15,14 @@ func newGetCmd(s *store.Store) *cobra.Command {
 		Short:   "Get a single memory by ID",
 		Example: `  droids-mem get --id mem_01J9KXVR2E...`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			mem, err := s.Get(id)
+			s, err := a.store()
 			if err != nil {
-				if ve, ok := err.(*store.ValidationError); ok {
+				return err
+			}
+			mem, err := s.Get(cmd.Context(), id)
+			if err != nil {
+				var ve *store.ValidationError
+				if errors.As(err, &ve) {
 					writeError("validation_failed", ve.Message, false,
 						withField(ve.Field),
 						withSuggestion("provide --id with a valid mem_ prefixed ID"),
@@ -39,7 +46,7 @@ func newGetCmd(s *store.Store) *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&id, "id", "", "Memory ID with mem_ prefix (required)")
-	cmd.MarkFlagRequired("id")
+	_ = cmd.MarkFlagRequired("id")
 
 	return cmd
 }

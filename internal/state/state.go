@@ -54,6 +54,8 @@ func LoadOrCreateToken() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// #nosec G304 -- path is Dir()/token inside the trusted state dir, not
+	// user-controlled input.
 	if b, err := os.ReadFile(path); err == nil {
 		if t := strings.TrimSpace(string(b)); t != "" {
 			return t, nil

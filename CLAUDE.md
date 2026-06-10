@@ -34,10 +34,14 @@ Both suites isolate `DROIDS_MEM_DB` and `DROIDS_MEM_HOME` per test.
 | `DROIDS_MEM_DB` | `~/.droids-mem/mem.db` | Always override in tests |
 | `DROIDS_MEM_HOME` | `~/.droids-mem/` | token, pid, log files |
 | `DROIDS_MEM_MCP_TOKEN` | auto (see state pkg) | Bearer token for `/mcp` |
-| `DROIDS_MEM_MCP_ADDR` | `:7777` | Bind address |
-| `DROIDS_MEM_MCP_ENDPOINT` | `/mcp` | `/healthz` always unauthenticated |
+| `DROIDS_MEM_MCP_ADDR` | `127.0.0.1:7777` | Bind address (loopback by default; non-loopback logs a plaintext warning) |
+| `DROIDS_MEM_MCP_ENDPOINT` | `/mcp` | `/healthz` + `/identity` always unauthenticated |
 
-State dir layout: `mem.db`, `token` (0600), `mcp.pid`, `mcp.log`.
+State dir layout: `mem.db` (0600), `token` (0600), `mcp.pid`, `mcp.log`.
+
+`/identity?nonce=<n>` answers `HMAC-SHA256(token, nonce)` — ensure-server uses it
+to verify a listener actually holds the token before reporting `already_running`
+(anti port-squatting).
 
 ## Architecture
 
