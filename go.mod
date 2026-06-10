@@ -1,4 +1,4 @@
-module github.com/samuelmolero/droids-mem
+module github.com/SamuelMolero26/droids-mem
 
 go 1.26.3
 

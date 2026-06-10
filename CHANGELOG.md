@@ -98,5 +98,5 @@ normally.
 - `workspace.yml` / inline scrub config → v1.1. v1.0 pattern set + order are
   hardcoded.
 
-[Unreleased]: https://github.com/samuelmolero/droids-mem/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/samuelmolero/droids-mem/releases/tag/v1.0.0
+[Unreleased]: https://github.com/SamuelMolero26/droids-mem/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/SamuelMolero26/droids-mem/releases/tag/v1.0.0
