@@ -13,6 +13,7 @@ var schemaDefinitions = map[string]any{
 			{"name": "what", "type": "string", "required": true, "description": "What happened"},
 			{"name": "learned", "type": "string", "required": true, "description": "What to do next time"},
 			{"name": "tags", "type": "string", "required": false, "description": "Space-delimited tags"},
+			{"name": "scope", "type": "enum", "required": false, "values": []string{"shared", "personal"}, "default": "shared", "description": "Memory scope"},
 			{"name": "session-id", "type": "string", "required": false, "description": "Group saves in one run (auto-generated if omitted)"},
 			{"name": "force", "type": "bool", "required": false, "default": false, "description": "Overwrite existing memory (HITL correction)"},
 			{"name": "dry-run", "type": "bool", "required": false, "default": false, "description": "Preview without writing, exits 10"},
@@ -83,6 +84,9 @@ func newSchemaCmd() *cobra.Command {
 		Example: `  droids-mem schema
   droids-mem schema save
   droids-mem schema search`,
+		// Schema prints static metadata only — no DB reads, safe to expose
+		// even when the boot gate would otherwise block normal operation.
+		Annotations: map[string]string{bootGateBypass: "true"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				writeJSON(schemaDefinitions)

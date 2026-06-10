@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 
@@ -9,10 +8,9 @@ import (
 
 	"github.com/samuelmolero/droids-mem/internal/mcpserver"
 	"github.com/samuelmolero/droids-mem/internal/state"
-	"github.com/samuelmolero/droids-mem/internal/store"
 )
 
-func newServeCmd(s *store.Store) *cobra.Command {
+func newServeCmd(a *app) *cobra.Command {
 	var addr, endpoint string
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -25,6 +23,10 @@ Requires DROIDS_MEM_MCP_TOKEN. Env overrides:
   DROIDS_MEM_MCP_ADDR     (default :7777)
   DROIDS_MEM_MCP_ENDPOINT (default /mcp)`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			s, err := a.store()
+			if err != nil {
+				return err
+			}
 			tok, err := state.LoadOrCreateToken()
 			if err != nil {
 				return fmt.Errorf("load token: %w", err)
@@ -34,7 +36,7 @@ Requires DROIDS_MEM_MCP_TOKEN. Env overrides:
 				Endpoint: envOr("DROIDS_MEM_MCP_ENDPOINT", endpoint),
 				Token:    tok,
 			}
-			return mcpserver.Run(context.Background(), cfg, s)
+			return mcpserver.Run(cmd.Context(), cfg, s)
 		},
 	}
 	cmd.Flags().StringVar(&addr, "addr", mcpserver.DefaultAddr, "bind address (env DROIDS_MEM_MCP_ADDR overrides)")

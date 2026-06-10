@@ -28,8 +28,19 @@ func Open() (*sql.DB, error) {
 	db.SetMaxOpenConns(1)
 
 	if err := Init(db); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
+	}
+	// SQLite creates the DB (and WAL/SHM) with umask-default perms, typically
+	// 0644. The 0700 state dir shields them today, but the files themselves
+	// hold unencrypted memory content — tighten to owner-only as defense in
+	// depth. Also repairs files created by older builds. WAL/SHM exist by now
+	// because Init just wrote schema/migrations.
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		if err := os.Chmod(p, 0o600); err != nil && !os.IsNotExist(err) {
+			_ = db.Close()
+			return nil, fmt.Errorf("tighten db perms on %s: %w", p, err)
+		}
 	}
 	return db, nil
 }
@@ -50,12 +61,39 @@ func BuildDSN(path string) string {
 		"&_pragma=cache_size(-4000)"
 }
 
-// DDL -> creates all tables, indexes, and triggers
+// Init prepares db for use. For a fresh database (no memories table) it runs
+// the full v1.0 DDL and stamps PRAGMA user_version = CurrentSchemaVersion.
+// For an existing database it advances the schema via the migration ladder.
+// Init is idempotent: a second call on an already-current DB is a no-op.
 func Init(db *sql.DB) error {
-	if _, err := db.Exec(ddl); err != nil {
-		return fmt.Errorf("init schema: %w", err)
+	fresh, err := isFreshDB(db)
+	if err != nil {
+		return err
 	}
-	return nil
+	if fresh {
+		if _, err := db.Exec(ddl); err != nil {
+			return fmt.Errorf("init schema: %w", err)
+		}
+		if err := setUserVersion(db, CurrentSchemaVersion); err != nil {
+			return err
+		}
+		return nil
+	}
+	return Migrate(db)
+}
+
+// isFreshDB returns true when the memories table is absent — the marker that
+// no prior droids-mem schema has been installed. We check the table rather
+// than PRAGMA user_version because pre-v1.0 databases were created without
+// stamping a version (so v0 and "brand new" both report user_version = 0).
+func isFreshDB(db *sql.DB) (bool, error) {
+	var count int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memories'`,
+	).Scan(&count); err != nil {
+		return false, fmt.Errorf("inspect schema: %w", err)
+	}
+	return count == 0, nil
 }
 
 func ResolvePath() string {

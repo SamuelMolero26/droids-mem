@@ -2,6 +2,7 @@ package main_test
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,7 +34,8 @@ func cli(t *testing.T, dbPath string, allowedExits []int, args ...string) []byte
 	cmd.Env = append(os.Environ(), "DROIDS_MEM_DB="+dbPath)
 	out, err := cmd.Output()
 	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
 			code := ee.ExitCode()
 			for _, allowed := range allowedExits {
 				if code == allowed {

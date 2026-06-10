@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"context"
 	"database/sql"
 	"sync"
 	"testing"
@@ -52,7 +53,7 @@ func seedContextFixture(t *testing.T, s *store.Store) {
 		},
 	}
 	for _, m := range memories {
-		if _, err := s.Save(m); err != nil {
+		if _, err := s.Save(context.Background(), m); err != nil {
 			t.Fatalf("seed context fixture: %v", err)
 		}
 	}
@@ -62,7 +63,7 @@ func TestContext_ReturnsLastSession(t *testing.T) {
 	s := newTestStore(t)
 	seedContextFixture(t, s)
 
-	resp, err := s.Context(store.ContextRequest{TaskType: "crm_upload"})
+	resp, err := s.Context(context.Background(), store.ContextRequest{TaskType: "crm_upload"})
 	if err != nil {
 		t.Fatalf("Context: %v", err)
 	}
@@ -92,7 +93,7 @@ func TestContext_QueryWithSpecialChars(t *testing.T) {
 		"phone OR mapping NOT csv",            // operator keywords as literals
 	}
 	for _, q := range queries {
-		resp, err := s.Context(store.ContextRequest{TaskType: "crm_upload", Query: q})
+		resp, err := s.Context(context.Background(), store.ContextRequest{TaskType: "crm_upload", Query: q})
 		if err != nil {
 			t.Errorf("Context query %q errored (should parse): %v", q, err)
 			continue
@@ -109,7 +110,7 @@ func TestContext_OnlyPunctuationQuery(t *testing.T) {
 	s := newTestStore(t)
 	seedContextFixture(t, s)
 
-	resp, err := s.Context(store.ContextRequest{TaskType: "crm_upload", Query: ",,, :::"})
+	resp, err := s.Context(context.Background(), store.ContextRequest{TaskType: "crm_upload", Query: ",,, :::"})
 	if err != nil {
 		t.Fatalf("Context: %v", err)
 	}
@@ -120,7 +121,7 @@ func TestContext_OnlyPunctuationQuery(t *testing.T) {
 
 func TestContext_NoSessionSummary_LastSessionIsNil(t *testing.T) {
 	s := newTestStore(t)
-	s.Save(store.SaveRequest{
+	s.Save(context.Background(), store.SaveRequest{
 		TaskType: "crm_upload",
 		Kind:     "error_resolution",
 		Title:    "Phone mapping",
@@ -128,7 +129,7 @@ func TestContext_NoSessionSummary_LastSessionIsNil(t *testing.T) {
 		Learned:  "use phone",
 	})
 
-	resp, err := s.Context(store.ContextRequest{TaskType: "crm_upload"})
+	resp, err := s.Context(context.Background(), store.ContextRequest{TaskType: "crm_upload"})
 	if err != nil {
 		t.Fatalf("Context: %v", err)
 	}
@@ -141,7 +142,7 @@ func TestContext_UserRulesAlwaysIncluded(t *testing.T) {
 	s := newTestStore(t)
 	seedContextFixture(t, s)
 
-	resp, err := s.Context(store.ContextRequest{TaskType: "crm_upload"})
+	resp, err := s.Context(context.Background(), store.ContextRequest{TaskType: "crm_upload"})
 	if err != nil {
 		t.Fatalf("Context: %v", err)
 	}
@@ -165,7 +166,7 @@ func TestContext_BrowseTierIsSnippetOnly(t *testing.T) {
 	s := newTestStore(t)
 	seedContextFixture(t, s)
 
-	resp, err := s.Context(store.ContextRequest{TaskType: "crm_upload", Query: "phone mapping csv"})
+	resp, err := s.Context(context.Background(), store.ContextRequest{TaskType: "crm_upload", Query: "phone mapping csv"})
 	if err != nil {
 		t.Fatalf("Context: %v", err)
 	}
@@ -191,7 +192,7 @@ func TestContext_BrowseTierIsSnippetOnly(t *testing.T) {
 func TestContext_NoCrossTaskContamination(t *testing.T) {
 	s := newTestStore(t)
 	seedContextFixture(t, s)
-	s.Save(store.SaveRequest{
+	s.Save(context.Background(), store.SaveRequest{
 		TaskType: "email_sync",
 		Kind:     "error_resolution",
 		Title:    "SMTP auth failure",
@@ -200,7 +201,7 @@ func TestContext_NoCrossTaskContamination(t *testing.T) {
 		Tags:     "smtp auth",
 	})
 
-	resp, _ := s.Context(store.ContextRequest{TaskType: "crm_upload", Query: "upload phone"})
+	resp, _ := s.Context(context.Background(), store.ContextRequest{TaskType: "crm_upload", Query: "upload phone"})
 	for _, m := range resp.Browse {
 		if m.Title == "SMTP auth failure" {
 			t.Error("email_sync memory leaked into crm_upload browse tier")
@@ -217,7 +218,7 @@ func TestContext_NoDuplicateIDsAcrossTiers(t *testing.T) {
 	s := newTestStore(t)
 	seedContextFixture(t, s)
 
-	resp, _ := s.Context(store.ContextRequest{TaskType: "crm_upload", Query: "phone mapping"})
+	resp, _ := s.Context(context.Background(), store.ContextRequest{TaskType: "crm_upload", Query: "phone mapping"})
 	seen := make(map[string]bool)
 	if resp.LastSession != nil {
 		seen[resp.LastSession.ID] = true
@@ -241,7 +242,7 @@ func TestContext_QueryFallsBackToTaskType(t *testing.T) {
 	seedContextFixture(t, s)
 
 	// no query provided — should not error, falls back to task_type tokens
-	resp, err := s.Context(store.ContextRequest{TaskType: "crm_upload"})
+	resp, err := s.Context(context.Background(), store.ContextRequest{TaskType: "crm_upload"})
 	if err != nil {
 		t.Fatalf("Context without query: %v", err)
 	}
@@ -250,7 +251,7 @@ func TestContext_QueryFallsBackToTaskType(t *testing.T) {
 
 func TestContext_Validation_MissingTaskType(t *testing.T) {
 	s := newTestStore(t)
-	_, err := s.Context(store.ContextRequest{})
+	_, err := s.Context(context.Background(), store.ContextRequest{})
 	if err == nil {
 		t.Error("expected validation error for missing task_type")
 	}
@@ -289,7 +290,7 @@ func TestContext_ConcurrentWritesNoCorruption(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < iters; i++ {
-				resp, err := s.Context(store.ContextRequest{TaskType: "crm_upload", Query: "phone csv"})
+				resp, err := s.Context(context.Background(), store.ContextRequest{TaskType: "crm_upload", Query: "phone csv"})
 				if err != nil {
 					errs <- err
 					return
@@ -321,7 +322,7 @@ func TestContext_ConcurrentWritesNoCorruption(t *testing.T) {
 					Learned:  "lesson " + string(rune('a'+i%26)) + string(rune('a'+id)),
 					Force:    true,
 				}
-				if _, err := s.Save(req); err != nil {
+				if _, err := s.Save(context.Background(), req); err != nil {
 					errs <- err
 					return
 				}
@@ -345,7 +346,7 @@ func TestContext_SessionSummaryRetention(t *testing.T) {
 
 	for i := 0; i < 7; i++ {
 		time.Sleep(time.Millisecond)
-		s.Save(store.SaveRequest{
+		s.Save(context.Background(), store.SaveRequest{
 			TaskType: "crm_upload",
 			Kind:     "session_summary",
 			Title:    "Session summary run",
@@ -356,7 +357,7 @@ func TestContext_SessionSummaryRetention(t *testing.T) {
 		})
 	}
 
-	resp, err := s.Context(store.ContextRequest{TaskType: "crm_upload"})
+	resp, err := s.Context(context.Background(), store.ContextRequest{TaskType: "crm_upload"})
 	if err != nil {
 		t.Fatalf("Context: %v", err)
 	}

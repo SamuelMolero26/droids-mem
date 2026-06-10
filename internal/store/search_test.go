@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/samuelmolero/droids-mem/internal/store"
@@ -43,7 +44,7 @@ func seedMemories(t *testing.T, s *store.Store) {
 		},
 	}
 	for _, m := range memories {
-		if _, err := s.Save(m); err != nil {
+		if _, err := s.Save(context.Background(), m); err != nil {
 			t.Fatalf("seed: %v", err)
 		}
 	}
@@ -53,7 +54,7 @@ func TestSearch_ReturnsResults(t *testing.T) {
 	s := newTestStore(t)
 	seedMemories(t, s)
 
-	resp, err := s.Search(store.SearchRequest{Query: "phone"})
+	resp, err := s.Search(context.Background(), store.SearchRequest{Query: "phone"})
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -66,7 +67,7 @@ func TestSearch_ScoreIsNegative(t *testing.T) {
 	s := newTestStore(t)
 	seedMemories(t, s)
 
-	resp, _ := s.Search(store.SearchRequest{Query: "phone"})
+	resp, _ := s.Search(context.Background(), store.SearchRequest{Query: "phone"})
 	for _, r := range resp.Results {
 		if r.Score >= 0 {
 			t.Errorf("BM25 score should be negative, got %f for %q", r.Score, r.Title)
@@ -78,7 +79,7 @@ func TestSearch_FilterByTaskType(t *testing.T) {
 	s := newTestStore(t)
 	seedMemories(t, s)
 
-	resp, err := s.Search(store.SearchRequest{Query: "auth", TaskType: "email_sync"})
+	resp, err := s.Search(context.Background(), store.SearchRequest{Query: "auth", TaskType: "email_sync"})
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -93,7 +94,7 @@ func TestSearch_FilterByKind(t *testing.T) {
 	s := newTestStore(t)
 	seedMemories(t, s)
 
-	resp, err := s.Search(store.SearchRequest{Query: "upload mapping dates", Kind: "task_pattern"})
+	resp, err := s.Search(context.Background(), store.SearchRequest{Query: "upload mapping dates", Kind: "task_pattern"})
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -108,7 +109,7 @@ func TestSearch_LimitApplied(t *testing.T) {
 	s := newTestStore(t)
 	seedMemories(t, s)
 
-	resp, _ := s.Search(store.SearchRequest{Query: "upload mapping dates phone smtp", Limit: 2})
+	resp, _ := s.Search(context.Background(), store.SearchRequest{Query: "upload mapping dates phone smtp", Limit: 2})
 	if len(resp.Results) > 2 {
 		t.Errorf("expected max 2 results, got %d", len(resp.Results))
 	}
@@ -118,7 +119,7 @@ func TestSearch_DefaultLimit(t *testing.T) {
 	s := newTestStore(t)
 	seedMemories(t, s)
 
-	resp, _ := s.Search(store.SearchRequest{Query: "upload mapping dates phone smtp"})
+	resp, _ := s.Search(context.Background(), store.SearchRequest{Query: "upload mapping dates phone smtp"})
 	if len(resp.Results) > 5 {
 		t.Errorf("default limit should be 5, got %d", len(resp.Results))
 	}
@@ -128,7 +129,7 @@ func TestSearch_LimitCappedAt20(t *testing.T) {
 	s := newTestStore(t)
 	seedMemories(t, s)
 
-	resp, _ := s.Search(store.SearchRequest{Query: "phone", Limit: 999})
+	resp, _ := s.Search(context.Background(), store.SearchRequest{Query: "phone", Limit: 999})
 	if len(resp.Results) > 20 {
 		t.Errorf("limit should be capped at 20, got %d", len(resp.Results))
 	}
@@ -138,7 +139,7 @@ func TestSearch_NoResults_ReturnsEmptySlice(t *testing.T) {
 	s := newTestStore(t)
 	seedMemories(t, s)
 
-	resp, err := s.Search(store.SearchRequest{Query: "xyznonexistentterm"})
+	resp, err := s.Search(context.Background(), store.SearchRequest{Query: "xyznonexistentterm"})
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -152,7 +153,7 @@ func TestSearch_NoResults_ReturnsEmptySlice(t *testing.T) {
 
 func TestSearch_Validation_EmptyQuery(t *testing.T) {
 	s := newTestStore(t)
-	_, err := s.Search(store.SearchRequest{Query: ""})
+	_, err := s.Search(context.Background(), store.SearchRequest{Query: ""})
 	if err == nil {
 		t.Error("expected validation error for empty query")
 	}
@@ -160,7 +161,7 @@ func TestSearch_Validation_EmptyQuery(t *testing.T) {
 
 func TestSearch_Validation_InvalidKind(t *testing.T) {
 	s := newTestStore(t)
-	_, err := s.Search(store.SearchRequest{Query: "phone", Kind: "bad_kind"})
+	_, err := s.Search(context.Background(), store.SearchRequest{Query: "phone", Kind: "bad_kind"})
 	if err == nil {
 		t.Error("expected validation error for invalid kind")
 	}
@@ -170,7 +171,7 @@ func TestSearch_ResultsOrderedByRank(t *testing.T) {
 	s := newTestStore(t)
 	seedMemories(t, s)
 
-	resp, _ := s.Search(store.SearchRequest{Query: "phone mapping hubspot", Limit: 5})
+	resp, _ := s.Search(context.Background(), store.SearchRequest{Query: "phone mapping hubspot", Limit: 5})
 	if len(resp.Results) < 2 {
 		t.Skip("not enough results to check ordering")
 	}
@@ -186,7 +187,7 @@ func TestSearch_TotalMatchesResultCount(t *testing.T) {
 	s := newTestStore(t)
 	seedMemories(t, s)
 
-	resp, _ := s.Search(store.SearchRequest{Query: "phone"})
+	resp, _ := s.Search(context.Background(), store.SearchRequest{Query: "phone"})
 	if resp.Total != len(resp.Results) {
 		t.Errorf("total %d != len(results) %d", resp.Total, len(resp.Results))
 	}
@@ -214,7 +215,7 @@ func TestSearch_FTS5SpecialChars(t *testing.T) {
 		"-phone mapping",     // leading hyphen (old NOT operator)
 	}
 	for _, q := range queries {
-		resp, err := s.Search(store.SearchRequest{Query: q})
+		resp, err := s.Search(context.Background(), store.SearchRequest{Query: q})
 		if err != nil {
 			t.Errorf("query %q errored (should parse): %v", q, err)
 			continue
@@ -231,7 +232,7 @@ func TestSearch_OnlyPunctuation(t *testing.T) {
 	s := newTestStore(t)
 	seedMemories(t, s)
 
-	resp, err := s.Search(store.SearchRequest{Query: ",,, ::: ()"})
+	resp, err := s.Search(context.Background(), store.SearchRequest{Query: ",,, ::: ()"})
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}

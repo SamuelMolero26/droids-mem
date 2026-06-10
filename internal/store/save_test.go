@@ -1,7 +1,9 @@
 package store_test
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"testing"
 
 	"github.com/samuelmolero/droids-mem/internal/db"
@@ -35,7 +37,7 @@ func validReq() store.SaveRequest {
 
 func TestSave_Success(t *testing.T) {
 	s := newTestStore(t)
-	resp, err := s.Save(validReq())
+	resp, err := s.Save(context.Background(), validReq())
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -52,7 +54,7 @@ func TestSave_Success(t *testing.T) {
 
 func TestSave_IDHasMemPrefix(t *testing.T) {
 	s := newTestStore(t)
-	resp, _ := s.Save(validReq())
+	resp, _ := s.Save(context.Background(), validReq())
 	if len(resp.ID) < 4 || resp.ID[:4] != "mem_" {
 		t.Errorf("id missing mem_ prefix: %q", resp.ID)
 	}
@@ -62,7 +64,7 @@ func TestSave_AutoGeneratesSessionID(t *testing.T) {
 	s := newTestStore(t)
 	req := validReq()
 	req.SessionID = ""
-	resp, _ := s.Save(req)
+	resp, _ := s.Save(context.Background(), req)
 	if len(resp.SessionID) < 5 || resp.SessionID[:5] != "sess_" {
 		t.Errorf("expected auto-generated sess_ id, got %q", resp.SessionID)
 	}
@@ -72,7 +74,7 @@ func TestSave_UsesProvidedSessionID(t *testing.T) {
 	s := newTestStore(t)
 	req := validReq()
 	req.SessionID = "sess_TESTID"
-	resp, _ := s.Save(req)
+	resp, _ := s.Save(context.Background(), req)
 	if resp.SessionID != "sess_TESTID" {
 		t.Errorf("expected sess_TESTID, got %q", resp.SessionID)
 	}
@@ -80,8 +82,8 @@ func TestSave_UsesProvidedSessionID(t *testing.T) {
 
 func TestSave_DuplicateSkipped(t *testing.T) {
 	s := newTestStore(t)
-	first, _ := s.Save(validReq())
-	second, err := s.Save(validReq())
+	first, _ := s.Save(context.Background(), validReq())
+	second, err := s.Save(context.Background(), validReq())
 	if err != nil {
 		t.Fatalf("second Save: %v", err)
 	}
@@ -98,13 +100,13 @@ func TestSave_DuplicateSkipped(t *testing.T) {
 
 func TestSave_NormalizationCatchesDuplicate(t *testing.T) {
 	s := newTestStore(t)
-	s.Save(validReq())
+	s.Save(context.Background(), validReq())
 
 	// Same content, different punctuation/case — should still be duplicate
 	req := validReq()
 	req.Title = "HUBSPOT PHONE FIELD MAPPING!!!"
 	req.Learned = "map phone number to phone."
-	resp, _ := s.Save(req)
+	resp, _ := s.Save(context.Background(), req)
 	if resp.Status != "skipped" {
 		t.Errorf("expected normalized duplicate to be skipped, got %q", resp.Status)
 	}
@@ -114,7 +116,7 @@ func TestSave_Validation_MissingTaskType(t *testing.T) {
 	s := newTestStore(t)
 	req := validReq()
 	req.TaskType = ""
-	_, err := s.Save(req)
+	_, err := s.Save(context.Background(), req)
 	if err == nil {
 		t.Error("expected validation error for missing task_type")
 	}
@@ -124,7 +126,7 @@ func TestSave_Validation_InvalidKind(t *testing.T) {
 	s := newTestStore(t)
 	req := validReq()
 	req.Kind = "bad_kind"
-	_, err := s.Save(req)
+	_, err := s.Save(context.Background(), req)
 	if err == nil {
 		t.Error("expected validation error for invalid kind")
 	}
@@ -138,7 +140,7 @@ func TestSave_Validation_MissingTitle(t *testing.T) {
 	s := newTestStore(t)
 	req := validReq()
 	req.Title = "  "
-	_, err := s.Save(req)
+	_, err := s.Save(context.Background(), req)
 	if err == nil {
 		t.Error("expected validation error for blank title")
 	}
@@ -148,7 +150,7 @@ func TestSave_Validation_MissingWhat(t *testing.T) {
 	s := newTestStore(t)
 	req := validReq()
 	req.What = ""
-	_, err := s.Save(req)
+	_, err := s.Save(context.Background(), req)
 	if err == nil {
 		t.Error("expected validation error for missing what")
 	}
@@ -158,7 +160,7 @@ func TestSave_Validation_MissingLearned(t *testing.T) {
 	s := newTestStore(t)
 	req := validReq()
 	req.Learned = ""
-	_, err := s.Save(req)
+	_, err := s.Save(context.Background(), req)
 	if err == nil {
 		t.Error("expected validation error for missing learned")
 	}
@@ -166,11 +168,11 @@ func TestSave_Validation_MissingLearned(t *testing.T) {
 
 func TestSave_DifferentKindNotDuplicate(t *testing.T) {
 	s := newTestStore(t)
-	s.Save(validReq())
+	s.Save(context.Background(), validReq())
 
 	req := validReq()
 	req.Kind = "task_pattern"
-	resp, _ := s.Save(req)
+	resp, _ := s.Save(context.Background(), req)
 	if resp.Status != "saved" {
 		t.Errorf("different kind should not be duplicate, got %q", resp.Status)
 	}
@@ -180,13 +182,13 @@ func TestSave_DifferentKindNotDuplicate(t *testing.T) {
 
 func TestSave_ForceOverwrite_UpdatesExisting(t *testing.T) {
 	s := newTestStore(t)
-	first, _ := s.Save(validReq())
+	first, _ := s.Save(context.Background(), validReq())
 
 	// Change only `What` — title+learned+kind+task_type unchanged so fingerprint matches
 	req := validReq()
 	req.Force = true
 	req.What = "HITL correction: field was phone_number but should have been phone"
-	resp, err := s.Save(req)
+	resp, err := s.Save(context.Background(), req)
 	if err != nil {
 		t.Fatalf("force save: %v", err)
 	}
@@ -202,7 +204,7 @@ func TestSave_ForceInsert_WhenNoMatch(t *testing.T) {
 	s := newTestStore(t)
 	req := validReq()
 	req.Force = true
-	resp, err := s.Save(req)
+	resp, err := s.Save(context.Background(), req)
 	if err != nil {
 		t.Fatalf("force insert: %v", err)
 	}
@@ -213,13 +215,13 @@ func TestSave_ForceInsert_WhenNoMatch(t *testing.T) {
 
 func TestSave_BM25_NearDuplicateSkipped(t *testing.T) {
 	s := newTestStore(t)
-	s.Save(validReq())
+	s.Save(context.Background(), validReq())
 
 	// Different enough for a different fingerprint but close enough for BM25 to flag
 	req := validReq()
 	req.Title = "HubSpot phone number field mapping issue"
 	req.Learned = "always use phone instead of phone_number in HubSpot"
-	resp, err := s.Save(req)
+	resp, err := s.Save(context.Background(), req)
 	if err != nil {
 		t.Fatalf("near-dup save: %v", err)
 	}
@@ -254,7 +256,7 @@ func TestSave_NearDuplicate_FTSOperatorsInContent(t *testing.T) {
 		Learned:  "Avoid OR NOT NEAR in titles",
 		Tags:     "fts operators",
 	}
-	if _, err := s.Save(hostile); err != nil {
+	if _, err := s.Save(context.Background(), hostile); err != nil {
 		t.Fatalf("first save with operator keywords: %v", err)
 	}
 	// Second save with same operator-heavy tokens — exercises nearDuplicateConn
@@ -262,7 +264,7 @@ func TestSave_NearDuplicate_FTSOperatorsInContent(t *testing.T) {
 	paraphrase := hostile
 	paraphrase.Title = "OR NEAR AND NOT keywords break query"
 	paraphrase.Learned = "AND OR NOT NEAR tokens must be quoted"
-	resp, err := s.Save(paraphrase)
+	resp, err := s.Save(context.Background(), paraphrase)
 	if err != nil {
 		t.Fatalf("near-dup save with operator keywords must not error: %v", err)
 	}
@@ -273,14 +275,14 @@ func TestSave_NearDuplicate_FTSOperatorsInContent(t *testing.T) {
 
 func TestSave_ForceBypassesBM25(t *testing.T) {
 	s := newTestStore(t)
-	s.Save(validReq())
+	s.Save(context.Background(), validReq())
 
 	// Near-dup with force=true should insert, not be blocked by BM25
 	req := validReq()
 	req.Title = "HubSpot phone number field mapping issue"
 	req.Learned = "always use phone instead of phone_number in HubSpot"
 	req.Force = true
-	resp, err := s.Save(req)
+	resp, err := s.Save(context.Background(), req)
 	if err != nil {
 		t.Fatalf("force near-dup: %v", err)
 	}
@@ -291,9 +293,10 @@ func TestSave_ForceBypassesBM25(t *testing.T) {
 
 // isValidationError checks err is a *store.ValidationError and assigns it.
 func isValidationError(err error, target **store.ValidationError) bool {
-	ve, ok := err.(*store.ValidationError)
-	if ok {
+	var ve *store.ValidationError
+	if errors.As(err, &ve) {
 		*target = ve
+		return true
 	}
-	return ok
+	return false
 }

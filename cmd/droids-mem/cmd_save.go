@@ -1,11 +1,15 @@
 package main
 
 import (
+	"errors"
+
+	"strings"
+
 	"github.com/samuelmolero/droids-mem/internal/store"
 	"github.com/spf13/cobra"
 )
 
-func newSaveCmd(s *store.Store) *cobra.Command {
+func newSaveCmd(a *app) *cobra.Command {
 	var (
 		sessionID string
 		taskType  string
@@ -14,6 +18,7 @@ func newSaveCmd(s *store.Store) *cobra.Command {
 		what      string
 		learned   string
 		tags      string
+		scope     string
 		force     bool
 		dryRun    bool
 	)
@@ -33,6 +38,10 @@ func newSaveCmd(s *store.Store) *cobra.Command {
   droids-mem save --task-type crm_upload --kind error_resolution \
     --title "..." --what "..." --learned "..." --dry-run`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			s, err := a.store()
+			if err != nil {
+				return err
+			}
 			req := store.SaveRequest{
 				SessionID: sessionID,
 				TaskType:  taskType,
@@ -41,23 +50,28 @@ func newSaveCmd(s *store.Store) *cobra.Command {
 				What:      what,
 				Learned:   learned,
 				Tags:      tags,
+				Scope:     scope,
 				Force:     force,
 			}
 
 			if dryRun {
-				if err := previewSave(s, req); err != nil {
-					return err
-				}
-				return nil
+				return previewSave(cmd, s, req)
 			}
 
-			resp, err := s.Save(req)
+			resp, err := s.Save(cmd.Context(), req)
 			if err != nil {
-				if ve, ok := err.(*store.ValidationError); ok {
+				var ve *store.ValidationError
+				if errors.As(err, &ve) {
+					fieldVals := map[string]string{
+						"session_id": sessionID, "task_type": taskType,
+						"kind": kind, "title": title, "what": what,
+						"learned": learned, "tags": tags,
+					}
+					flag := strings.ReplaceAll(ve.Field, "_", "-")
 					writeError("validation_failed", ve.Message, false,
 						withField(ve.Field),
-						withInput(map[string]string{ve.Field: taskType}),
-						withSuggestion("check --"+ve.Field+" value"),
+						withInput(map[string]string{ve.Field: fieldVals[ve.Field]}),
+						withSuggestion("check --"+flag+" value"),
 					)
 					exitWith(ExitUsage)
 				}
@@ -80,33 +94,28 @@ func newSaveCmd(s *store.Store) *cobra.Command {
 	cmd.Flags().StringVar(&what, "what", "", "What happened (required)")
 	cmd.Flags().StringVar(&learned, "learned", "", "What the agent should do next time (required)")
 	cmd.Flags().StringVar(&tags, "tags", "", "Space-delimited tags, e.g. \"hubspot phone field-mapping\"")
+	cmd.Flags().StringVar(&scope, "scope", "", "Memory scope: shared (default) | personal")
 	cmd.Flags().BoolVar(&force, "force", false, "Overwrite existing memory with same fingerprint (HITL correction)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview save without writing to DB (exit 10 on pass)")
 
-	cmd.MarkFlagRequired("task-type")
-	cmd.MarkFlagRequired("kind")
-	cmd.MarkFlagRequired("title")
-	cmd.MarkFlagRequired("what")
-	cmd.MarkFlagRequired("learned")
+	_ = cmd.MarkFlagRequired("task-type")
+	_ = cmd.MarkFlagRequired("kind")
+	_ = cmd.MarkFlagRequired("title")
+	_ = cmd.MarkFlagRequired("what")
+	_ = cmd.MarkFlagRequired("learned")
 
 	return cmd
 }
 
-func previewSave(s *store.Store, req store.SaveRequest) error {
-	// validate only — no insert
+func previewSave(cmd *cobra.Command, s *store.Store, req store.SaveRequest) error {
+	// DryRun runs the full save pipeline (validate → scrub → dedupe) under the
+	// real write lock, then rolls back — nothing persists.
 	req.Force = false
-	resp, err := s.Save(store.SaveRequest{
-		SessionID: req.SessionID,
-		TaskType:  req.TaskType,
-		Kind:      req.Kind,
-		Title:     req.Title,
-		What:      req.What,
-		Learned:   req.Learned,
-		Tags:      req.Tags,
-		Force:     false,
-	})
+	req.DryRun = true
+	resp, err := s.Save(cmd.Context(), req)
 	if err != nil {
-		if ve, ok := err.(*store.ValidationError); ok {
+		var ve *store.ValidationError
+		if errors.As(err, &ve) {
 			writeError("validation_failed", ve.Message, false, withField(ve.Field))
 			exitWith(ExitUsage)
 		}

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -22,9 +23,46 @@ var validKinds = map[string]bool{
 	"session_summary":  true,
 }
 
+var validScopes = map[string]bool{
+	"personal": true,
+	"shared":   true,
+}
+
+// DefaultScope is what the save path stamps when the caller omits the scope
+// field. Matches the column default in schema.go so behavior is consistent
+// whether the row arrives through the API or a direct INSERT.
+const DefaultScope = "shared"
+
+// Field caps (locked decision #8). Hard limits — any field exceeding its cap
+// triggers a `field_too_large` rejection. Caps are forcing functions for
+// distilled lessons; without them the worst-case storage budget (PRD §3.2)
+// blows past the 25 MB target.
+const (
+	MaxTitleLen   = 200
+	MaxWhatLen    = 8192
+	MaxLearnedLen = 4096
+	MaxTagsLen    = 500
+	// MaxTaskTypeLen / MaxSessionIDLen bound the two free-form identifier
+	// fields. Without caps they bypass the storage budget entirely (every
+	// other field is capped) and bloat the FTS index via task_type. Real
+	// values are short: sess_<ULID> = 31 chars, task types ≤ ~20.
+	MaxTaskTypeLen  = 64
+	MaxSessionIDLen = 64
+)
+
 var (
-	rePunct      = regexp.MustCompile(`[^\w\s]`)
+	// rePunct strips punctuation while keeping word chars, whitespace, and
+	// hyphens intact. Decision #18 in the v1.0 plan: aligns the normalizer
+	// with the FTS5 tokenizer (`unicode61 tokenchars=_-`) so the fingerprint,
+	// BM25 query, and Jaccard token set all index the same atoms for
+	// identifiers like `phone_number` and `field-mapping`. Existing rows had
+	// their fingerprints rewritten by `migrate --rescrub`.
+	rePunct      = regexp.MustCompile(`[^\w\s\-]`)
 	reWhitespace = regexp.MustCompile(`\s+`)
+	// reRedactionToken matches the bracketed replacement tokens that Scrub
+	// inserts. Used by isEmptyAfterScrub to decide whether the post-scrub
+	// `learned` field is structurally empty.
+	reRedactionToken = regexp.MustCompile(`\[[A-Z_]+\]`)
 )
 
 // jaccardDupeThreshold: token-set Jaccard similarity above this value
@@ -44,30 +82,50 @@ type SaveRequest struct {
 	Title     string `json:"title"`
 	What      string `json:"what"`
 	Learned   string `json:"learned"`
-	Tags      string `json:"tags"`  // space-delimited tokens
-	Force     bool   `json:"force"` // HITL correction: overwrite matched fingerprint
+	Tags      string `json:"tags"`            // space-delimited tokens
+	Scope     string `json:"scope,omitempty"` // "personal" | "shared", defaults to "shared"
+	Force     bool   `json:"force"`           // HITL correction: overwrite matched fingerprint
+	DryRun    bool   `json:"dry_run"`         // run full pipeline (validate → scrub → dedupe) then ROLLBACK
 }
 
 type SaveResponse struct {
-	Status    string  `json:"status"` // saved | skipped | updated
-	ID        string  `json:"id,omitempty"`
-	SessionID string  `json:"session_id,omitempty"`
-	MatchedID string  `json:"matched_id,omitempty"` // present when skipped
-	Reason    string  `json:"reason,omitempty"`     // duplicate | near_duplicate
-	Score     float64 `json:"score,omitempty"`      // Jaccard similarity for near_duplicate
+	Status         string       `json:"status"` // saved | skipped | updated
+	ID             string       `json:"id,omitempty"`
+	SessionID      string       `json:"session_id,omitempty"`
+	MatchedID      string       `json:"matched_id,omitempty"`      // present when skipped
+	MatchedTitle   string       `json:"matched_title,omitempty"`   // echo norm-setting wording on skip
+	MatchedLearned string       `json:"matched_learned,omitempty"` // echo norm-setting wording on skip
+	Reason         string       `json:"reason,omitempty"`          // duplicate | near_duplicate
+	Score          float64      `json:"score,omitempty"`           // Jaccard similarity for near_duplicate
+	Scrub          *ScrubReport `json:"scrub,omitempty"`           // present only when redactions occurred
 }
 
+// ValidationError is the structured error envelope returned for any save-path
+// rejection. Required-field misses populate just Field + Message (Code empty
+// signals a generic validation failure for backward compatibility); scrub +
+// cap errors set Code and the richer metadata for agent self-correction.
 type ValidationError struct {
-	Field   string `json:"field"`
-	Message string `json:"message"`
+	Code            string       `json:"code,omitempty"`
+	Field           string       `json:"field,omitempty"`
+	Message         string       `json:"message"`
+	Retryable       bool         `json:"retryable"`
+	Suggestion      string       `json:"suggestion,omitempty"`
+	OffendingTags   []string     `json:"offending_tags,omitempty"`
+	MatchedPatterns []string     `json:"matched_patterns,omitempty"`
+	Scrub           *ScrubReport `json:"scrub,omitempty"`
 }
 
 func (e *ValidationError) Error() string {
+	if e.Code != "" {
+		return fmt.Sprintf("%s: %s", e.Code, e.Message)
+	}
 	return fmt.Sprintf("field %q: %s", e.Field, e.Message)
 }
 
-func (s *Store) Save(req SaveRequest) (*SaveResponse, error) {
-	if err := validate(&req); err != nil {
+func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error) {
+	scrubReport, err := validate(&req)
+	if err != nil {
+		recordScrubRejection(err)
 		return nil, err
 	}
 
@@ -79,7 +137,12 @@ func (s *Store) Save(req SaveRequest) (*SaveResponse, error) {
 	fp := fingerprint(req.TaskType, req.Kind, req.Title, req.Learned)
 	now := time.Now().Unix()
 
-	ctx := context.Background()
+	responseScrub := scrubReportForResponse(scrubReport)
+	scrubCountsJSON, err := scrubCountsForStorage(scrubReport)
+	if err != nil {
+		return nil, fmt.Errorf("marshal scrub_counts: %w", err)
+	}
+
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("acquire conn: %w", err)
@@ -88,74 +151,86 @@ func (s *Store) Save(req SaveRequest) (*SaveResponse, error) {
 
 	// BEGIN IMMEDIATE acquires the write lock up front, closing the dedupe
 	// race between fingerprint check + INSERT. busy_timeout (5s) absorbs
-	// concurrent contention from other writers.
+	// concurrent contention from other writers. Dry-run rides the same lock
+	// so its duplicate/near-duplicate prediction is exact, then rolls back.
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return nil, fmt.Errorf("begin immediate: %w", err)
 	}
 	committed := false
 	defer func() {
 		if !committed {
-			conn.ExecContext(ctx, "ROLLBACK")
+			// Background ctx: the rollback must run even when the request
+			// ctx is already canceled — that cancellation is often exactly
+			// why we are rolling back.
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 		}
 	}()
 
 	// layer 1: exact fingerprint match
-	existingID, err := findByFingerprintConn(ctx, conn, fp)
+	existing, err := findByFingerprintConn(ctx, conn, fp)
 	if err != nil {
 		return nil, fmt.Errorf("fingerprint check: %w", err)
 	}
-	if existingID != "" {
+	if existing != nil {
 		if req.Force {
-			resp, err := forceUpdateConn(ctx, conn, existingID, sessionID, req, fp, now)
+			resp, err := forceUpdateConn(ctx, conn, existing.ID, sessionID, req, fp, now, scrubCountsJSON)
 			if err != nil {
 				return nil, err
 			}
-			if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+			resp.Scrub = responseScrub
+			if err := endTxn(ctx, conn, req.DryRun); err != nil {
 				return nil, fmt.Errorf("commit force update: %w", err)
 			}
 			committed = true
 			return resp, nil
 		}
-		if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		if err := endTxn(ctx, conn, req.DryRun); err != nil {
 			return nil, fmt.Errorf("commit skip: %w", err)
 		}
 		committed = true
 		return &SaveResponse{
-			Status:    "skipped",
-			Reason:    "duplicate",
-			MatchedID: existingID,
-			SessionID: sessionID,
+			Status:         "skipped",
+			Reason:         "duplicate",
+			MatchedID:      existing.ID,
+			MatchedTitle:   existing.Title,
+			MatchedLearned: existing.Learned,
+			SessionID:      sessionID,
+			Scrub:          responseScrub,
 		}, nil
 	}
 
 	// layer 2: near-duplicate via BM25 top-K + Jaccard
-	matchedID, similarity, err := nearDuplicateConn(ctx, conn, req)
+	matched, similarity, err := nearDuplicateConn(ctx, conn, req)
 	if err != nil {
 		return nil, fmt.Errorf("near-duplicate check: %w", err)
 	}
-	if matchedID != "" {
+	if matched != nil {
 		if req.Force {
-			resp, err := forceUpdateConn(ctx, conn, matchedID, sessionID, req, fp, now)
+			resp, err := forceUpdateConn(ctx, conn, matched.ID, sessionID, req, fp, now, scrubCountsJSON)
 			if err != nil {
 				return nil, err
 			}
 			resp.Score = similarity
-			if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+			resp.Scrub = responseScrub
+			if err := endTxn(ctx, conn, req.DryRun); err != nil {
 				return nil, fmt.Errorf("commit force update: %w", err)
 			}
 			committed = true
 			return resp, nil
 		}
-		if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		if err := endTxn(ctx, conn, req.DryRun); err != nil {
 			return nil, fmt.Errorf("commit skip: %w", err)
 		}
 		committed = true
 		return &SaveResponse{
-			Status:    "skipped",
-			Reason:    "near_duplicate",
-			MatchedID: matchedID,
-			Score:     similarity,
-			SessionID: sessionID,
+			Status:         "skipped",
+			Reason:         "near_duplicate",
+			MatchedID:      matched.ID,
+			MatchedTitle:   matched.Title,
+			MatchedLearned: matched.Learned,
+			Score:          similarity,
+			SessionID:      sessionID,
+			Scrub:          responseScrub,
 		}, nil
 	}
 
@@ -163,18 +238,26 @@ func (s *Store) Save(req SaveRequest) (*SaveResponse, error) {
 
 	// UPSERT keeps insert idempotent against fingerprint races. With the
 	// IMMEDIATE write lock held, conflict here is theoretically impossible —
-	// kept as defense in depth.
+	// kept as defense in depth. Scope + scrub_pattern_version + scrub_counts
+	// are stamped on every insert and refreshed on conflict so the row's
+	// scrub provenance always matches the most recent body.
 	_, err = conn.ExecContext(ctx, `
-		INSERT INTO memories (id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO memories
+			(id, session_id, task_type, kind, title, what, learned, tags, fingerprint,
+			 created_at, updated_at, scope, scrub_pattern_version, scrub_counts)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(fingerprint) DO UPDATE SET
-			title       = excluded.title,
-			what        = excluded.what,
-			learned     = excluded.learned,
-			tags        = excluded.tags,
-			session_id  = excluded.session_id,
-			updated_at  = excluded.updated_at
-	`, id, sessionID, req.TaskType, req.Kind, req.Title, req.What, req.Learned, req.Tags, fp, now, now)
+			title                 = excluded.title,
+			what                  = excluded.what,
+			learned               = excluded.learned,
+			tags                  = excluded.tags,
+			session_id            = excluded.session_id,
+			updated_at            = excluded.updated_at,
+			scope                 = excluded.scope,
+			scrub_pattern_version = excluded.scrub_pattern_version,
+			scrub_counts          = excluded.scrub_counts
+	`, id, sessionID, req.TaskType, req.Kind, req.Title, req.What, req.Learned, req.Tags, fp,
+		now, now, req.Scope, ScrubPatternVersion, scrubCountsJSON)
 	if err != nil {
 		return nil, fmt.Errorf("insert memory: %w", err)
 	}
@@ -186,7 +269,7 @@ func (s *Store) Save(req SaveRequest) (*SaveResponse, error) {
 		}
 	}
 
-	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+	if err := endTxn(ctx, conn, req.DryRun); err != nil {
 		return nil, fmt.Errorf("commit save: %w", err)
 	}
 	committed = true
@@ -195,7 +278,20 @@ func (s *Store) Save(req SaveRequest) (*SaveResponse, error) {
 		Status:    "saved",
 		ID:        id,
 		SessionID: sessionID,
+		Scrub:     responseScrub,
 	}, nil
+}
+
+// endTxn finishes the save transaction: COMMIT normally, ROLLBACK when the
+// caller asked for a dry run. Dry-run thereby exercises the exact production
+// path (locks, dedupe, scrub, insert, prune) without persisting anything.
+func endTxn(ctx context.Context, conn *sql.Conn, dryRun bool) error {
+	stmt := "COMMIT"
+	if dryRun {
+		stmt = "ROLLBACK"
+	}
+	_, err := conn.ExecContext(ctx, stmt)
+	return err
 }
 
 const maxSessionSummaries = 5
@@ -214,11 +310,14 @@ func pruneSessionSummariesConn(ctx context.Context, conn *sql.Conn, taskType str
 	return err
 }
 
-func forceUpdateConn(ctx context.Context, conn *sql.Conn, existingID, sessionID string, req SaveRequest, fp string, now int64) (*SaveResponse, error) {
+func forceUpdateConn(ctx context.Context, conn *sql.Conn, existingID, sessionID string, req SaveRequest, fp string, now int64, scrubCountsJSON sql.NullString) (*SaveResponse, error) {
 	_, err := conn.ExecContext(ctx, `
-		UPDATE memories SET title=?, what=?, learned=?, tags=?, fingerprint=?, updated_at=?
+		UPDATE memories
+		SET title=?, what=?, learned=?, tags=?, fingerprint=?, updated_at=?,
+		    scope=?, scrub_pattern_version=?, scrub_counts=?
 		WHERE id=?
-	`, req.Title, req.What, req.Learned, req.Tags, fp, now, existingID)
+	`, req.Title, req.What, req.Learned, req.Tags, fp, now,
+		req.Scope, ScrubPatternVersion, scrubCountsJSON, existingID)
 	if err != nil {
 		return nil, fmt.Errorf("force update: %w", err)
 	}
@@ -229,13 +328,40 @@ func forceUpdateConn(ctx context.Context, conn *sql.Conn, existingID, sessionID 
 	}, nil
 }
 
+// matchedRow is the projection returned by both dedupe layers so skip
+// responses can echo back the matched row's title and learned body —
+// soft norm-setting toward the corpus's preferred wording (decision #9).
+type matchedRow struct {
+	ID      string
+	Title   string
+	Learned string
+}
+
+// bm25QueryTermCap caps the OR-arity of the BM25 query string built by
+// nearDuplicateConn. Locked decision #19: at the 8 KB `what` cap a single row
+// can produce 1000+ unique terms which slows search p95 well past the
+// 100 ms target. 100 highest-IDF (= longest) terms preserve the duplicate
+// signal at a fixed query cost.
+const bm25QueryTermCap = 100
+
 // nearDuplicateConn pulls top-K BM25 candidates and re-ranks via Jaccard
 // similarity over normalized token sets of (title+what+learned+tags).
 // Returns the best match if similarity >= jaccardDupeThreshold.
-func nearDuplicateConn(ctx context.Context, conn *sql.Conn, req SaveRequest) (matchedID string, similarity float64, err error) {
+func nearDuplicateConn(ctx context.Context, conn *sql.Conn, req SaveRequest) (*matchedRow, float64, error) {
 	terms := searchTerms(req.Title + " " + req.What + " " + req.Learned + " " + req.Tags)
 	if len(terms) == 0 {
-		return "", 0, nil
+		return nil, 0, nil
+	}
+	// Cap query arity (decision #19). Sort by length desc to keep
+	// high-IDF tokens; falls back to alphabetical for stable tie-break.
+	if len(terms) > bm25QueryTermCap {
+		sort.Slice(terms, func(a, b int) bool {
+			if len(terms[a]) != len(terms[b]) {
+				return len(terms[a]) > len(terms[b])
+			}
+			return terms[a] < terms[b]
+		})
+		terms = terms[:bm25QueryTermCap]
 	}
 	// Wrap each term as an FTS5 phrase literal ("term") so that any FTS5
 	// operator keywords (NOT/AND/OR/NEAR, col:filter) that happen to appear
@@ -261,73 +387,258 @@ func nearDuplicateConn(ctx context.Context, conn *sql.Conn, req SaveRequest) (ma
 		LIMIT ?
 	`, query, req.TaskType, req.Kind, bm25CandidateLimit)
 	if err != nil {
-		return "", 0, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
 	reqTokens := tokenSet(req.Title + " " + req.What + " " + req.Learned + " " + req.Tags)
 	if len(reqTokens) == 0 {
-		return "", 0, nil
+		return nil, 0, nil
 	}
 
-	bestID := ""
+	var best matchedRow
 	bestSim := 0.0
 	for rows.Next() {
 		var id, title, what, learned, tags string
 		if err := rows.Scan(&id, &title, &what, &learned, &tags); err != nil {
-			return "", 0, err
+			return nil, 0, err
 		}
 		candTokens := tokenSet(title + " " + what + " " + learned + " " + tags)
 		sim := jaccard(reqTokens, candTokens)
 		if sim > bestSim {
 			bestSim = sim
-			bestID = id
+			best = matchedRow{ID: id, Title: title, Learned: learned}
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return "", 0, err
+		return nil, 0, err
 	}
 	if bestSim >= jaccardDupeThreshold {
-		return bestID, bestSim, nil
+		return &best, bestSim, nil
 	}
-	return "", 0, nil
+	return nil, 0, nil
 }
 
-func findByFingerprintConn(ctx context.Context, conn *sql.Conn, fp string) (string, error) {
-	var id string
-	err := conn.QueryRowContext(ctx, `SELECT id FROM memories WHERE fingerprint = ?`, fp).Scan(&id)
+func findByFingerprintConn(ctx context.Context, conn *sql.Conn, fp string) (*matchedRow, error) {
+	var row matchedRow
+	err := conn.QueryRowContext(ctx,
+		`SELECT id, title, learned FROM memories WHERE fingerprint = ?`, fp,
+	).Scan(&row.ID, &row.Title, &row.Learned)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
+		return nil, nil
 	}
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return id, nil
+	return &row, nil
 }
 
-func validate(req *SaveRequest) error {
+// validate runs the v1.0 save-path gate sequence (locked plan §Phase 3):
+//  1. Required fields present.
+//  2. Scope default + allowed-value check.
+//  3. Field caps.
+//  4. Tag pre-scrub (tags rejected, never redacted).
+//  5. Trim trailing whitespace.
+//  6. Scrub title/what/learned.
+//  7. Empty-after-scrub check on `learned`.
+//
+// Returns the aggregated ScrubReport across all three text fields. nil when
+// nothing was redacted; callers may still receive a non-nil report with
+// RedactionCount == 0 (no fields fired) for code-path uniformity.
+func validate(req *SaveRequest) (*ScrubReport, error) {
 	req.TaskType = strings.ToLower(strings.TrimSpace(req.TaskType))
 	if req.TaskType == "" {
-		return &ValidationError{Field: "task_type", Message: "required"}
+		return nil, &ValidationError{Field: "task_type", Message: "required", Retryable: true}
 	}
 	if !validKinds[req.Kind] {
-		return &ValidationError{Field: "kind", Message: "must be one of: error_resolution, task_pattern, user_rule, session_summary"}
+		return nil, &ValidationError{
+			Field:     "kind",
+			Message:   "must be one of: error_resolution, task_pattern, user_rule, session_summary",
+			Retryable: true,
+		}
 	}
 	if strings.TrimSpace(req.Title) == "" {
-		return &ValidationError{Field: "title", Message: "required"}
+		return nil, &ValidationError{Field: "title", Message: "required", Retryable: true}
 	}
 	if strings.TrimSpace(req.What) == "" {
-		return &ValidationError{Field: "what", Message: "required"}
+		return nil, &ValidationError{Field: "what", Message: "required", Retryable: true}
 	}
 	if strings.TrimSpace(req.Learned) == "" {
-		return &ValidationError{Field: "learned", Message: "required"}
+		return nil, &ValidationError{Field: "learned", Message: "required", Retryable: true}
 	}
-	// PII scrub hook — pass-through in V1, see internal/store/scrub.go
-	req.Title = scrubPII(req.Title)
-	req.What = scrubPII(req.What)
-	req.Learned = scrubPII(req.Learned)
-	req.Tags = scrubPII(req.Tags)
-	return nil
+
+	if req.Scope == "" {
+		req.Scope = DefaultScope
+	}
+	if !validScopes[req.Scope] {
+		return nil, &ValidationError{
+			Field:      "scope",
+			Message:    "must be 'personal' or 'shared'",
+			Retryable:  true,
+			Suggestion: "omit scope to use the default ('shared')",
+		}
+	}
+
+	if err := enforceFieldCap("task_type", req.TaskType, MaxTaskTypeLen, "use a short workflow slug, e.g. 'crm_upload'"); err != nil {
+		return nil, err
+	}
+	if err := enforceFieldCap("session_id", req.SessionID, MaxSessionIDLen, "pass the session_id minted by mem_context, or omit it"); err != nil {
+		return nil, err
+	}
+	if err := enforceFieldCap("title", req.Title, MaxTitleLen, "shorten the title to under the cap"); err != nil {
+		return nil, err
+	}
+	if err := enforceFieldCap("what", req.What, MaxWhatLen, "split or condense the context body"); err != nil {
+		return nil, err
+	}
+	if err := enforceFieldCap("learned", req.Learned, MaxLearnedLen, "distill the lesson to its essential insight"); err != nil {
+		return nil, err
+	}
+	if err := enforceFieldCap("tags", req.Tags, MaxTagsLen, "drop redundant tags or shorten existing ones"); err != nil {
+		return nil, err
+	}
+
+	if err := checkTagsForSecrets(req.Tags); err != nil {
+		return nil, err
+	}
+
+	req.Title = strings.TrimSpace(req.Title)
+	req.What = strings.TrimSpace(req.What)
+	req.Learned = strings.TrimSpace(req.Learned)
+	req.Tags = strings.TrimSpace(req.Tags)
+
+	titleOut, titleRep := Scrub(req.Title)
+	whatOut, whatRep := Scrub(req.What)
+	learnedOut, learnedRep := Scrub(req.Learned)
+	req.Title = titleOut
+	req.What = whatOut
+	req.Learned = learnedOut
+
+	agg := aggregateScrubReports(titleRep, whatRep, learnedRep)
+
+	if isEmptyAfterScrub(req.Learned) {
+		// Empty-after-scrub error always carries the scrub block so the
+		// agent can see which pattern ate the body and reframe the lesson.
+		return nil, &ValidationError{
+			Code:       "scrub_emptied_learned",
+			Field:      "learned",
+			Message:    "scrub removed all content from learned",
+			Retryable:  false,
+			Suggestion: "rewrite the lesson without raw secrets; describe the pattern instead of quoting it",
+			Scrub:      &agg,
+		}
+	}
+
+	return &agg, nil
+}
+
+func enforceFieldCap(field, value string, max int, suggestion string) error {
+	if len(value) <= max {
+		return nil
+	}
+	return &ValidationError{
+		Code:       "field_too_large",
+		Field:      field,
+		Message:    fmt.Sprintf("max %d characters", max),
+		Retryable:  true,
+		Suggestion: suggestion,
+	}
+}
+
+// checkTagsForSecrets runs Scrub on each whitespace-delimited tag and rejects
+// the save if any tag would have been redacted. Tags surface in search
+// results untransformed, so a leaked secret in a tag is just as bad as one
+// in `learned` — and we don't auto-strip in v1.0 (decision #13).
+func checkTagsForSecrets(tags string) error {
+	if tags == "" {
+		return nil
+	}
+	tokens := strings.Fields(tags)
+	var offending []string
+	matched := map[string]struct{}{}
+	for _, tok := range tokens {
+		_, rep := Scrub(tok)
+		if rep.RedactionCount == 0 {
+			continue
+		}
+		offending = append(offending, tok)
+		for name := range rep.PerPatternCounts {
+			matched[name] = struct{}{}
+		}
+	}
+	if len(offending) == 0 {
+		return nil
+	}
+	patterns := make([]string, 0, len(matched))
+	for n := range matched {
+		patterns = append(patterns, n)
+	}
+	sort.Strings(patterns)
+	return &ValidationError{
+		Code:            "tag_contains_secret",
+		Field:           "tags",
+		Message:         "one or more tags contain redactable content",
+		Retryable:       true,
+		Suggestion:      "remove sensitive tokens from tags; tags are stored unscrubbed for search",
+		OffendingTags:   offending,
+		MatchedPatterns: patterns,
+	}
+}
+
+// aggregateScrubReports folds the per-field reports into one row-level
+// summary. FieldsRedacted lists fields with at least one redaction in stable
+// (title, what, learned) order so callers see deterministic output.
+func aggregateScrubReports(title, what, learned ScrubReport) ScrubReport {
+	agg := ScrubReport{
+		PerPatternCounts: map[string]int{},
+		PatternVersion:   ScrubPatternVersion,
+	}
+	fold := func(field string, r ScrubReport) {
+		if r.RedactionCount == 0 {
+			return
+		}
+		agg.RedactionCount += r.RedactionCount
+		for name, n := range r.PerPatternCounts {
+			agg.PerPatternCounts[name] += n
+		}
+		agg.FieldsRedacted = append(agg.FieldsRedacted, field)
+	}
+	fold("title", title)
+	fold("what", what)
+	fold("learned", learned)
+	return agg
+}
+
+// isEmptyAfterScrub reports whether the post-scrub `learned` value has no
+// non-redaction, non-whitespace characters left. Backs decision #5 — refuse
+// to persist a lesson that's been reduced to nothing but token markers.
+func isEmptyAfterScrub(s string) bool {
+	stripped := reRedactionToken.ReplaceAllString(s, "")
+	return strings.TrimSpace(stripped) == ""
+}
+
+// scrubReportForResponse returns a pointer suitable for the response envelope
+// per decision #7: only emitted when at least one redaction fired.
+func scrubReportForResponse(agg *ScrubReport) *ScrubReport {
+	if agg == nil || agg.RedactionCount == 0 {
+		return nil
+	}
+	copy := *agg
+	return &copy
+}
+
+// scrubCountsForStorage marshals the per-row scrub_counts JSON column. NULL
+// when no redactions fired so the column stays sparse and `doctor
+// --scrub-stats` can filter via json_extract IS NOT NULL.
+func scrubCountsForStorage(agg *ScrubReport) (sql.NullString, error) {
+	if agg == nil || agg.RedactionCount == 0 {
+		return sql.NullString{}, nil
+	}
+	b, err := json.Marshal(agg)
+	if err != nil {
+		return sql.NullString{}, err
+	}
+	return sql.NullString{String: string(b), Valid: true}, nil
 }
 
 // fingerprint produces a deterministic hash from normalized fields.
