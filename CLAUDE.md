@@ -50,13 +50,14 @@ Single binary, layered. Don't bypass layers:
 1. **`cmd/droids-mem/`** — cobra subcommands. One `cmd_*.go` per command; delegates to store, emits JSON via `output.go`. No business logic.
 2. **`internal/mcpserver/`** — MCP bridge (`server.go` wires HTTP + auth, `tools.go` defines 4 tools). Operator commands (`list`, `schema`, `doctor`) intentionally not exposed here.
 3. **`internal/store/`** — all business logic shared by CLI and MCP. Key files:
-   - `save.go` — validate → normalize → fingerprint → dedupe (2 layers) → insert
+   - `save.go` — validate → scrub → fingerprint → dedupe (2 layers) → insert; owns scrub *policy* (which fields, tag + identifier strict-reject, empty-after-scrub)
    - `search.go` — FTS5 MATCH queries
    - `context.go` — two-tier context bundle assembly (always + browse)
    - `doctor.go` / `inspect.go` — health checks, introspection
-   - `scrub.go` — content normalization helpers
-4. **`internal/db/`** — `db.go` opens connection + applies pragmas; `schema.go` holds raw DDL string.
-5. **`internal/state/`** — `LoadOrCreateToken()` is the canonical bearer-token resolver. Owns all `~/.droids-mem/` file ops.
+   - `scrub.go` — thin aliases re-exporting the engine from `internal/scrub`
+4. **`internal/scrub/`** — the scrub *engine* (ADR-0008): `spec.yaml` (embedded declarative detector spec, single source of truth, pinned-hash version enforcement), `scrub.go` (single-pass collect → overlap-resolve → splice, windowed scanning), `entropy.go` (deterministic gate for usage-class detectors), `corpus.go` + `testdata/` (fixture corpus, `[CUT]` defang convention). No store imports.
+5. **`internal/db/`** — `db.go` opens connection + applies pragmas; `schema.go` holds raw DDL string.
+6. **`internal/state/`** — `LoadOrCreateToken()` is the canonical bearer-token resolver. Owns all `~/.droids-mem/` file ops.
 
 ## Data model invariants
 

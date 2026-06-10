@@ -97,29 +97,45 @@ first `db.Init` on a new file.
 
 ---
 
-## PII scrub behaviour
+## Secret scrub behaviour
 
 On every `save`, `title` / `what` / `learned` are scrubbed in a single pass.
-Tags are checked against the same patterns and the save is **rejected** if any
-tag matches (`tag_contains_secret`, `retryable:true`).
+Tags, `task_type`, and `session_id` are checked against the same detectors and
+the save is **rejected** on any match (`tag_contains_secret`,
+`task_type_contains_secret`, `session_id_contains_secret` — all
+`retryable:true`) because those fields are stored unscrubbed.
 
-Pattern set, in declaration order (longer wins, tie → earlier wins):
+Detectors are declared in `internal/scrub/spec.yaml` (pattern version 3) in
+three classes. Overlap resolution: longer redaction span wins, tie → earlier
+declaration wins, so a provider token inside an assignment keeps its specific
+redaction token.
 
-| # | Pattern | Token |
-|---|---------|-------|
-| 1 | PEM private key block | `[PEM_KEY]` |
-| 2 | JWT (`xxx.yyy.zzz`) | `[JWT]` |
-| 3 | AWS access key (`AKIA…`, `ASIA…`) | `[AWS_KEY]` |
-| 4 | GitHub token (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`) | `[GITHUB_TOKEN]` |
-| 5 | Stripe key (`sk_live_`, `pk_live_`, …) | `[STRIPE_KEY]` |
-| 6 | Slack token (`xoxa-`, `xoxb-`, `xoxp-`, `xoxr-`, `xoxs-`) | `[SLACK_TOKEN]` |
-| 7 | Anthropic API key (`sk-ant-`) | `[ANTHROPIC_KEY]` |
-| 8 | OpenAI API key (`sk-`, `sk-proj-`) | `[OPENAI_KEY]` |
-| 9 | US SSN (`XXX-XX-XXXX`) | `[SSN]` |
-| 10 | Credit card (Luhn-validated) | `[CC]` |
-| 11 | Phone (E.164) | `[PHONE]` |
-| 12 | Private IPv4 (RFC 1918 + loopback) | `[PRIVATE_IP]` |
-| 13 | Email | `[EMAIL]` |
+| # | Detector | Class | Token |
+|---|----------|-------|-------|
+| 1 | PEM private key block | provider | `[PEM_KEY]` |
+| 2 | JWT (`xxx.yyy.zzz`) | provider | `[JWT]` |
+| 3 | AWS access key (`AKIA…`, `ASIA…`) | provider | `[AWS_KEY]` |
+| 4 | GitHub token (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`) | provider | `[GITHUB_TOKEN]` |
+| 5 | GitHub fine-grained PAT (`github_pat_`) | provider | `[GITHUB_TOKEN]` |
+| 6 | GitLab PAT (`glpat-`) | provider | `[GITLAB_TOKEN]` |
+| 7 | Google API key (`AIza…`) | provider | `[GOOGLE_KEY]` |
+| 8 | npm token (`npm_`) | provider | `[NPM_TOKEN]` |
+| 9 | Stripe key (`sk_live_`, `pk_live_`, …) | provider | `[STRIPE_KEY]` |
+| 10 | Slack token (`xoxa-` … `xoxs-`) | provider | `[SLACK_TOKEN]` |
+| 11 | Anthropic API key (`sk-ant-`) | provider | `[ANTHROPIC_KEY]` |
+| 12 | OpenAI API key (`sk-`) | provider | `[OPENAI_KEY]` |
+| 13 | Bearer header value (`Bearer <value>`) | usage | `[SECRET]` |
+| 14 | Assignment value (`key/token/password [:=] <value>`) | usage | `[SECRET]` |
+| 15 | URL credential (`scheme://user:<password>@`) | usage | `[SECRET]` |
+| 16 | Phone (E.164) | pii | `[PHONE]` |
+| 17 | Private IPv4 (RFC 1918 + loopback) | pii | `[PRIVATE_IP]` |
+| 18 | Email | pii | `[EMAIL]` |
+
+Usage-class detectors redact only the secret value (context words stay
+readable) and — for bearer/assignment — must pass a deterministic Shannon
+entropy gate (≥ 3.5 bits/char), so placeholders like `password = changeme`
+are left alone while generated secrets are redacted. See
+`docs/adr/0008-layered-scrub-detectors.md`.
 
 Empty-after-scrub on `learned` rejects the save with `scrub_emptied_learned`.
 Save responses include a `scrub` block whenever `redaction_count > 0`.

@@ -77,15 +77,27 @@ _Avoid_: slot, bucket, layer
 ### Scrub pipeline
 
 **Scrub pipeline**:
-The single-pass redaction stage that runs on every save against title, what, and learned before fingerprinting and dedupe.
-_Avoid_: filter, sanitizer, PII filter, masker
+The single-pass redaction stage that runs on every save against title, what, and learned before fingerprinting and dedupe. Secrets-first: developer credentials are the threat (ADR-0008); email/phone/private-IP coverage is incidental.
+_Avoid_: filter, sanitizer, PII filter, PII scrub, masker
 
 **Pattern**:
-One of the 13 ordered detectors (pem_key → jwt → aws_key → github_token → stripe_key → slack_token → anthropic_key → openai_key → ssn → credit_card → phone → private_ipv4 → email) the Scrub pipeline applies. Overlap resolution: longer wins, tie → earlier declaration wins.
-_Avoid_: rule, matcher, detector, regex
+One of the 18 ordered detectors declared in the scrub spec, applied by the Scrub pipeline. Grouped into three Detector classes; declaration order is providers → usage → pii (pattern version 3). ssn + credit_card were dropped pre-v1.0 (high false-positive rate on free text). Overlap resolution: longer redaction span wins, tie → earlier declaration wins.
+_Avoid_: rule, matcher, regex
+
+**Detector class**:
+The kind of evidence a Pattern keys on: `provider` (vendor prefix, e.g. `ghp_`), `usage` (how the value is used — bearer header, assignment, URL credential position), or `pii` (email, phone, private IP).
+_Avoid_: pattern type, category
+
+**Scrub spec**:
+The embedded declarative file (`internal/scrub/spec.yaml`) that is the single source of truth for Patterns and the pattern version. Any edit forces a version bump via the pinned-hash test.
+_Avoid_: pattern list, config
+
+**Entropy gate**:
+The deterministic Shannon-entropy validator (bits/char ≥ 3.5) that a usage-class candidate value must pass before redaction. Filters placeholders (`changeme`) from generated secrets. Pure function — preserves scrub determinism.
+_Avoid_: randomness check, entropy filter
 
 **Redaction token**:
-The bracketed, per-category placeholder a Pattern emits in place of a match (`[EMAIL]`, `[AWS_KEY]`, `[JWT]`, …).
+The bracketed, per-category placeholder a Pattern emits in place of a match (`[EMAIL]`, `[AWS_KEY]`, `[JWT]`, …). Usage-class Patterns emit the generic `[SECRET]`.
 _Avoid_: mask, placeholder, replacement
 
 **ScrubReport**:
@@ -95,6 +107,10 @@ _Avoid_: scrub log, redaction summary
 **Tag strict-reject**:
 The save-rejection rule that fails any save whose tag matches a Pattern (`tag_contains_secret`, `retryable:true`). Tags are never auto-stripped.
 _Avoid_: tag scrub, tag filter
+
+**Identifier strict-reject**:
+The same rule applied to `task_type` and `session_id` (`task_type_contains_secret`, `session_id_contains_secret`). Identifiers are routing keys stored unscrubbed, so a Pattern match rejects the save instead of redacting.
+_Avoid_: identifier scrub
 
 **Empty-after-scrub**:
 The save-rejection rule that fails any save whose `learned` field is empty after the Scrub pipeline runs (`scrub_emptied_learned`).

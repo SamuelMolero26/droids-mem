@@ -501,6 +501,15 @@ func validate(req *SaveRequest) (*ScrubReport, error) {
 	if err := checkTagsForSecrets(req.Tags); err != nil {
 		return nil, err
 	}
+	// Identifier fields are persisted verbatim (never redacted) and surface
+	// in FTS + context bundles, so a secret in them is as bad as one in tags.
+	// Same strict-reject policy: the agent rewrites, nothing is auto-stripped.
+	if err := checkIdentifierForSecrets("task_type", req.TaskType); err != nil {
+		return nil, err
+	}
+	if err := checkIdentifierForSecrets("session_id", req.SessionID); err != nil {
+		return nil, err
+	}
 
 	req.Title = strings.TrimSpace(req.Title)
 	req.What = strings.TrimSpace(req.What)
@@ -581,6 +590,33 @@ func checkTagsForSecrets(tags string) error {
 		Retryable:       true,
 		Suggestion:      "remove sensitive tokens from tags; tags are stored unscrubbed for search",
 		OffendingTags:   offending,
+		MatchedPatterns: patterns,
+	}
+}
+
+// checkIdentifierForSecrets strict-rejects a save whose identifier field
+// (task_type, session_id) matches any scrub detector. Identifiers are stored
+// unscrubbed by design — they are routing keys, not prose — so redaction is
+// not an option; rejection with a retryable error is.
+func checkIdentifierForSecrets(field, value string) error {
+	if value == "" {
+		return nil
+	}
+	_, rep := Scrub(value)
+	if rep.RedactionCount == 0 {
+		return nil
+	}
+	patterns := make([]string, 0, len(rep.PerPatternCounts))
+	for name := range rep.PerPatternCounts {
+		patterns = append(patterns, name)
+	}
+	sort.Strings(patterns)
+	return &ValidationError{
+		Code:            field + "_contains_secret",
+		Field:           field,
+		Message:         "value matches a scrub detector and identifiers are stored unscrubbed",
+		Retryable:       true,
+		Suggestion:      "use a short non-sensitive slug for " + field,
 		MatchedPatterns: patterns,
 	}
 }

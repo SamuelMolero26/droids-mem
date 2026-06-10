@@ -35,7 +35,7 @@ Thumbs.db
 !.env.example
 
 # Documentation and files (regenerable / personal)
-/docs/
-/files/
+docs/
+files/
 future.todo
 CONTEXT.md

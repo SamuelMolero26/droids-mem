@@ -362,3 +362,57 @@ cases:
     input: "installed npm_package_helper from registry"
     expected: "installed npm_package_helper from registry"
     counts: {}
+
+  # --- usage-shape detectors (v3) ---
+  - name: assignment_password_high_entropy
+    category: positive
+    input: "password = x7Kp9q2mNv8wLz4r done"
+    expected: "password = [SECRET] done"
+    counts:
+      assignment_secret: 1
+
+  - name: assignment_low_entropy_placeholder
+    category: negative
+    input: "password = changeme now"
+    expected: "password = changeme now"
+    counts: {}
+
+  - name: assignment_quoted_api_key
+    category: positive
+    input: 'api_key: "Zq8xT3vM1nB6rYwK" set'
+    expected: 'api_key: "[SECRET]" set'
+    counts:
+      assignment_secret: 1
+
+  - name: assignment_go_code_identifier
+    category: negative
+    input: "token := getToken in code"
+    expected: "token := getToken in code"
+    counts: {}
+
+  - name: bearer_header_high_entropy
+    category: positive
+    input: "Authorization: Bearer Xk29JqLm4Tn8Rv5W rest"
+    expected: "Authorization: Bearer [SECRET] rest"
+    counts:
+      bearer_token: 1
+
+  - name: bearer_low_entropy_prose
+    category: negative
+    input: "send Bearer tokenhere header"
+    expected: "send Bearer tokenhere header"
+    counts: {}
+
+  - name: url_credential_with_private_ip
+    category: positive
+    input: "db at postgres://admin:S3cr3tPass@192.168.1.5/db down"
+    expected: "db at postgres://admin:[SECRET]@[PRIVATE_IP]/db down"
+    counts:
+      url_credential: 1
+      private_ipv4: 1
+
+  - name: url_without_credential
+    category: negative
+    input: "see https://example.com/path and ftp://user@host"
+    expected: "see https://example.com/path and ftp://user@host"
+    counts: {}
