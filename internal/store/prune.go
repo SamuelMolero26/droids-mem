@@ -73,8 +73,7 @@ func (s *Store) Prune(ctx context.Context, req PruneRequest) (*PruneResponse, er
 		}
 	}()
 
-	//nolint:gosec // G202: where built from hardcoded column names ("kind = ?", "task_type = ?", "created_at < ?"); args parameterized
-	selectSQL := `SELECT id, kind, task_type, title, created_at FROM memories WHERE ` + where + ` ORDER BY created_at, id`
+	selectSQL := `SELECT id, kind, task_type, title, created_at FROM memories WHERE ` + where + ` ORDER BY created_at, id` // #nosec G202 -- where is built from hardcoded column predicates; values are parameterized
 	rows, err := conn.QueryContext(ctx, selectSQL, args...)
 	if err != nil {
 		return nil, fmt.Errorf("select prune candidates: %w", err)
@@ -98,8 +97,7 @@ func (s *Store) Prune(ctx context.Context, req PruneRequest) (*PruneResponse, er
 	resp := &PruneResponse{Status: "dry_run", Count: len(matched), Matched: matched}
 	if req.Apply {
 		// FTS stays in sync via the AD trigger — never touch memories_fts here.
-		//nolint:gosec // G202: where built from hardcoded column names; args parameterized
-		deleteSQL := `DELETE FROM memories WHERE ` + where
+		deleteSQL := `DELETE FROM memories WHERE ` + where // #nosec G202 -- where is built from hardcoded column predicates; values are parameterized
 		if _, err := conn.ExecContext(ctx, deleteSQL, args...); err != nil {
 			return nil, fmt.Errorf("delete pruned rows: %w", err)
 		}
@@ -326,9 +324,8 @@ func loadDupeRows(ctx context.Context, conn *sql.Conn, req SuggestDupesRequest) 
 		conds = append(conds, "task_type = ?")
 		args = append(args, req.TaskType)
 	}
-	//nolint:gosec // G202: conds are hardcoded column predicates ("kind = ?", "task_type = ?"); args parameterized
 	scanSQL := `SELECT id, kind, task_type, title, what, learned, tags, created_at FROM memories WHERE ` +
-		strings.Join(conds, " AND ") + ` ORDER BY created_at, id`
+		strings.Join(conds, " AND ") + ` ORDER BY created_at, id` // #nosec G202 -- conds are hardcoded column predicates; values are parameterized
 	rows, err := conn.QueryContext(ctx, scanSQL, args...)
 	if err != nil {
 		return nil, fmt.Errorf("load scan pool: %w", err)
