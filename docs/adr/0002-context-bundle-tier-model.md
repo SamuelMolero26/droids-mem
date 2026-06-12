@@ -1,6 +1,6 @@
 # 0002 — Context bundle tier model
 
-**Status**: Accepted
+**Status**: Accepted — always-tier user_rule clause amended by locked decision #20 (cap 5) and ADR-0011 (overflow stubs)
 **Date**: 2026-05-17
 
 ## Context

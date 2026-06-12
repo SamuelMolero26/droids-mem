@@ -180,11 +180,99 @@ func TestContext_BrowseTierIsSnippetOnly(t *testing.T) {
 		if m.Learned != "" {
 			t.Errorf("browse memory must NOT include Learned body (only Snippet), got %q", m.Learned)
 		}
-		if m.Snippet == "" {
+		if m.Kind == "session_summary" {
+			t.Errorf("browse tier must not contain session_summary")
+		}
+		if m.Kind == "user_rule" {
+			// rule stubs (ADR-0011) are title-only — no snippet
+			if m.Snippet != "" {
+				t.Errorf("rule stub must not have snippet, got %q", m.Snippet)
+			}
+		} else if m.Snippet == "" {
 			t.Error("browse memory must have snippet")
 		}
-		if m.Kind == "session_summary" || m.Kind == "user_rule" {
-			t.Errorf("browse tier should only contain error_resolution/task_pattern, got %q", m.Kind)
+	}
+}
+
+func TestContext_UserRuleOverflowStubs(t *testing.T) {
+	s := newTestStore(t)
+	rules := []struct{ title, learned string }{
+		{"Company name abbreviation", "Always abbreviate Company as Co."},
+		{"Phone formatting", "Strip non-digits before upload to HubSpot"},
+		{"Date column handling", "Reject ambiguous DD/MM dates, ask the user"},
+		{"Duplicate contact policy", "Merge by email, never by name alone"},
+		{"Currency normalization", "Convert all amounts to USD with daily rate"},
+		{"Empty field default", "Leave blank rather than inventing placeholder data"},
+		{"Owner assignment", "New contacts default to the regional sales owner"},
+	}
+	for _, r := range rules {
+		if _, err := s.Save(context.Background(), store.SaveRequest{
+			TaskType: "crm_upload",
+			Kind:     "user_rule",
+			Title:    r.title,
+			What:     "User corrected behaviour: " + r.learned,
+			Learned:  r.learned,
+		}); err != nil {
+			t.Fatalf("seed rule %q: %v", r.title, err)
+		}
+	}
+
+	resp, err := s.Context(context.Background(), store.ContextRequest{TaskType: "crm_upload"})
+	if err != nil {
+		t.Fatalf("Context: %v", err)
+	}
+	if resp.UserRulesTotal != len(rules) {
+		t.Errorf("user_rules_total = %d, want %d", resp.UserRulesTotal, len(rules))
+	}
+	if len(resp.UserRules) != 5 {
+		t.Fatalf("always-tier rules = %d, want 5", len(resp.UserRules))
+	}
+	var stubs []store.ContextMemory
+	for _, m := range resp.Browse {
+		if m.Kind == "user_rule" {
+			stubs = append(stubs, m)
+		}
+	}
+	if len(stubs) != len(rules)-5 {
+		t.Fatalf("rule stubs in browse = %d, want %d", len(stubs), len(rules)-5)
+	}
+	for _, st := range stubs {
+		if st.Tier != "browse" {
+			t.Errorf("stub tier = %q, want browse", st.Tier)
+		}
+		if st.Title == "" || st.ID == "" {
+			t.Error("stub must carry id + title")
+		}
+		if st.Learned != "" || st.Snippet != "" {
+			t.Errorf("stub must be title-only, got learned=%q snippet=%q", st.Learned, st.Snippet)
+		}
+	}
+	// no rule may appear in both tiers
+	seen := map[string]bool{}
+	for _, m := range resp.UserRules {
+		seen[m.ID] = true
+	}
+	for _, st := range stubs {
+		if seen[st.ID] {
+			t.Errorf("rule %s appears in both always tier and browse stubs", st.ID)
+		}
+	}
+}
+
+func TestContext_FewRules_NoStubs(t *testing.T) {
+	s := newTestStore(t)
+	seedContextFixture(t, s) // exactly 1 user_rule
+
+	resp, err := s.Context(context.Background(), store.ContextRequest{TaskType: "crm_upload"})
+	if err != nil {
+		t.Fatalf("Context: %v", err)
+	}
+	if resp.UserRulesTotal != 1 {
+		t.Errorf("user_rules_total = %d, want 1", resp.UserRulesTotal)
+	}
+	for _, m := range resp.Browse {
+		if m.Kind == "user_rule" {
+			t.Errorf("no rule stubs expected when rules fit always tier, found %s", m.ID)
 		}
 	}
 }

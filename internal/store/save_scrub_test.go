@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -75,6 +76,32 @@ func TestSave_FieldTooLarge_Title(t *testing.T) {
 	}
 	if ve.Suggestion == "" {
 		t.Error("expected suggestion text")
+	}
+	if ve.Limit != store.MaxTitleLen {
+		t.Errorf("limit = %d, want %d", ve.Limit, store.MaxTitleLen)
+	}
+	if ve.Actual != store.MaxTitleLen+1 {
+		t.Errorf("actual = %d, want %d", ve.Actual, store.MaxTitleLen+1)
+	}
+	wantMsg := fmt.Sprintf("max %d bytes (got %d)", store.MaxTitleLen, store.MaxTitleLen+1)
+	if ve.Message != wantMsg {
+		t.Errorf("message = %q, want %q", ve.Message, wantMsg)
+	}
+}
+
+// Field caps are byte limits (CONTEXT.md "Field cap"), so multi-byte runes
+// count at their UTF-8 width: 67 three-byte CJK runes = 201 bytes > 200.
+func TestSave_FieldTooLarge_Title_CountsBytes(t *testing.T) {
+	s := newTestStore(t)
+	req := validReq()
+	req.Title = strings.Repeat("世", store.MaxTitleLen/3+1)
+	_, err := s.Save(context.Background(), req)
+	ve := mustValidationError(t, err)
+	if ve.Code != "field_too_large" || ve.Field != "title" {
+		t.Errorf("code/field = %q/%q, want field_too_large/title", ve.Code, ve.Field)
+	}
+	if ve.Actual != len(req.Title) {
+		t.Errorf("actual = %d, want byte length %d", ve.Actual, len(req.Title))
 	}
 }
 

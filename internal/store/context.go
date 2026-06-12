@@ -9,8 +9,9 @@ import (
 )
 
 // Tier sizes for the browse tier. Always-tier returns latest session_summary
-// + ALL user_rules unconditionally — those are critical state, not a list to
-// cap. Browse tier returns titles + short snippets for shallow scanning.
+// + the newest maxAlwaysTierUserRules user_rules in full; older rules surface
+// as browse-tier title stubs (ADR-0011) so no rule is ever invisible. Browse
+// tier returns titles + short snippets for shallow scanning.
 const (
 	browseErrorLimit   = 10
 	browseTaskLimit    = 10
@@ -39,7 +40,10 @@ type ContextResponse struct {
 	TaskType    string          `json:"task_type"`
 	LastSession *ContextMemory  `json:"last_session,omitempty"`
 	UserRules   []ContextMemory `json:"user_rules"`
-	Browse      []ContextMemory `json:"browse"`
+	// UserRulesTotal counts all user_rule rows for the task_type. When it
+	// exceeds len(UserRules), the overflow appears in Browse as title stubs.
+	UserRulesTotal int             `json:"user_rules_total"`
+	Browse         []ContextMemory `json:"browse"`
 }
 
 func (s *Store) Context(ctx context.Context, req ContextRequest) (*ContextResponse, error) {
@@ -96,17 +100,20 @@ func (s *Store) Context(ctx context.Context, req ContextRequest) (*ContextRespon
 		resp.LastSession = last
 	}
 
-	rules, err := fetchAllUserRulesConn(ctx, conn, taskType)
+	rules, ruleStubs, rulesTotal, err := fetchUserRulesConn(ctx, conn, taskType)
 	if err != nil {
 		return nil, err
 	}
 	resp.UserRules = rules
+	resp.UserRulesTotal = rulesTotal
 
 	browse, err := fetchBrowseTierConn(ctx, conn, ftsQuery, taskType)
 	if err != nil {
 		return nil, err
 	}
-	resp.Browse = browse
+	// Rule stubs lead the browse tier: rules are critical state, so their
+	// titles must be seen before the BM25-ranked errors/patterns (ADR-0011).
+	resp.Browse = append(ruleStubs, browse...)
 
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return nil, fmt.Errorf("commit context: %w", err)
@@ -136,33 +143,44 @@ func fetchLastSessionConn(ctx context.Context, conn *sql.Conn, taskType string) 
 }
 
 // maxAlwaysTierUserRules bounds the always-tier user_rule slice so the
-// context bundle payload stays within the PRD §3.2 budget. Older rules stay
-// reachable via `mem_search kind=user_rule` — they're only dropped from the
-// auto-orientation tier, not from the database. Locked decision #20.
+// context bundle payload stays within the PRD §3.2 budget. Locked decision
+// #20, amended by ADR-0011: older rules are not silently dropped — they come
+// back as browse-tier title stubs the agent can expand via mem_get.
 const maxAlwaysTierUserRules = 5
 
-func fetchAllUserRulesConn(ctx context.Context, conn *sql.Conn, taskType string) ([]ContextMemory, error) {
+// fetchUserRulesConn returns the newest maxAlwaysTierUserRules rules in full
+// (always tier), the remainder as browse-tier title stubs, and the total rule
+// count for the task_type.
+func fetchUserRulesConn(ctx context.Context, conn *sql.Conn, taskType string) (rules, stubs []ContextMemory, total int, err error) {
 	rows, err := conn.QueryContext(ctx, `
 		SELECT id, kind, title, learned, created_at
 		FROM memories
 		WHERE task_type = ? AND kind = 'user_rule'
 		ORDER BY created_at DESC
-		LIMIT ?
-	`, taskType, maxAlwaysTierUserRules)
+	`, taskType)
 	if err != nil {
-		return nil, fmt.Errorf("fetch user rules: %w", err)
+		return nil, nil, 0, fmt.Errorf("fetch user rules: %w", err)
 	}
 	defer rows.Close()
-	out := []ContextMemory{}
+	rules = []ContextMemory{}
+	stubs = []ContextMemory{}
 	for rows.Next() {
 		var m ContextMemory
-		if err := rows.Scan(&m.ID, &m.Kind, &m.Title, &m.Learned, &m.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan user rule: %w", err)
+		var learned string
+		if err := rows.Scan(&m.ID, &m.Kind, &m.Title, &learned, &m.CreatedAt); err != nil {
+			return nil, nil, 0, fmt.Errorf("scan user rule: %w", err)
 		}
-		m.Tier = "always"
-		out = append(out, m)
+		total++
+		if len(rules) < maxAlwaysTierUserRules {
+			m.Tier = "always"
+			m.Learned = learned
+			rules = append(rules, m)
+		} else {
+			m.Tier = "browse"
+			stubs = append(stubs, m)
+		}
 	}
-	return out, rows.Err()
+	return rules, stubs, total, rows.Err()
 }
 
 // fetchBrowseTierConn returns top-N error_resolution and task_pattern memories

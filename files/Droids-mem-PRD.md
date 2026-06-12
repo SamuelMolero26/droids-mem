@@ -558,10 +558,17 @@ Force overwrite applied:
 { "status": "updated", "id": "mem_01J...", "session_id": "sess_01J..." }
 ```
 
-Validation failure:
+Validation failure (generic — field missing or wrong value):
 ```json
-{ "status": "error", "code": "validation_failed", "field": "kind", "message": "kind must be one of: error_resolution, task_pattern, user_rule, session_summary" }
+{ "status": "error", "code": "validation_failed", "field": "kind", "message": "must be one of: error_resolution, task_pattern, user_rule, session_summary", "retryable": true }
 ```
+
+Validation failure (scrub rejection — specific code):
+```json
+{ "status": "error", "code": "tag_contains_secret", "field": "tags", "message": "tag matches a scrub pattern", "retryable": true, "offending_tags": ["ghp_xxxx"], "matched_patterns": ["github_pat"], "scrub": { "redaction_count": 1, "per_pattern_counts": { "github_pat": 1 }, "pattern_version": 3 } }
+```
+
+Both CLI (Subprocess transport) and MCP return the same base error envelope (see ADR-0009). The CLI additionally includes an `input` field showing the offending flag value; MCP adds `error: "validation_error"` as a type discriminator.
 
 **Session ID handling**
 

@@ -48,12 +48,13 @@ to verify a listener actually holds the token before reporting `already_running`
 Single binary, layered. Don't bypass layers:
 
 1. **`cmd/droids-mem/`** — cobra subcommands. One `cmd_*.go` per command; delegates to store, emits JSON via `output.go`. No business logic.
-2. **`internal/mcpserver/`** — MCP bridge (`server.go` wires HTTP + auth, `tools.go` defines 4 tools). Operator commands (`list`, `schema`, `doctor`) intentionally not exposed here.
+2. **`internal/mcpserver/`** — MCP bridge (`server.go` wires HTTP + auth, `tools.go` defines 4 tools). Operator commands (`list`, `schema`, `doctor`, `prune`) intentionally not exposed here.
 3. **`internal/store/`** — all business logic shared by CLI and MCP. Key files:
    - `save.go` — validate → scrub → fingerprint → dedupe (2 layers) → insert; owns scrub *policy* (which fields, tag + identifier strict-reject, empty-after-scrub)
    - `search.go` — FTS5 MATCH queries
    - `context.go` — two-tier context bundle assembly (always + browse)
-   - `doctor.go` / `inspect.go` — health checks, introspection
+   - `doctor.go` / `inspect.go` — health checks (incl. ADR-0010 growth warnings), introspection
+   - `prune.go` — manual deletion + `--suggest-dupes` cluster discovery (ADR-0010); never automatic
    - `scrub.go` — thin aliases re-exporting the engine from `internal/scrub`
 4. **`internal/scrub/`** — the scrub *engine* (ADR-0008): `spec.yaml` (embedded declarative detector spec, single source of truth, pinned-hash version enforcement), `scrub.go` (single-pass collect → overlap-resolve → splice, windowed scanning), `entropy.go` (deterministic gate for usage-class detectors), `corpus.go` + `testdata/` (fixture corpus, `[CUT]` defang convention). No store imports.
 5. **`internal/db/`** — `db.go` opens connection + applies pragmas; `schema.go` holds raw DDL string.
@@ -80,13 +81,14 @@ Two-tier model. No `--limit` flag; tier sizes are hardcoded constants.
 
 **Always tier** (full `learned` body):
 - `last_session` — 1× latest `session_summary` for `task_type` (optional)
-- `user_rules[]` — ALL `user_rule` rows for `task_type` (recency order)
+- `user_rules[]` — newest 5 `user_rule` rows for `task_type` (decision #20)
 
 **Browse tier** (title + 120-rune snippet from `what`):
+- rule stubs — `user_rule` rows beyond the always-tier 5, title-only, listed first (ADR-0011)
 - ≤10 `error_resolution` by BM25 rank
 - ≤10 `task_pattern` by BM25 rank
 
-Response shape: `{ task_type, last_session?, user_rules[], browse[] }`. Each item has `tier: "always"|"browse"`. All four reads are wrapped in `BEGIN DEFERRED` for a consistent snapshot.
+Response shape: `{ task_type, last_session?, user_rules[], user_rules_total, browse[] }`. Each item has `tier: "always"|"browse"`. All reads are wrapped in `BEGIN DEFERRED` for a consistent snapshot.
 
 Session retention: on `session_summary` save, delete oldest if > 5 for that `task_type`.
 
@@ -128,4 +130,11 @@ Only Root agent writes to `droids-mem`. Sub-agents get no MCP tools — they con
 - `docs/adr/0002` — context bundle tier model.
 - `docs/adr/0003` — MCP transport, bearer auth, session ownership.
 - `docs/adr/0004` — parent-as-memory-broker pattern (why sub-agents don't write to droids-mem).
+- `docs/adr/0005` — three-layer workspace model.
+- `docs/adr/0006` — git JSONL sync for project workspaces.
+- `docs/adr/0007` — PII scrub pipeline.
+- `docs/adr/0008` — layered scrub detectors.
+- `docs/adr/0009` — store owns error serialization.
+- `docs/adr/0010` — no automatic retention; doctor warnings + manual prune with dupe-cluster suggestions.
+- `docs/adr/0011` — user_rule overflow surfaces as browse-tier stubs + `user_rules_total`.
 - `Future.md` — deferred / post-V1 ideas.
