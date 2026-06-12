@@ -105,11 +105,11 @@ type SaveResponse struct {
 // signals a generic validation failure for backward compatibility); scrub +
 // cap errors set Code and the richer metadata for agent self-correction.
 type ValidationError struct {
-	Code            string       `json:"code,omitempty"`
-	Field           string       `json:"field,omitempty"`
-	Message         string       `json:"message"`
-	Retryable       bool         `json:"retryable"`
-	Suggestion      string       `json:"suggestion,omitempty"`
+	Code       string `json:"code,omitempty"`
+	Field      string `json:"field,omitempty"`
+	Message    string `json:"message"`
+	Retryable  bool   `json:"retryable"`
+	Suggestion string `json:"suggestion,omitempty"`
 	// Limit/Actual are set only on field_too_large, both in bytes.
 	Limit           int          `json:"limit,omitempty"`
 	Actual          int          `json:"actual,omitempty"`

@@ -73,20 +73,23 @@ func (s *Store) Prune(ctx context.Context, req PruneRequest) (*PruneResponse, er
 		}
 	}()
 
-	rows, err := conn.QueryContext(ctx,
-		`SELECT id, kind, task_type, title, created_at FROM memories WHERE `+where+
-			` ORDER BY created_at, id`, args...)
+	//nolint:gosec // G202: where built from hardcoded column names ("kind = ?", "task_type = ?", "created_at < ?"); args parameterized
+	selectSQL := `SELECT id, kind, task_type, title, created_at FROM memories WHERE ` + where + ` ORDER BY created_at, id`
+	rows, err := conn.QueryContext(ctx, selectSQL, args...)
 	if err != nil {
 		return nil, fmt.Errorf("select prune candidates: %w", err)
 	}
+	defer rows.Close()
 	matched := []PrunedMemory{}
 	for rows.Next() {
 		var m PrunedMemory
 		if err := rows.Scan(&m.ID, &m.Kind, &m.TaskType, &m.Title, &m.CreatedAt); err != nil {
-			rows.Close()
 			return nil, fmt.Errorf("scan prune candidate: %w", err)
 		}
 		matched = append(matched, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate prune candidates: %w", err)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, fmt.Errorf("close prune candidates: %w", err)
@@ -95,7 +98,9 @@ func (s *Store) Prune(ctx context.Context, req PruneRequest) (*PruneResponse, er
 	resp := &PruneResponse{Status: "dry_run", Count: len(matched), Matched: matched}
 	if req.Apply {
 		// FTS stays in sync via the AD trigger — never touch memories_fts here.
-		if _, err := conn.ExecContext(ctx, `DELETE FROM memories WHERE `+where, args...); err != nil {
+		//nolint:gosec // G202: where built from hardcoded column names; args parameterized
+		deleteSQL := `DELETE FROM memories WHERE ` + where
+		if _, err := conn.ExecContext(ctx, deleteSQL, args...); err != nil {
 			return nil, fmt.Errorf("delete pruned rows: %w", err)
 		}
 		resp.Status = "pruned"
@@ -275,7 +280,7 @@ func (s *Store) SuggestDupes(ctx context.Context, req SuggestDupesRequest) (*Sug
 			var c dupeRow
 			var what, learned, tags string
 			if err := rows.Scan(&c.id, &c.kind, &c.taskType, &c.title, &what, &learned, &tags, &c.createdAt); err != nil {
-				rows.Close()
+				_ = rows.Close() //nolint:sqlclosecheck // defer would leak across loop iterations; explicit close on error path
 				return nil, fmt.Errorf("scan candidate: %w", err)
 			}
 			if c.id == seed.id {
@@ -293,6 +298,9 @@ func (s *Store) SuggestDupes(ctx context.Context, req SuggestDupesRequest) (*Sug
 					TaskType: c.taskType, CreatedAt: c.createdAt, Score: score,
 				})
 			}
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("iterate candidates for %s: %w", seed.id, err)
 		}
 		if err := rows.Close(); err != nil {
 			return nil, fmt.Errorf("close candidates: %w", err)
@@ -318,12 +326,10 @@ func loadDupeRows(ctx context.Context, conn *sql.Conn, req SuggestDupesRequest) 
 		conds = append(conds, "task_type = ?")
 		args = append(args, req.TaskType)
 	}
-	rows, err := conn.QueryContext(ctx, `
-		SELECT id, kind, task_type, title, what, learned, tags, created_at
-		FROM memories
-		WHERE `+strings.Join(conds, " AND ")+`
-		ORDER BY created_at, id
-	`, args...)
+	//nolint:gosec // G202: conds are hardcoded column predicates ("kind = ?", "task_type = ?"); args parameterized
+	scanSQL := `SELECT id, kind, task_type, title, what, learned, tags, created_at FROM memories WHERE ` +
+		strings.Join(conds, " AND ") + ` ORDER BY created_at, id`
+	rows, err := conn.QueryContext(ctx, scanSQL, args...)
 	if err != nil {
 		return nil, fmt.Errorf("load scan pool: %w", err)
 	}
