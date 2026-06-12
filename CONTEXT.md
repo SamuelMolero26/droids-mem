@@ -74,6 +74,18 @@ _Avoid_: snapshot, dump, recall, history
 The role a Memory plays in the Context bundle; either `always` (full body) or `browse` (snippet only, expand via mem_get).
 _Avoid_: slot, bucket, layer
 
+**Rule stub**:
+A browse-Tier projection of a user_rule beyond the always-Tier cap — title only, expanded via mem_get.
+_Avoid_: overflow rule, hidden rule, truncated rule
+
+**Prune**:
+The explicit, human-initiated deletion workflow for Memories; never automatic.
+_Avoid_: cleanup, eviction, garbage collection, compaction
+
+**Dupe cluster**:
+A group of Memories likely capturing the same lesson, found by the relaxed offline Near-duplicate scan during Prune.
+_Avoid_: duplicate group, family
+
 ### Scrub pipeline
 
 **Scrub pipeline**:
@@ -202,3 +214,4 @@ _Avoid_: caller, consumer, user (overloaded with end-user)
 - "scope" was used informally to mean both **Scope** (personal | shared on a Memory) and v1.1 workspace boundaries — resolved: lowercase scope refers to the Memory column only; v1.1 workspace boundaries get their own term when ADR-0005 ships.
 - "scrub" was used to mean both the **Scrub pipeline** (the always-on save stage) and the `scrub` CLI (an ad-hoc human debugging tool that does not touch the DB) — resolved: capital-S Scrub pipeline = pipeline; lowercase `scrub` command = CLI.
 - "migrate" conflated **PRAGMA user_version** schema migrations (automatic on `db.Init`) and the `migrate` subcommand that establishes the **Scrub baseline** — resolved: schema migration runs at boot; `migrate` subcommand exists solely to satisfy the **Boot gate** via **Rescrub** / no-rescrub.
+- "characters" was used for two different size units — resolved: **Field cap** limits are measured in bytes; the browse snippet budget is measured in runes. Never say "characters" for either.

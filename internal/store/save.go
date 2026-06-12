@@ -105,11 +105,14 @@ type SaveResponse struct {
 // signals a generic validation failure for backward compatibility); scrub +
 // cap errors set Code and the richer metadata for agent self-correction.
 type ValidationError struct {
-	Code            string       `json:"code,omitempty"`
-	Field           string       `json:"field,omitempty"`
-	Message         string       `json:"message"`
-	Retryable       bool         `json:"retryable"`
-	Suggestion      string       `json:"suggestion,omitempty"`
+	Code       string `json:"code,omitempty"`
+	Field      string `json:"field,omitempty"`
+	Message    string `json:"message"`
+	Retryable  bool   `json:"retryable"`
+	Suggestion string `json:"suggestion,omitempty"`
+	// Limit/Actual are set only on field_too_large, both in bytes.
+	Limit           int          `json:"limit,omitempty"`
+	Actual          int          `json:"actual,omitempty"`
 	OffendingTags   []string     `json:"offending_tags,omitempty"`
 	MatchedPatterns []string     `json:"matched_patterns,omitempty"`
 	Scrub           *ScrubReport `json:"scrub,omitempty"`
@@ -352,15 +355,9 @@ func nearDuplicateConn(ctx context.Context, conn *sql.Conn, req SaveRequest) (*m
 	if len(terms) == 0 {
 		return nil, 0, nil
 	}
-	// Cap query arity (decision #19). Sort by length desc to keep
-	// high-IDF tokens; falls back to alphabetical for stable tie-break.
+	// Cap query arity (decision #19).
 	if len(terms) > bm25QueryTermCap {
-		sort.Slice(terms, func(a, b int) bool {
-			if len(terms[a]) != len(terms[b]) {
-				return len(terms[a]) > len(terms[b])
-			}
-			return terms[a] < terms[b]
-		})
+		sortTermsByIDF(terms)
 		terms = terms[:bm25QueryTermCap]
 	}
 	// Wrap each term as an FTS5 phrase literal ("term") so that any FTS5
@@ -541,6 +538,8 @@ func validate(req *SaveRequest) (*ScrubReport, error) {
 	return &agg, nil
 }
 
+// enforceFieldCap measures bytes, not runes — caps protect the byte-denominated
+// storage budget (PRD §3.2), and CONTEXT.md fixes "Field cap" as a byte limit.
 func enforceFieldCap(field, value string, max int, suggestion string) error {
 	if len(value) <= max {
 		return nil
@@ -548,7 +547,9 @@ func enforceFieldCap(field, value string, max int, suggestion string) error {
 	return &ValidationError{
 		Code:       "field_too_large",
 		Field:      field,
-		Message:    fmt.Sprintf("max %d characters", max),
+		Message:    fmt.Sprintf("max %d bytes (got %d)", max, len(value)),
+		Limit:      max,
+		Actual:     len(value),
 		Retryable:  true,
 		Suggestion: suggestion,
 	}
@@ -694,6 +695,17 @@ func normalizeForFP(s string) string {
 	words := strings.Fields(s)
 	sort.Strings(words)
 	return strings.Join(words, " ")
+}
+
+// sortTermsByIDF orders terms longest-first (length proxies IDF) so capping
+// keeps the highest-signal tokens; alphabetical tie-break for stable runs.
+func sortTermsByIDF(terms []string) {
+	sort.Slice(terms, func(a, b int) bool {
+		if len(terms[a]) != len(terms[b]) {
+			return len(terms[a]) > len(terms[b])
+		}
+		return terms[a] < terms[b]
+	})
 }
 
 // searchTerms extracts unique lowercase words (len > 2) for BM25 queries.

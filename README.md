@@ -240,8 +240,6 @@ Architecture decision records (ADRs) live under `docs/adr/`:
 
 Reference docs:
 
-- [files/Droids-mem-PRD.md](files/Droids-mem-PRD.md) — product spec.
-- [docs/v1.0-implementation-plan.md](docs/v1.0-implementation-plan.md) — locked v1.0 decisions.
 - [CONTEXT.md](CONTEXT.md) — domain language + term aliases.
 
 ---
