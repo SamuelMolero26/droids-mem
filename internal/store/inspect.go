@@ -92,7 +92,11 @@ func (s *Store) List(ctx context.Context, req ListRequest) (*ListResponse, error
 	return &ListResponse{Memories: memories, Total: len(memories)}, nil
 }
 
-func (s *Store) Get(ctx context.Context, id string) (*Memory, error) {
+// GetRow is the pure, non-counting fetch of a single Memory by id. It records
+// NO Expand signal — use it for operator/TUI reads (the Memory inspector) and
+// anywhere an internal lookup must not be mistaken for agent consumption.
+// Agent-facing callers (CLI `get`, MCP `mem_get`) want Get instead.
+func (s *Store) GetRow(ctx context.Context, id string) (*Memory, error) {
 	if strings.TrimSpace(id) == "" {
 		return nil, &ValidationError{Field: "id", Message: "required"}
 	}
@@ -109,4 +113,18 @@ func (s *Store) Get(ctx context.Context, id string) (*Memory, error) {
 		return nil, fmt.Errorf("get memory: %w", err)
 	}
 	return &m, nil
+}
+
+// Get is the agent-facing fetch: GetRow plus a recorded Expand signal (ADR-0013).
+// It is the path behind CLI `get` and MCP `mem_get`. The increment is
+// best-effort telemetry — a hit returns the Memory whether or not the signal
+// could be written (see recordExpansion). Operator/TUI reads must use GetRow so
+// browsing does not pollute the signal.
+func (s *Store) Get(ctx context.Context, id string) (*Memory, error) {
+	m, err := s.GetRow(ctx, id)
+	if err != nil || m == nil {
+		return m, err
+	}
+	s.recordExpansion(ctx, m.ID)
+	return m, nil
 }

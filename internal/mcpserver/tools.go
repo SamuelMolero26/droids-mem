@@ -129,6 +129,7 @@ func searchHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, s
 type contextArgs struct {
 	TaskType  string `json:"task_type"`
 	Query     string `json:"query,omitempty"`
+	Mode      string `json:"mode,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
 }
 
@@ -146,7 +147,9 @@ func contextToolDef() mcp.Tool {
 		mcp.WithString("task_type", mcp.Required(),
 			mcp.Description("Workflow tag scoping the bundle.")),
 		mcp.WithString("query",
-			mcp.Description("Optional focus query for browse-tier ranking. Falls back to task_type tokens.")),
+			mcp.Description("Optional focus query for browse-tier ranking. Falls back to task_type tokens. Invalid with mode=refresh.")),
+		mcp.WithString("mode",
+			mcp.Description("Retrieval depth: orient (default — always tier + browse snippets), deep (always tier with all rules full + browse full bodies), refresh (always tier only, cheap mid-run re-anchor).")),
 		mcp.WithString("session_id",
 			mcp.Description("Optional pre-existing session_id to reuse. Omit to mint a fresh one for this Run.")),
 	)
@@ -157,6 +160,7 @@ func contextHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, 
 		resp, err := st.Context(ctx, store.ContextRequest{
 			TaskType: a.TaskType,
 			Query:    a.Query,
+			Mode:     store.ContextMode(a.Mode),
 		})
 		if err != nil {
 			return toolErr(err), nil

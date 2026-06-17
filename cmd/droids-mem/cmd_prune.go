@@ -9,6 +9,7 @@ import (
 
 func newPruneCmd(a *app) *cobra.Command {
 	var (
+		id            string
 		kind          string
 		taskType      string
 		olderThanDays int
@@ -23,9 +24,9 @@ func newPruneCmd(a *app) *cobra.Command {
 memories on its own; prune is the explicit, human-initiated path.
 
 Default mode is a dry run: it prints the rows that WOULD be deleted and exits
-with code 10. Pass --apply to actually delete. At least one filter
-(--kind, --task-type, --older-than-days) is required — pruning the entire
-database is refused.
+with code 10. Pass --apply to actually delete. At least one of --id, --kind,
+--task-type, or --older-than-days is required — pruning the entire database is
+refused. --id deletes exactly one memory by id (the other filters are ignored).
 
 Pass --suggest-dupes to instead scan for clusters of likely-duplicate
 memories (FTS5 BM25 candidates verified by Jaccard similarity at a relaxed
@@ -58,7 +59,7 @@ or consolidate manually.`,
 			}
 
 			resp, err := s.Prune(ctx, store.PruneRequest{
-				Kind: kind, TaskType: taskType, OlderThanDays: olderThanDays, Apply: apply,
+				ID: id, Kind: kind, TaskType: taskType, OlderThanDays: olderThanDays, Apply: apply,
 			})
 			if err != nil {
 				writePruneError(err)
@@ -70,6 +71,7 @@ or consolidate manually.`,
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&id, "id", "", "Delete exactly this memory by id (other filters ignored).")
 	cmd.Flags().StringVar(&kind, "kind", "", "Only memories of this kind.")
 	cmd.Flags().StringVar(&taskType, "task-type", "", "Only memories of this task_type.")
 	cmd.Flags().IntVar(&olderThanDays, "older-than-days", 0, "Only memories created more than N days ago.")

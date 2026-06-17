@@ -6,7 +6,7 @@
 
 ## Context
 
-The v1.0–v2 scrub engine (ADR-0007) is a single detector class: provider-prefix
+The v/Users/samuel/1.0–v2 scrub engine (ADR-0007) is a single detector class: provider-prefix
 regexes (`ghp_…`, `sk-ant-…`, `AIza…`). Three problems surfaced in practice:
 
 1. **Enumeration treadmill.** Every new provider is a Go code change, a

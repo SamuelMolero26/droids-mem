@@ -13,6 +13,7 @@ import (
 // human-initiated path, dry-run unless Apply is set.
 
 type PruneRequest struct {
+	ID            string `json:"id,omitempty"` // exact single-Memory delete; when set, other filters are ignored
 	Kind          string `json:"kind,omitempty"`
 	TaskType      string `json:"task_type,omitempty"`
 	OlderThanDays int    `json:"older_than_days,omitempty"`
@@ -34,18 +35,24 @@ type PruneResponse struct {
 }
 
 func (s *Store) Prune(ctx context.Context, req PruneRequest) (*PruneResponse, error) {
+	req.ID = strings.TrimSpace(req.ID)
 	req.Kind = strings.ToLower(strings.TrimSpace(req.Kind))
 	req.TaskType = strings.ToLower(strings.TrimSpace(req.TaskType))
 
-	if req.Kind == "" && req.TaskType == "" && req.OlderThanDays <= 0 {
+	// An exact id is itself the tightest possible filter, so it satisfies the
+	// unfiltered guard. When set it takes over completely (pruneFilter ignores
+	// the others) — a surgical single-Memory delete, not a filtered set.
+	if req.ID == "" && req.Kind == "" && req.TaskType == "" && req.OlderThanDays <= 0 {
 		return nil, &ValidationError{
 			Code:       "prune_unfiltered",
 			Message:    "refusing to prune the entire database",
 			Retryable:  true,
-			Suggestion: "pass at least one of --kind, --task-type, --older-than-days",
+			Suggestion: "pass --id, or at least one of --kind, --task-type, --older-than-days",
 		}
 	}
-	if req.Kind != "" && !validKinds[req.Kind] {
+	// kind is only meaningful as a set filter; with an exact id it is ignored,
+	// so don't reject an otherwise-valid id delete on a stray kind value.
+	if req.ID == "" && req.Kind != "" && !validKinds[req.Kind] {
 		return nil, &ValidationError{
 			Code:      "invalid_kind",
 			Field:     "kind",
@@ -112,6 +119,10 @@ func (s *Store) Prune(ctx context.Context, req PruneRequest) (*PruneResponse, er
 }
 
 func pruneFilter(req PruneRequest) (string, []any) {
+	// Exact id wins outright — the surgical single-Memory path (ADR-0014).
+	if req.ID != "" {
+		return "id = ?", []any{req.ID}
+	}
 	conds := []string{}
 	args := []any{}
 	if req.Kind != "" {

@@ -226,3 +226,68 @@ func TestSuggestDupes_StrictThresholdFindsNothing(t *testing.T) {
 		t.Errorf("clusters = %d, want 0 at threshold 0.99", len(resp.Clusters))
 	}
 }
+
+func TestPrune_ByID_DryRunThenApply(t *testing.T) {
+	s := newTestStore(t)
+	saved, err := s.Save(context.Background(), validReq())
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// dry run: matches exactly the one row, deletes nothing
+	dry, err := s.Prune(context.Background(), store.PruneRequest{ID: saved.ID})
+	if err != nil {
+		t.Fatalf("dry-run prune by id: %v", err)
+	}
+	if dry.Status != "dry_run" || dry.Count != 1 || len(dry.Matched) != 1 || dry.Matched[0].ID != saved.ID {
+		t.Fatalf("dry run = %+v, want 1 matched %s", dry, saved.ID)
+	}
+	if m, _ := s.GetRow(context.Background(), saved.ID); m == nil {
+		t.Fatal("dry run deleted the row")
+	}
+
+	// apply: row gone
+	app, err := s.Prune(context.Background(), store.PruneRequest{ID: saved.ID, Apply: true})
+	if err != nil {
+		t.Fatalf("apply prune by id: %v", err)
+	}
+	if app.Status != "pruned" || app.Count != 1 {
+		t.Fatalf("apply = %+v, want pruned/1", app)
+	}
+	if m, _ := s.GetRow(context.Background(), saved.ID); m != nil {
+		t.Error("row still present after apply prune by id")
+	}
+}
+
+func TestPrune_ByID_NoMatchIsIdempotent(t *testing.T) {
+	s := newTestStore(t)
+	resp, err := s.Prune(context.Background(), store.PruneRequest{ID: "mem_nonexistent", Apply: true})
+	if err != nil {
+		t.Fatalf("prune missing id: %v", err)
+	}
+	if resp.Status != "pruned" || resp.Count != 0 {
+		t.Errorf("missing-id prune = %+v, want pruned/0", resp)
+	}
+}
+
+func TestPrune_ByID_IgnoresOtherFilters(t *testing.T) {
+	s := newTestStore(t)
+	saved, err := s.Save(context.Background(), validReq()) // kind = error_resolution
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// Stray non-matching kind + a bogus kind value must NOT block the id delete.
+	resp, err := s.Prune(context.Background(), store.PruneRequest{
+		ID: saved.ID, Kind: "not_a_kind", TaskType: "some_other_task", Apply: true,
+	})
+	if err != nil {
+		t.Fatalf("prune by id with stray filters: %v", err)
+	}
+	if resp.Count != 1 {
+		t.Errorf("count = %d, want 1 (id wins, filters ignored)", resp.Count)
+	}
+	if m, _ := s.GetRow(context.Background(), saved.ID); m != nil {
+		t.Error("row not deleted — filters wrongly applied")
+	}
+}

@@ -3,6 +3,7 @@ package db_test
 import (
 	"database/sql"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/samuelmolero/droids-mem/internal/db"
@@ -162,6 +163,114 @@ func TestInit_FreshDBHasMetaTable(t *testing.T) {
 	conn := newTestDB(t)
 	if !tableExists(t, conn, "meta") {
 		t.Fatal("fresh DB missing meta table")
+	}
+}
+
+// triggerSQL returns the stored CREATE statement for a trigger.
+func triggerSQL(t *testing.T, conn *sql.DB, name string) string {
+	t.Helper()
+	var sqlText string
+	if err := conn.QueryRow(
+		`SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?`, name,
+	).Scan(&sqlText); err != nil {
+		t.Fatalf("read trigger %s sql: %v", name, err)
+	}
+	return sqlText
+}
+
+func hasExpandColumns(cols []string) (hasCount, hasLast bool) {
+	for _, c := range cols {
+		switch c {
+		case "expand_count":
+			hasCount = true
+		case "last_expanded_at":
+			hasLast = true
+		}
+	}
+	return
+}
+
+func TestInit_FreshDBHasExpandColumns(t *testing.T) {
+	conn := newTestDB(t)
+	hasCount, hasLast := hasExpandColumns(tableColumns(t, conn, "memories"))
+	if !hasCount {
+		t.Error("fresh DB missing memories.expand_count")
+	}
+	if !hasLast {
+		t.Error("fresh DB missing memories.last_expanded_at")
+	}
+}
+
+// The memories_au trigger must be scoped to the indexed text columns so a
+// metadata-only update (the Expand signal increment) does not re-index FTS.
+func TestInit_FreshDBScopesUpdateTrigger(t *testing.T) {
+	conn := newTestDB(t)
+	if sqlText := triggerSQL(t, conn, "memories_au"); !strings.Contains(sqlText, "UPDATE OF") {
+		t.Errorf("memories_au not scoped to text columns:\n%s", sqlText)
+	}
+}
+
+func TestMigrate_V1toV2AddsExpandColumns(t *testing.T) {
+	conn := newPreV1DB(t)
+	if err := db.Migrate(conn); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	hasCount, hasLast := hasExpandColumns(tableColumns(t, conn, "memories"))
+	if !hasCount {
+		t.Error("migrated DB missing memories.expand_count")
+	}
+	if !hasLast {
+		t.Error("migrated DB missing memories.last_expanded_at")
+	}
+	if got, want := userVersion(t, conn), 2; got != want {
+		t.Errorf("post-migrate user_version = %d, want %d", got, want)
+	}
+}
+
+// A v0 DB carries the original unscoped memories_au trigger; the v1→v2 rung
+// must replace it with the scoped form.
+func TestMigrate_V1toV2ScopesUpdateTrigger(t *testing.T) {
+	conn := newPreV1DB(t)
+	if sqlText := triggerSQL(t, conn, "memories_au"); strings.Contains(sqlText, "UPDATE OF") {
+		t.Fatalf("pre-migrate trigger already scoped — fixture wrong:\n%s", sqlText)
+	}
+	if err := db.Migrate(conn); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if sqlText := triggerSQL(t, conn, "memories_au"); !strings.Contains(sqlText, "UPDATE OF") {
+		t.Errorf("migrated memories_au not scoped:\n%s", sqlText)
+	}
+}
+
+// The scoped trigger keeps the Expand signal write off the FTS index: bumping
+// expand_count must not error and must leave the row findable unchanged.
+func TestMigrate_ExpandIncrementDoesNotTouchFTS(t *testing.T) {
+	conn := newTestDB(t)
+	insertMemory(t, conn, "mem_01", "phone field mapping", "field was wrong", "use phone not phone_number", "hubspot phone")
+
+	if _, err := conn.Exec(`UPDATE memories SET expand_count = expand_count + 1, last_expanded_at = 123 WHERE id = 'mem_01'`); err != nil {
+		t.Fatalf("expand increment: %v", err)
+	}
+
+	var count int
+	var last sql.NullInt64
+	if err := conn.QueryRow(`SELECT expand_count, last_expanded_at FROM memories WHERE id = 'mem_01'`).Scan(&count, &last); err != nil {
+		t.Fatalf("read expand cols: %v", err)
+	}
+	if count != 1 || !last.Valid || last.Int64 != 123 {
+		t.Errorf("expand columns = (%d, %v), want (1, 123)", count, last)
+	}
+
+	var title string
+	if err := conn.QueryRow(`
+		SELECT m.title FROM memories_fts fts
+		JOIN memories m ON m.rowid = fts.rowid
+		WHERE memories_fts MATCH 'phone' ORDER BY fts.rank LIMIT 1
+	`).Scan(&title); err != nil {
+		t.Errorf("FTS search after expand increment: %v", err)
+	}
+	if title != "phone field mapping" {
+		t.Errorf("unexpected title after expand increment: %q", title)
 	}
 }
 

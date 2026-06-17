@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS memories (
     scope                 TEXT    NOT NULL DEFAULT 'shared' CHECK(scope IN ('personal','shared')),
     scrub_pattern_version INTEGER NOT NULL DEFAULT 1,
     scrub_counts          TEXT,
+    expand_count          INTEGER NOT NULL DEFAULT 0,
+    last_expanded_at      INTEGER,
     CHECK(updated_at >= created_at)
 );
 
@@ -77,9 +79,13 @@ AFTER DELETE ON memories BEGIN
     VALUES ('delete', OLD.rowid, OLD.title, OLD.what, OLD.learned, OLD.tags);
 END;
 
--- FTS sync: UPDATE (delete old entry, insert new)
+-- FTS sync: UPDATE (delete old entry, insert new). Scoped to the indexed text
+-- columns (decision: scoped trigger, ADR-0013) so metadata-only updates — the
+-- Expand signal increment in particular — do NOT trigger a full FTS
+-- delete+reinsert. An UPDATE that touches none of title/what/learned/tags has
+-- no business re-indexing FTS.
 CREATE TRIGGER IF NOT EXISTS memories_au
-AFTER UPDATE ON memories BEGIN
+AFTER UPDATE OF title, what, learned, tags ON memories BEGIN
     INSERT INTO memories_fts(memories_fts, rowid, title, what, learned, tags)
     VALUES ('delete', OLD.rowid, OLD.title, OLD.what, OLD.learned, OLD.tags);
     INSERT INTO memories_fts(rowid, title, what, learned, tags)

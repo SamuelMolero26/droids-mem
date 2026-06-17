@@ -351,7 +351,8 @@ const bm25QueryTermCap = 100
 // similarity over normalized token sets of (title+what+learned+tags).
 // Returns the best match if similarity >= jaccardDupeThreshold.
 func nearDuplicateConn(ctx context.Context, conn *sql.Conn, req SaveRequest) (*matchedRow, float64, error) {
-	terms := searchTerms(req.Title + " " + req.What + " " + req.Learned + " " + req.Tags)
+	body := req.Title + " " + req.What + " " + req.Learned + " " + req.Tags
+	terms, reqTokens := dedupeTokens(body)
 	if len(terms) == 0 {
 		return nil, 0, nil
 	}
@@ -387,11 +388,6 @@ func nearDuplicateConn(ctx context.Context, conn *sql.Conn, req SaveRequest) (*m
 		return nil, 0, err
 	}
 	defer rows.Close()
-
-	reqTokens := tokenSet(req.Title + " " + req.What + " " + req.Learned + " " + req.Tags)
-	if len(reqTokens) == 0 {
-		return nil, 0, nil
-	}
 
 	var best matchedRow
 	bestSim := 0.0
@@ -563,6 +559,16 @@ func checkTagsForSecrets(tags string) error {
 	if tags == "" {
 		return nil
 	}
+	// Fast path: one Scrub over the whole tags string. Clean tags (the common
+	// case) cost a single detector pass instead of one per token. Scrubbing the
+	// joined string can only detect a superset of the per-token hits — more
+	// surrounding context never suppresses a match — so a zero here guarantees
+	// every individual tag is clean.
+	if _, whole := Scrub(tags); whole.RedactionCount == 0 {
+		return nil
+	}
+	// A redaction fired. Re-scrub per token to name the offenders for the
+	// diagnostic error. This path is rare (a real leak) and not latency-bound.
 	tokens := strings.Fields(tags)
 	var offending []string
 	matched := map[string]struct{}{}
@@ -576,8 +582,14 @@ func checkTagsForSecrets(tags string) error {
 			matched[name] = struct{}{}
 		}
 	}
-	if len(offending) == 0 {
-		return nil
+	// Fallback: the whole-string match spanned a token boundary and couldn't be
+	// localized. Report the whole-string patterns so the save is still rejected
+	// rather than silently passing.
+	if len(matched) == 0 {
+		_, whole := Scrub(tags)
+		for name := range whole.PerPatternCounts {
+			matched[name] = struct{}{}
+		}
 	}
 	patterns := make([]string, 0, len(matched))
 	for n := range matched {
@@ -706,6 +718,36 @@ func sortTermsByIDF(terms []string) {
 		}
 		return terms[a] < terms[b]
 	})
+}
+
+// dedupeTokens normalizes body once and returns both the ordered unique term
+// slice (for the BM25 candidate query) and the token set (for Jaccard scoring).
+// Folds what searchTerms + tokenSet previously did in two passes — each
+// re-lowercased and re-scanned the full ~13 KB concatenated body — into a
+// single ToLower → strip-punct → collapse-whitespace → Fields sweep.
+//
+// Punctuation splits tokens (replaced with a space) so the BM25 query and the
+// Jaccard set index the same atoms the FTS5 unicode61 tokenizer produces —
+// the alignment decision #18 mandates. Tokens of len <= 2 are dropped as noise,
+// matching both source functions.
+func dedupeTokens(body string) ([]string, map[string]struct{}) {
+	body = strings.ToLower(body)
+	body = rePunct.ReplaceAllString(body, " ")
+	body = reWhitespace.ReplaceAllString(body, " ")
+	words := strings.Fields(strings.TrimSpace(body))
+	set := make(map[string]struct{}, len(words))
+	terms := make([]string, 0, len(words))
+	for _, w := range words {
+		if len(w) <= 2 {
+			continue
+		}
+		if _, ok := set[w]; ok {
+			continue
+		}
+		set[w] = struct{}{}
+		terms = append(terms, w)
+	}
+	return terms, set
 }
 
 // searchTerms extracts unique lowercase words (len > 2) for BM25 queries.

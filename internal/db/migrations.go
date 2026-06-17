@@ -5,9 +5,9 @@ import (
 	"fmt"
 )
 
-// CurrentSchemaVersion is the user_version that a fully-initialized v1.0
+// CurrentSchemaVersion is the user_version that a fully-initialized
 // database reports. Bump when adding a new entry to the migrations ladder.
-const CurrentSchemaVersion = 1
+const CurrentSchemaVersion = 2
 
 // migration is one rung in the PRAGMA user_version ladder. Each rung runs
 // inside its own transaction; partial failure rolls back atomically.
@@ -31,6 +31,7 @@ type migration struct {
 // in via --rescrub or --no-rescrub.
 var migrations = []migration{
 	{from: 0, to: 1, sql: migrationV0ToV1},
+	{from: 1, to: 2, sql: migrationV1ToV2},
 }
 
 const migrationV0ToV1 = `
@@ -43,6 +44,29 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+`
+
+// migrationV1ToV2 adds the Expand signal columns (ADR-0013) and scopes the
+// memories_au FTS trigger to the indexed text columns. Purely additive: no row
+// rewrite, no re-fingerprint, no scrub baseline interaction — ALTER ADD COLUMN
+// is O(1) metadata and the trigger swap is DDL-only with identical behaviour for
+// text updates. Auto-applied at boot via the ladder; no `migrate` required.
+//
+// The trigger DROP/CREATE leaves the FTS *table* untouched, so a v0→v1→v2 DB
+// that has not yet run `migrate --rescrub` keeps its trigram FTS; only the
+// firing condition of the trigger changes.
+const migrationV1ToV2 = `
+ALTER TABLE memories ADD COLUMN expand_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memories ADD COLUMN last_expanded_at INTEGER;
+
+DROP TRIGGER IF EXISTS memories_au;
+CREATE TRIGGER memories_au
+AFTER UPDATE OF title, what, learned, tags ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, title, what, learned, tags)
+    VALUES ('delete', OLD.rowid, OLD.title, OLD.what, OLD.learned, OLD.tags);
+    INSERT INTO memories_fts(rowid, title, what, learned, tags)
+    VALUES (NEW.rowid, NEW.title, NEW.what, NEW.learned, NEW.tags);
+END;
 `
 
 // Migrate advances db's schema from its current user_version up to

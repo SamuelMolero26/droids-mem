@@ -79,7 +79,7 @@ A browse-Tier projection of a user_rule beyond the always-Tier cap — title onl
 _Avoid_: overflow rule, hidden rule, truncated rule
 
 **Prune**:
-The explicit, human-initiated deletion workflow for Memories; never automatic.
+The explicit, human-initiated deletion workflow for Memories; never automatic. Deletes either a filtered set (kind / task_type / age) or a single Memory by exact id; every deletion path routes through this one workflow so FTS stays in sync.
 _Avoid_: cleanup, eviction, garbage collection, compaction
 
 **Dupe cluster**:
@@ -146,6 +146,28 @@ _Avoid_: startup check, safety gate
 `migrate --rescrub`: the atomic per-DB operation that walks every row through the Scrub pipeline, rewrites text fields, re-fingerprints, and sets the Scrub baseline. Contrast: `--no-rescrub` sets the baseline without rewriting (acknowledges plaintext).
 _Avoid_: backfill, reprocess, replay
 
+### Retrieval modes
+
+**Context mode**:
+The retrieval depth preset for a Context bundle request; one of `orient`, `deep`, or `refresh`. Defaults to `orient`. Exposed on both CLI (`--mode`) and MCP `mem_context`.
+_Avoid_: context level, depth flag, verbosity
+
+**orient**:
+The default Context mode — always-tier full body + browse-tier title+snippet. Identical to pre-v1.1 context behavior.
+_Avoid_: default mode, standard mode
+
+**deep**:
+A Context mode returning always-tier full body + all overflow user_rules expanded to full body + browse-tier items with full `what`+`learned`. No follow-up `get` calls needed.
+_Avoid_: full mode, verbose mode, expanded mode
+
+**refresh**:
+A Context mode returning always-tier only (latest session_summary + ≤5 user_rules, no browse tier, no rule stubs). Designed for cheap mid-run re-anchor. Passing `--query` with `refresh` is a validation error.
+_Avoid_: lite mode, fast mode, cheap mode
+
+**Expand signal**:
+The `expand_count` + `last_expanded_at` (unix seconds) pair on a Memory, incremented by an agent-facing `get` (CLI `get`, MCP `mem_get`) and surviving force-save. Operator/TUI reads go through the non-counting fetch and never move it. Surfaced by `doctor --expand-stats` to inform future browse-tier sizing decisions.
+_Avoid_: access count, hit count, view count, expand tracker
+
 ### Agent access
 
 **Subprocess transport**:
@@ -167,6 +189,10 @@ _Avoid_: handshake, attestation
 **Agent client**:
 Any program holding a Run that talks to the store via Subprocess transport or MCP bridge.
 _Avoid_: caller, consumer, user (overloaded with end-user)
+
+**Memory inspector**:
+The interactive terminal browser (`droids-mem tui`) an operator uses to filter, search, read, and Prune the local corpus in-process. An operator tool, not an Agent client — its reads never move the Expand signal.
+_Avoid_: dashboard, viewer, console, admin UI
 
 ## Relationships
 
