@@ -38,11 +38,11 @@ var schemaDefinitions = map[string]any{
 			{"name": "mode", "type": "enum", "required": false, "values": []string{"orient", "deep", "refresh"}, "default": "orient", "description": "Retrieval depth: orient = always tier + browse snippets; deep = always tier (all rules full) + browse full bodies; refresh = always tier only"},
 		},
 		"response": map[string]any{
-			"task_type":         "string",
-			"last_session":      "ContextMemory? (always tier — full body)",
-			"user_rules":        "[]ContextMemory (always tier — full body; capped at 5 in orient/refresh, all rules in deep)",
-			"user_rules_total":  "int (count of all user_rule rows for task_type)",
-			"browse":            "[]ContextMemory (orient: title + 120-char snippet of `what`; deep: full `what`+`learned`; refresh: empty)",
+			"task_type":        "string",
+			"last_session":     "ContextMemory? (always tier — full body)",
+			"user_rules":       "[]ContextMemory (always tier — full body; capped at 5 in orient/refresh, all rules in deep)",
+			"user_rules_total": "int (count of all user_rule rows for task_type)",
+			"browse":           "[]ContextMemory (orient: title + 120-char snippet of `what`; deep: full `what`+`learned`; refresh: empty)",
 		},
 	},
 	"list": map[string]any{
