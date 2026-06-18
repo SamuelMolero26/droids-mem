@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/samuelmolero/droids-mem/internal/db"
+	"github.com/SamuelMolero26/droids-mem/internal/db"
 	_ "modernc.org/sqlite"
 )
 

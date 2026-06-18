@@ -24,7 +24,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/server"
 
-	"github.com/samuelmolero/droids-mem/internal/store"
+	"github.com/SamuelMolero26/droids-mem/internal/store"
 )
 
 const (

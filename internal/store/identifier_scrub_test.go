@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/samuelmolero/droids-mem/internal/store"
+	"github.com/SamuelMolero26/droids-mem/internal/store"
 )
 
 // Identifier fields (task_type, session_id) are persisted unscrubbed, so any

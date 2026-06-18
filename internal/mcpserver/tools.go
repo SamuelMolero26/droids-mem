@@ -10,7 +10,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/oklog/ulid/v2"
 
-	"github.com/samuelmolero/droids-mem/internal/store"
+	"github.com/SamuelMolero26/droids-mem/internal/store"
 )
 
 func registerTools(s *server.MCPServer, st *store.Store) {

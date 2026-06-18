@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samuelmolero/droids-mem/internal/db"
-	"github.com/samuelmolero/droids-mem/internal/store"
+	"github.com/SamuelMolero26/droids-mem/internal/db"
+	"github.com/SamuelMolero26/droids-mem/internal/store"
 )
 
 func openProdDB(t *testing.T) (*sql.DB, error) {

@@ -2,7 +2,7 @@ package main
 
 import (
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/samuelmolero/droids-mem/internal/tui"
+	"github.com/SamuelMolero26/droids-mem/internal/tui"
 	"github.com/spf13/cobra"
 )
 

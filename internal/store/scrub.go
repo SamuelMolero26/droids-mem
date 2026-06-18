@@ -6,7 +6,7 @@
 // configurable.
 package store
 
-import "github.com/samuelmolero/droids-mem/internal/scrub"
+import "github.com/SamuelMolero26/droids-mem/internal/scrub"
 
 // ScrubReport is the per-string redaction summary produced by the engine.
 type ScrubReport = scrub.ScrubReport

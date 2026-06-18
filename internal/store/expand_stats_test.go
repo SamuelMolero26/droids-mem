@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/samuelmolero/droids-mem/internal/store"
+	"github.com/SamuelMolero26/droids-mem/internal/store"
 )
 
 func TestExpandStats_RanksByCount(t *testing.T) {

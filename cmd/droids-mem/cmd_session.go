@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/samuelmolero/droids-mem/internal/state"
-	"github.com/samuelmolero/droids-mem/internal/store"
+	"github.com/SamuelMolero26/droids-mem/internal/state"
+	"github.com/SamuelMolero26/droids-mem/internal/store"
 	"github.com/spf13/cobra"
 )
 
