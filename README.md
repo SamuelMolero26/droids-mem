@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD041 -->
 ```text
                 ████▒  █████   ▓██▓  █████  ████▒   ▓███▒        █▒  ▒█ ██████ █▒  ▒█
                 █  ▒█░ █   ▓█ ▒█  █▒   █    █  ▒█░ █▓  ░█        ██  ██ █      ██  ██
@@ -39,7 +40,7 @@ the MCP bridge spawns on demand via `ensure-server`.
 ### `go install`
 
 ```
-go install github.com/samuelmolero/droids-mem/cmd/droids-mem@latest
+go install github.com/SamuelMolero26/droids-mem/cmd/droids-mem@latest
 ```
 
 Requires Go 1.25+. The binary is pure-Go (`modernc.org/sqlite`), so it builds
@@ -49,11 +50,11 @@ without CGO.
 
 Each release attaches binaries + `.sha256` checksums for
 `linux/{amd64,arm64}` and `darwin/{amd64,arm64}` on the
-[Releases page](https://github.com/samuelmolero/droids-mem/releases).
+[Releases page](https://github.com/SamuelMolero26/droids-mem/releases).
 
 ```
 curl -L -o droids-mem \
-  https://github.com/samuelmolero/droids-mem/releases/download/v1.0.0/droids-mem-v1.0.0-darwin-arm64
+  https://github.com/SamuelMolero26/droids-mem/releases/download/v1.0.0/droids-mem-v1.0.0-darwin-arm64
 chmod +x droids-mem
 ./droids-mem --version
 ```
@@ -61,7 +62,7 @@ chmod +x droids-mem
 ### Build from source
 
 ```
-git clone https://github.com/samuelmolero/droids-mem
+git clone https://github.com/SamuelMolero26/droids-mem
 cd droids-mem
 go build ./cmd/droids-mem
 ./droids-mem --version
