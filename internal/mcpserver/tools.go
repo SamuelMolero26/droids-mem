@@ -42,15 +42,15 @@ func saveToolDef() mcp.Tool {
 			mcp.Enum("error_resolution", "task_pattern", "user_rule", "session_summary"),
 		),
 		mcp.WithString("title", mcp.Required(),
-			mcp.Description("Short imperative summary of the lesson (1 line). Max 200 characters.")),
+			mcp.Description("Short imperative summary of the lesson (1 line). Max 200 bytes.")),
 		mcp.WithString("what", mcp.Required(),
-			mcp.Description("What happened or what was attempted (factual context). Max 8192 characters.")),
+			mcp.Description("What happened or what was attempted (factual context). Max 8192 bytes.")),
 		mcp.WithString("learned", mcp.Required(),
-			mcp.Description("The reusable insight the agent should apply next time. Max 4096 characters.")),
+			mcp.Description("The reusable insight the agent should apply next time. Max 4096 bytes.")),
 		mcp.WithString("task_type", mcp.Required(),
 			mcp.Description("Free-form workflow tag (e.g. 'crm_upload'). Scopes context retrieval and session_summary retention.")),
 		mcp.WithString("tags",
-			mcp.Description("Space-delimited tokens. Max 500 characters. Tags are stored unscrubbed — never embed secrets in them.")),
+			mcp.Description("Space-delimited tokens. Max 500 bytes. Tags are stored unscrubbed — never embed secrets in them.")),
 		mcp.WithString("scope",
 			mcp.Description("Memory scope. 'shared' (default) or 'personal'. Reserved for future workspace routing."),
 			mcp.Enum("personal", "shared"),
@@ -129,6 +129,7 @@ func searchHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, s
 type contextArgs struct {
 	TaskType  string `json:"task_type"`
 	Query     string `json:"query,omitempty"`
+	Mode      string `json:"mode,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
 }
 
@@ -146,7 +147,9 @@ func contextToolDef() mcp.Tool {
 		mcp.WithString("task_type", mcp.Required(),
 			mcp.Description("Workflow tag scoping the bundle.")),
 		mcp.WithString("query",
-			mcp.Description("Optional focus query for browse-tier ranking. Falls back to task_type tokens.")),
+			mcp.Description("Optional focus query for browse-tier ranking. Falls back to task_type tokens. Invalid with mode=refresh.")),
+		mcp.WithString("mode",
+			mcp.Description("Retrieval depth: orient (default — always tier + browse snippets), deep (always tier with all rules full + browse full bodies), refresh (always tier only, cheap mid-run re-anchor).")),
 		mcp.WithString("session_id",
 			mcp.Description("Optional pre-existing session_id to reuse. Omit to mint a fresh one for this Run.")),
 	)
@@ -157,6 +160,7 @@ func contextHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, 
 		resp, err := st.Context(ctx, store.ContextRequest{
 			TaskType: a.TaskType,
 			Query:    a.Query,
+			Mode:     store.ContextMode(a.Mode),
 		})
 		if err != nil {
 			return toolErr(err), nil
@@ -222,6 +226,8 @@ func toolErr(err error) *mcp.CallToolResult {
 			Message         string             `json:"message"`
 			Retryable       bool               `json:"retryable"`
 			Suggestion      string             `json:"suggestion,omitempty"`
+			Limit           int                `json:"limit,omitempty"`
+			Actual          int                `json:"actual,omitempty"`
 			OffendingTags   []string           `json:"offending_tags,omitempty"`
 			MatchedPatterns []string           `json:"matched_patterns,omitempty"`
 			Scrub           *store.ScrubReport `json:"scrub,omitempty"`
@@ -233,6 +239,8 @@ func toolErr(err error) *mcp.CallToolResult {
 			Message:         ve.Message,
 			Retryable:       ve.Retryable,
 			Suggestion:      ve.Suggestion,
+			Limit:           ve.Limit,
+			Actual:          ve.Actual,
 			OffendingTags:   ve.OffendingTags,
 			MatchedPatterns: ve.MatchedPatterns,
 			Scrub:           ve.Scrub,

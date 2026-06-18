@@ -111,29 +111,114 @@ first `db.Init` on a new file.
 
 ---
 
-## PII scrub behaviour
+## Use with Claude Code
+
+Two complementary layers:
+
+1. **MCP tools** — give the agent `mem_save` / `mem_search` / `mem_context` /
+   `mem_get` to read and write memory on demand.
+2. **Session memory** — guarantee a memory is recorded at the **end of every
+   session** and surface relevant prior memories when you start related work,
+   via Claude Code hooks handled natively by the binary (no shell scripts, no
+   `jq`). See [ADR-0016](docs/adr/0016-native-claude-code-session-auto-summary.md).
+
+You can enable either layer on its own; together they give the full experience.
+
+```
+# 0. Install the binary (if you haven't — see Install above)
+go install github.com/samuelmolero/droids-mem/cmd/droids-mem@latest
+```
+
+### 1. Add the MCP tools
+
+```
+# Start the local MCP bridge (idempotent — spawns a detached server if down)
+droids-mem ensure-server
+
+# Register it with Claude Code (HTTP transport + bearer token)
+claude mcp add --transport http droids-mem http://127.0.0.1:7777/mcp \
+  --header "Authorization: Bearer $(tr -d '\n' < ~/.droids-mem/token)"
+```
+
+The agent now has the four `mem_*` tools. (Bind address and token are
+configurable — see [Configuration](#configuration).)
+
+### 2. Add guaranteed session memory
+
+```
+# Wire the hooks into Claude Code's settings.json (idempotent, non-destructive)
+droids-mem install
+
+# Tell the model when to record a summary
+cat hooks/session-memory.md >> ~/.claude/CLAUDE.md
+```
+
+`install` merges hook entries into `~/.claude/settings.json`, pointing every
+event at `droids-mem session hook`. Options: `--project` targets
+`./.claude/settings.json`; `--print` previews the block without writing.
+
+`droids-mem session hook` reads each hook's JSON on stdin and dispatches:
+
+| Claude Code event | Behaviour |
+|-------------------|-----------|
+| `PostToolUse` (Edit/Write/Bash/…) | count meaningful changes (intake gate) |
+| `Stop` | once enough work is unstaged, ask the model to record progress |
+| `SessionEnd` | save the staged summary if the gate passes |
+| `SessionStart` | recover summaries from crashed runs |
+| `UserPromptSubmit` | inject relevant prior memories for the prompt |
+
+Every hook **fails open** — a memory hiccup never breaks your session.
+
+### Verify
+
+```
+claude mcp list                       # droids-mem should be listed + reachable
+droids-mem recent-sessions            # after a session with edits: your auto-summaries
+```
+
+Full hook reference: [`hooks/README.md`](hooks/README.md).
+
+---
+
+## Secret scrub behaviour
 
 On every `save`, `title` / `what` / `learned` are scrubbed in a single pass.
-Tags are checked against the same patterns and the save is **rejected** if any
-tag matches (`tag_contains_secret`, `retryable:true`).
+Tags, `task_type`, and `session_id` are checked against the same detectors and
+the save is **rejected** on any match (`tag_contains_secret`,
+`task_type_contains_secret`, `session_id_contains_secret` — all
+`retryable:true`) because those fields are stored unscrubbed.
 
-Pattern set, in declaration order (longer wins, tie → earlier wins):
+Detectors are declared in `internal/scrub/spec.yaml` (pattern version 3) in
+three classes. Overlap resolution: longer redaction span wins, tie → earlier
+declaration wins, so a provider token inside an assignment keeps its specific
+redaction token.
 
-| # | Pattern | Token |
-|---|---------|-------|
-| 1 | PEM private key block | `[PEM_KEY]` |
-| 2 | JWT (`xxx.yyy.zzz`) | `[JWT]` |
-| 3 | AWS access key (`AKIA…`, `ASIA…`) | `[AWS_KEY]` |
-| 4 | GitHub token (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`) | `[GITHUB_TOKEN]` |
-| 5 | Stripe key (`sk_live_`, `pk_live_`, …) | `[STRIPE_KEY]` |
-| 6 | Slack token (`xoxa-`, `xoxb-`, `xoxp-`, `xoxr-`, `xoxs-`) | `[SLACK_TOKEN]` |
-| 7 | Anthropic API key (`sk-ant-`) | `[ANTHROPIC_KEY]` |
-| 8 | OpenAI API key (`sk-`, `sk-proj-`) | `[OPENAI_KEY]` |
-| 9 | US SSN (`XXX-XX-XXXX`) | `[SSN]` |
-| 10 | Credit card (Luhn-validated) | `[CC]` |
-| 11 | Phone (E.164) | `[PHONE]` |
-| 12 | Private IPv4 (RFC 1918 + loopback) | `[PRIVATE_IP]` |
-| 13 | Email | `[EMAIL]` |
+| # | Detector | Class | Token |
+|---|----------|-------|-------|
+| 1 | PEM private key block | provider | `[PEM_KEY]` |
+| 2 | JWT (`xxx.yyy.zzz`) | provider | `[JWT]` |
+| 3 | AWS access key (`AKIA…`, `ASIA…`) | provider | `[AWS_KEY]` |
+| 4 | GitHub token (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`) | provider | `[GITHUB_TOKEN]` |
+| 5 | GitHub fine-grained PAT (`github_pat_`) | provider | `[GITHUB_TOKEN]` |
+| 6 | GitLab PAT (`glpat-`) | provider | `[GITLAB_TOKEN]` |
+| 7 | Google API key (`AIza…`) | provider | `[GOOGLE_KEY]` |
+| 8 | npm token (`npm_`) | provider | `[NPM_TOKEN]` |
+| 9 | Stripe key (`sk_live_`, `pk_live_`, …) | provider | `[STRIPE_KEY]` |
+| 10 | Slack token (`xoxa-` … `xoxs-`) | provider | `[SLACK_TOKEN]` |
+| 11 | Anthropic API key (`sk-ant-`) | provider | `[ANTHROPIC_KEY]` |
+| 12 | OpenAI API key (`sk-`) | provider | `[OPENAI_KEY]` |
+| 13 | Bearer header value (`Bearer <value>`) | usage | `[SECRET]` |
+| 14 | Assignment value (`key/token/password [:=] <value>`) | usage | `[SECRET]` |
+| 15 | URL credential (`scheme://user:<password>@`) | usage | `[SECRET]` |
+| 16 | Phone (E.164) | pii | `[PHONE]` |
+| 17 | Private IPv4 (RFC 1918 + loopback) | pii | `[PRIVATE_IP]` |
+| 18 | Email | pii | `[EMAIL]` |
+
+Usage-class detectors redact only the secret value (context words stay
+readable) and — for bearer/assignment — must pass a deterministic Shannon
+entropy gate (≥ 3.5 bits/char), so placeholders like `password = changeme`
+are left alone while generated secrets are redacted. See
+`docs/adr/0008-layered-scrub-detectors.md`.
 
 Empty-after-scrub on `learned` rejects the save with `scrub_emptied_learned`.
 Save responses include a `scrub` block whenever `redaction_count > 0`.
@@ -201,6 +286,9 @@ the token (anti port-squatting).
 | `context` | Load start-of-run context bundle for a task type |
 | `get` | Get a single memory by ID |
 | `list` | List recent memories |
+| `recent-sessions` | List recent auto-saved Claude Code session summaries |
+| `session` | Claude Code session-memory plumbing (stage, check, flush, recover, hook) |
+| `install` | Wire droids-mem session memory into Claude Code (settings.json hooks) |
 | `doctor` | Check FTS integrity, rebuild if divergent, optimize, VACUUM, `--scrub-stats` |
 | `schema` | Show parameter schema for a command (or all commands) |
 | `scrub` | Run the v1.0 scrub engine ad-hoc (`--check`, `--test`) |
@@ -238,8 +326,6 @@ Architecture decision records (ADRs) live under `docs/adr/`:
 
 Reference docs:
 
-- [files/Droids-mem-PRD.md](files/Droids-mem-PRD.md) — product spec.
-- [docs/v1.0-implementation-plan.md](docs/v1.0-implementation-plan.md) — locked v1.0 decisions.
 - [CONTEXT.md](CONTEXT.md) — domain language + term aliases.
 
 ---

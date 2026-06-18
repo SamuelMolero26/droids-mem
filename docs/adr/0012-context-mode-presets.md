@@ -1,0 +1,5 @@
+# Context mode presets for the Context bundle
+
+The `context` command and `mem_context` MCP tool gain a `--mode orient|deep|refresh` flag. `orient` (default) preserves current behavior — always-tier full body + browse-tier title+snippet. `deep` returns always-tier full body + all overflow user_rules expanded + browse-tier items with full `what`+`learned`, eliminating follow-up `get` calls for agents that need the complete picture up front. `refresh` returns always-tier only (no browse, no rule stubs), designed for cheap mid-run re-anchoring where a full bundle is unnecessary overhead.
+
+Hardcoded per-mode K values follow the same locked-constant pattern as `maxAlwaysTierUserRules` and `browseErrorLimit` — no user-configurable `--depth` flag, which would push tier-sizing decisions onto agents that have no basis for making them. Passing `--query` with `refresh` is a validation error (query has no effect; silent ignore would mask agent bugs). Single `ContextResponse` shape with `ContextMemory` gaining an `omitempty` `what` field populated only in deep mode — avoids three distinct response types that would fragment `schema context`.

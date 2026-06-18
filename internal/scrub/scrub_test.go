@@ -1,6 +1,8 @@
-package store
+package scrub
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -36,12 +38,12 @@ func loadCorpus(t *testing.T) scrubCorpus {
 	if len(c.Cases) == 0 {
 		t.Fatal("corpus has no cases")
 	}
-	// Strip the [CUT] defang marker (see corpusCutMarker in corpus.go): the
+	// Strip the [CUT] defang marker (see CutMarker in corpus.go): the
 	// at-rest YAML breaks every token shape so secret scanners stay quiet;
 	// the test exercises the reassembled real shape.
 	for i := range c.Cases {
-		c.Cases[i].Input = strings.ReplaceAll(c.Cases[i].Input, corpusCutMarker, "")
-		c.Cases[i].Expected = strings.ReplaceAll(c.Cases[i].Expected, corpusCutMarker, "")
+		c.Cases[i].Input = strings.ReplaceAll(c.Cases[i].Input, CutMarker, "")
+		c.Cases[i].Expected = strings.ReplaceAll(c.Cases[i].Expected, CutMarker, "")
 	}
 	return c
 }
@@ -52,7 +54,6 @@ func loadCorpus(t *testing.T) scrubCorpus {
 func TestScrub(t *testing.T) {
 	corpus := loadCorpus(t)
 	for _, tc := range corpus.Cases {
-
 		t.Run(tc.Category+"/"+tc.Name, func(t *testing.T) {
 			got, report := Scrub(tc.Input)
 			if got != tc.Expected {
@@ -77,10 +78,27 @@ func TestScrub(t *testing.T) {
 			if report.RedactionCount != wantTotal {
 				t.Errorf("redaction_count = %d, want %d", report.RedactionCount, wantTotal)
 			}
-			if report.PatternVersion != ScrubPatternVersion {
-				t.Errorf("pattern_version = %d, want %d", report.PatternVersion, ScrubPatternVersion)
+			if report.PatternVersion != Version {
+				t.Errorf("pattern_version = %d, want %d", report.PatternVersion, Version)
 			}
 		})
+	}
+}
+
+// TestSpecHashPinsVersion forces a Version bump on any spec.yaml edit: the
+// pinned hash changes whenever the file changes, and the failure message
+// tells the editor what to do. This replaces the old "NEVER reorder without
+// bumping ScrubPatternVersion" comment with an enforced invariant.
+func TestSpecHashPinsVersion(t *testing.T) {
+	const pinnedVersion = 3
+	const pinnedHash = "37ab2971f3f9b5a407b9c47932a93538088a45f9608d3c70cd2960af7662a5bb"
+
+	sum := sha256.Sum256(SpecBytes())
+	got := hex.EncodeToString(sum[:])
+	if Version != pinnedVersion || got != pinnedHash {
+		t.Fatalf("spec.yaml changed (version=%d hash=%s).\n"+
+			"If this edit alters detector behavior: bump `version` in spec.yaml.\n"+
+			"Then update pinnedVersion + pinnedHash in this test.", Version, got)
 	}
 }
 
@@ -92,14 +110,14 @@ func TestScrub_EmptyString(t *testing.T) {
 	if report.RedactionCount != 0 {
 		t.Errorf("redaction_count = %d, want 0", report.RedactionCount)
 	}
-	if report.PatternVersion != ScrubPatternVersion {
-		t.Errorf("pattern_version = %d, want %d", report.PatternVersion, ScrubPatternVersion)
+	if report.PatternVersion != Version {
+		t.Errorf("pattern_version = %d, want %d", report.PatternVersion, Version)
 	}
 }
 
 func TestScrub_OverlapLongerWins(t *testing.T) {
-	// sk-ant-* matches both anthropic_key (idx 6) and openai_key (idx 7).
-	// Anthropic regex consumes more chars, so longer-wins rule must pick it.
+	// sk-ant-* matches both anthropic_key and openai_key. Anthropic regex
+	// consumes more chars, so longer-wins rule must pick it.
 	input := "sk-ant-api03-" + "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXY"
 	got, report := Scrub(input)
 	if got != "[ANTHROPIC_KEY]" {
@@ -113,10 +131,44 @@ func TestScrub_OverlapLongerWins(t *testing.T) {
 	}
 }
 
+// TestScrub_ProviderWinsTieInsideAssignment pins the declaration-order tie:
+// when an assignment value IS a provider token, both detectors target the
+// same span and the provider (declared earlier) must win, keeping the more
+// informative redaction token.
+func TestScrub_ProviderWinsTieInsideAssignment(t *testing.T) {
+	input := `api_key = "sk-ant-` + `api03-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXY"`
+	got, report := Scrub(input)
+	if got != `api_key = "[ANTHROPIC_KEY]"` {
+		t.Errorf("got %q", got)
+	}
+	if report.PerPatternCounts["assignment_secret"] != 0 && report.PerPatternCounts["anthropic_key"] != 1 {
+		t.Errorf("counts = %v, want anthropic_key only", report.PerPatternCounts)
+	}
+}
+
+func TestShannonEntropy(t *testing.T) {
+	cases := []struct {
+		in       string
+		min, max float64
+	}{
+		{"", 0, 0},
+		{"aaaaaaaa", 0, 0},               // single symbol → 0 bits
+		{"changeme", 2.5, 3.0},           // placeholder prose, below 3.5 gate
+		{"x7Kp9q2mNv8wLz4r", 3.99, 4.01}, // 16 distinct chars → exactly 4 bits
+		{"abcdefghijklmnop", 3.99, 4.01}, // same — distinct count drives it
+	}
+	for _, tc := range cases {
+		got := shannonBitsPerChar(tc.in)
+		if got < tc.min || got > tc.max {
+			t.Errorf("entropy(%q) = %f, want [%f, %f]", tc.in, got, tc.min, tc.max)
+		}
+	}
+}
+
 // BenchmarkScrub10KB_NoMatches is the typical-case benchmark — distilled
 // lesson bodies rarely contain secrets. Target: p95 < 500 µs per v1.0 plan.
 //
-// Run: go test ./internal/store -bench=BenchmarkScrub -benchmem -run=^$
+// Run: go test ./internal/scrub -bench=BenchmarkScrub -benchmem -run=^$
 func BenchmarkScrub10KB_NoMatches(b *testing.B) {
 	body := buildPlainBody(10 * 1024)
 	b.SetBytes(int64(len(body)))

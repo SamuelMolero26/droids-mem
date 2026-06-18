@@ -56,7 +56,7 @@ AFTER DELETE ON memories BEGIN
 END;
 
 CREATE TRIGGER memories_au
-AFTER UPDATE ON memories BEGIN
+AFTER UPDATE OF title, what, learned, tags ON memories BEGIN
     INSERT INTO memories_fts(memories_fts, rowid, title, what, learned, tags)
     VALUES ('delete', OLD.rowid, OLD.title, OLD.what, OLD.learned, OLD.tags);
     INSERT INTO memories_fts(rowid, title, what, learned, tags)
