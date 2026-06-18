@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/SamuelMolero26/droids-mem/internal/mcpserver"
+	"github.com/samuelmolero26/droids-mem/internal/mcpserver"
 )
 
 // Dry-run must exercise the full save pipeline without persisting anything.

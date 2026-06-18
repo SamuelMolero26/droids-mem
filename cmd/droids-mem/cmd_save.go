@@ -5,7 +5,7 @@ import (
 
 	"strings"
 
-	"github.com/SamuelMolero26/droids-mem/internal/store"
+	"github.com/samuelmolero26/droids-mem/internal/store"
 	"github.com/spf13/cobra"
 )
 

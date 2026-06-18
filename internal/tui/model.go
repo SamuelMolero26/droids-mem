@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/SamuelMolero26/droids-mem/internal/store"
+	"github.com/samuelmolero26/droids-mem/internal/store"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
