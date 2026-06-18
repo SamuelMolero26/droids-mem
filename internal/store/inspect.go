@@ -92,7 +92,62 @@ func (s *Store) List(ctx context.Context, req ListRequest) (*ListResponse, error
 	return &ListResponse{Memories: memories, Total: len(memories)}, nil
 }
 
-func (s *Store) Get(ctx context.Context, id string) (*Memory, error) {
+type RecentSessionsRequest struct {
+	Limit int
+}
+
+type RecentSessionsResponse struct {
+	Sessions []Memory `json:"sessions"`
+	Total    int      `json:"total"`
+}
+
+// RecentSessions returns the newest auto-session-summaries (origin='auto'),
+// recency-ordered, regardless of task_type (ADR-0016 pt 7). This is the
+// human/operator "what did I do lately across Claude Code runs" view — keyed on
+// origin, the cross-cutting axis, served by idx_memories_origin_created, never
+// touching FTS. It is deliberately NOT exposed over MCP; the agent reaches auto
+// summaries through the relevance-gated mem_search/mem_get path instead.
+func (s *Store) RecentSessions(ctx context.Context, req RecentSessionsRequest) (*RecentSessionsResponse, error) {
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at
+		FROM memories
+		WHERE origin = 'auto'
+		ORDER BY created_at DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("recent sessions query: %w", err)
+	}
+	defer rows.Close()
+
+	sessions := []Memory{}
+	for rows.Next() {
+		var m Memory
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan session: %w", err)
+		}
+		sessions = append(sessions, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("recent sessions rows: %w", err)
+	}
+
+	return &RecentSessionsResponse{Sessions: sessions, Total: len(sessions)}, nil
+}
+
+// GetRow is the pure, non-counting fetch of a single Memory by id. It records
+// NO Expand signal — use it for operator/TUI reads (the Memory inspector) and
+// anywhere an internal lookup must not be mistaken for agent consumption.
+// Agent-facing callers (CLI `get`, MCP `mem_get`) want Get instead.
+func (s *Store) GetRow(ctx context.Context, id string) (*Memory, error) {
 	if strings.TrimSpace(id) == "" {
 		return nil, &ValidationError{Field: "id", Message: "required"}
 	}
@@ -109,4 +164,18 @@ func (s *Store) Get(ctx context.Context, id string) (*Memory, error) {
 		return nil, fmt.Errorf("get memory: %w", err)
 	}
 	return &m, nil
+}
+
+// Get is the agent-facing fetch: GetRow plus a recorded Expand signal (ADR-0013).
+// It is the path behind CLI `get` and MCP `mem_get`. The increment is
+// best-effort telemetry — a hit returns the Memory whether or not the signal
+// could be written (see recordExpansion). Operator/TUI reads must use GetRow so
+// browsing does not pollute the signal.
+func (s *Store) Get(ctx context.Context, id string) (*Memory, error) {
+	m, err := s.GetRow(ctx, id)
+	if err != nil || m == nil {
+		return m, err
+	}
+	s.recordExpansion(ctx, m.ID)
+	return m, nil
 }

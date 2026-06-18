@@ -17,8 +17,8 @@ import (
 	"github.com/oklog/ulid/v2"
 	"github.com/spf13/cobra"
 
-	"github.com/samuelmolero/droids-mem/internal/mcpserver"
-	"github.com/samuelmolero/droids-mem/internal/state"
+	"github.com/SamuelMolero26/droids-mem/internal/mcpserver"
+	"github.com/SamuelMolero26/droids-mem/internal/state"
 )
 
 func newEnsureServerCmd() *cobra.Command {
@@ -171,6 +171,7 @@ func spawnDetached(addr, token string) (int, error) {
 		return 0, fmt.Errorf("open log: %w", err)
 	}
 	defer logFile.Close()
+	// log-append fd; close error = missing log line at worst; child has its own fd copy
 
 	// #nosec G204 -- re-exec of our own binary (os.Executable), fixed argv.
 	cmd := exec.Command(self, "serve")

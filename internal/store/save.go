@@ -28,10 +28,19 @@ var validScopes = map[string]bool{
 	"shared":   true,
 }
 
+var validOrigins = map[string]bool{
+	"manual": true,
+	"auto":   true,
+}
+
 // DefaultScope is what the save path stamps when the caller omits the scope
 // field. Matches the column default in schema.go so behavior is consistent
 // whether the row arrives through the API or a direct INSERT.
 const DefaultScope = "shared"
+
+// DefaultOrigin is stamped when the caller omits origin. 'auto' is reserved for
+// the session-end enforcement path (ADR-0016); every explicit save is 'manual'.
+const DefaultOrigin = "manual"
 
 // Field caps (locked decision #8). Hard limits — any field exceeding its cap
 // triggers a `field_too_large` rejection. Caps are forcing functions for
@@ -82,10 +91,11 @@ type SaveRequest struct {
 	Title     string `json:"title"`
 	What      string `json:"what"`
 	Learned   string `json:"learned"`
-	Tags      string `json:"tags"`            // space-delimited tokens
-	Scope     string `json:"scope,omitempty"` // "personal" | "shared", defaults to "shared"
-	Force     bool   `json:"force"`           // HITL correction: overwrite matched fingerprint
-	DryRun    bool   `json:"dry_run"`         // run full pipeline (validate → scrub → dedupe) then ROLLBACK
+	Tags      string `json:"tags"`             // space-delimited tokens
+	Scope     string `json:"scope,omitempty"`  // "personal" | "shared", defaults to "shared"
+	Origin    string `json:"origin,omitempty"` // "manual" | "auto", defaults to "manual" (ADR-0016)
+	Force     bool   `json:"force"`            // HITL correction: overwrite matched fingerprint
+	DryRun    bool   `json:"dry_run"`          // run full pipeline (validate → scrub → dedupe) then ROLLBACK
 }
 
 type SaveResponse struct {
@@ -105,11 +115,14 @@ type SaveResponse struct {
 // signals a generic validation failure for backward compatibility); scrub +
 // cap errors set Code and the richer metadata for agent self-correction.
 type ValidationError struct {
-	Code            string       `json:"code,omitempty"`
-	Field           string       `json:"field,omitempty"`
-	Message         string       `json:"message"`
-	Retryable       bool         `json:"retryable"`
-	Suggestion      string       `json:"suggestion,omitempty"`
+	Code       string `json:"code,omitempty"`
+	Field      string `json:"field,omitempty"`
+	Message    string `json:"message"`
+	Retryable  bool   `json:"retryable"`
+	Suggestion string `json:"suggestion,omitempty"`
+	// Limit/Actual are set only on field_too_large, both in bytes.
+	Limit           int          `json:"limit,omitempty"`
+	Actual          int          `json:"actual,omitempty"`
 	OffendingTags   []string     `json:"offending_tags,omitempty"`
 	MatchedPatterns []string     `json:"matched_patterns,omitempty"`
 	Scrub           *ScrubReport `json:"scrub,omitempty"`
@@ -241,11 +254,14 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 	// kept as defense in depth. Scope + scrub_pattern_version + scrub_counts
 	// are stamped on every insert and refreshed on conflict so the row's
 	// scrub provenance always matches the most recent body.
+	// origin is intentionally NOT in the ON CONFLICT SET: a fingerprint
+	// collision overwrites the body/provenance-of-scrub but preserves how the
+	// existing row was originally authored.
 	_, err = conn.ExecContext(ctx, `
 		INSERT INTO memories
 			(id, session_id, task_type, kind, title, what, learned, tags, fingerprint,
-			 created_at, updated_at, scope, scrub_pattern_version, scrub_counts)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 created_at, updated_at, scope, scrub_pattern_version, scrub_counts, origin)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(fingerprint) DO UPDATE SET
 			title                 = excluded.title,
 			what                  = excluded.what,
@@ -257,14 +273,21 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 			scrub_pattern_version = excluded.scrub_pattern_version,
 			scrub_counts          = excluded.scrub_counts
 	`, id, sessionID, req.TaskType, req.Kind, req.Title, req.What, req.Learned, req.Tags, fp,
-		now, now, req.Scope, ScrubPatternVersion, scrubCountsJSON)
+		now, now, req.Scope, ScrubPatternVersion, scrubCountsJSON, req.Origin)
 	if err != nil {
 		return nil, fmt.Errorf("insert memory: %w", err)
 	}
 
-	// prune inside the txn so rolling-window cap is atomic with insert
+	// prune inside the txn so the rolling-window cap is atomic with insert.
+	// session_summary retention splits by origin (ADR-0016): manual summaries
+	// keep newest-5 per task_type; auto summaries keep a global newest-M budget
+	// evicted value-aware by the Expand signal.
 	if req.Kind == "session_summary" {
-		if err := pruneSessionSummariesConn(ctx, conn, req.TaskType); err != nil {
+		if req.Origin == "auto" {
+			if err := pruneAutoSummariesConn(ctx, conn); err != nil {
+				return nil, fmt.Errorf("prune auto summaries: %w", err)
+			}
+		} else if err := pruneSessionSummariesConn(ctx, conn, req.TaskType); err != nil {
 			return nil, fmt.Errorf("prune session summaries: %w", err)
 		}
 	}
@@ -296,17 +319,64 @@ func endTxn(ctx context.Context, conn *sql.Conn, dryRun bool) error {
 
 const maxSessionSummaries = 5
 
+// maxAutoSummaries (M) is the global budget for origin='auto' session summaries;
+// autoSummaryGrace (K) is the cold-start window protected from value-eviction.
+// K < M is required (ADR-0016 pt 6). Hardcoded constants for v1, consistent with
+// the hardcoded context-tier sizes.
+const (
+	maxAutoSummaries = 30
+	autoSummaryGrace = 5
+)
+
+// pruneSessionSummariesConn enforces the per-task_type newest-5 cap for MANUAL
+// session summaries. Scoped to origin='manual' so it never evicts an auto
+// summary that happens to share a task_type bucket.
 func pruneSessionSummariesConn(ctx context.Context, conn *sql.Conn, taskType string) error {
 	_, err := conn.ExecContext(ctx, `
 		DELETE FROM memories
-		WHERE task_type = ? AND kind = 'session_summary'
+		WHERE task_type = ? AND kind = 'session_summary' AND origin = 'manual'
 		AND id NOT IN (
 			SELECT id FROM memories
-			WHERE task_type = ? AND kind = 'session_summary'
+			WHERE task_type = ? AND kind = 'session_summary' AND origin = 'manual'
 			ORDER BY created_at DESC
 			LIMIT ?
 		)
 	`, taskType, taskType, maxSessionSummaries)
+	return err
+}
+
+// pruneAutoSummariesConn enforces the global newest-M budget for origin='auto'
+// session summaries, evicting value-aware via the Expand signal (ADR-0016 pt 6).
+// The keep set is the M most-keepable autos ranked, highest first, by:
+//  1. inside the newest-K by created_at (cold-start grace — always kept),
+//  2. ever-expanded over never-expanded (proven value),
+//  3. warmer last_expanded_at (LRU; SQLite sorts NULL last under DESC),
+//  4. newer created_at.
+//
+// Everything outside that set is deleted — which reproduces the eviction
+// precedence: never-expanded-outside-K-oldest dies first, then
+// expanded-outside-K-coldest, then (only if all rows sit inside K) oldest
+// overall. M is the hard cap; K is a shield, not a veto.
+func pruneAutoSummariesConn(ctx context.Context, conn *sql.Conn) error {
+	_, err := conn.ExecContext(ctx, `
+		DELETE FROM memories
+		WHERE kind = 'session_summary' AND origin = 'auto'
+		AND id NOT IN (
+			SELECT id FROM memories
+			WHERE kind = 'session_summary' AND origin = 'auto'
+			ORDER BY
+				(CASE WHEN id IN (
+					SELECT id FROM memories
+					WHERE kind = 'session_summary' AND origin = 'auto'
+					ORDER BY created_at DESC
+					LIMIT ?
+				) THEN 1 ELSE 0 END) DESC,
+				(CASE WHEN expand_count > 0 THEN 1 ELSE 0 END) DESC,
+				last_expanded_at DESC,
+				created_at DESC
+			LIMIT ?
+		)
+	`, autoSummaryGrace, maxAutoSummaries)
 	return err
 }
 
@@ -348,19 +418,14 @@ const bm25QueryTermCap = 100
 // similarity over normalized token sets of (title+what+learned+tags).
 // Returns the best match if similarity >= jaccardDupeThreshold.
 func nearDuplicateConn(ctx context.Context, conn *sql.Conn, req SaveRequest) (*matchedRow, float64, error) {
-	terms := searchTerms(req.Title + " " + req.What + " " + req.Learned + " " + req.Tags)
+	body := req.Title + " " + req.What + " " + req.Learned + " " + req.Tags
+	terms, reqTokens := dedupeTokens(body)
 	if len(terms) == 0 {
 		return nil, 0, nil
 	}
-	// Cap query arity (decision #19). Sort by length desc to keep
-	// high-IDF tokens; falls back to alphabetical for stable tie-break.
+	// Cap query arity (decision #19).
 	if len(terms) > bm25QueryTermCap {
-		sort.Slice(terms, func(a, b int) bool {
-			if len(terms[a]) != len(terms[b]) {
-				return len(terms[a]) > len(terms[b])
-			}
-			return terms[a] < terms[b]
-		})
+		sortTermsByIDF(terms)
 		terms = terms[:bm25QueryTermCap]
 	}
 	// Wrap each term as an FTS5 phrase literal ("term") so that any FTS5
@@ -390,11 +455,6 @@ func nearDuplicateConn(ctx context.Context, conn *sql.Conn, req SaveRequest) (*m
 		return nil, 0, err
 	}
 	defer rows.Close()
-
-	reqTokens := tokenSet(req.Title + " " + req.What + " " + req.Learned + " " + req.Tags)
-	if len(reqTokens) == 0 {
-		return nil, 0, nil
-	}
 
 	var best matchedRow
 	bestSim := 0.0
@@ -479,6 +539,18 @@ func validate(req *SaveRequest) (*ScrubReport, error) {
 		}
 	}
 
+	if req.Origin == "" {
+		req.Origin = DefaultOrigin
+	}
+	if !validOrigins[req.Origin] {
+		return nil, &ValidationError{
+			Field:      "origin",
+			Message:    "must be 'manual' or 'auto'",
+			Retryable:  true,
+			Suggestion: "omit origin to use the default ('manual')",
+		}
+	}
+
 	if err := enforceFieldCap("task_type", req.TaskType, MaxTaskTypeLen, "use a short workflow slug, e.g. 'crm_upload'"); err != nil {
 		return nil, err
 	}
@@ -499,6 +571,15 @@ func validate(req *SaveRequest) (*ScrubReport, error) {
 	}
 
 	if err := checkTagsForSecrets(req.Tags); err != nil {
+		return nil, err
+	}
+	// Identifier fields are persisted verbatim (never redacted) and surface
+	// in FTS + context bundles, so a secret in them is as bad as one in tags.
+	// Same strict-reject policy: the agent rewrites, nothing is auto-stripped.
+	if err := checkIdentifierForSecrets("task_type", req.TaskType); err != nil {
+		return nil, err
+	}
+	if err := checkIdentifierForSecrets("session_id", req.SessionID); err != nil {
 		return nil, err
 	}
 
@@ -532,6 +613,8 @@ func validate(req *SaveRequest) (*ScrubReport, error) {
 	return &agg, nil
 }
 
+// enforceFieldCap measures bytes, not runes — caps protect the byte-denominated
+// storage budget (PRD §3.2), and CONTEXT.md fixes "Field cap" as a byte limit.
 func enforceFieldCap(field, value string, max int, suggestion string) error {
 	if len(value) <= max {
 		return nil
@@ -539,7 +622,9 @@ func enforceFieldCap(field, value string, max int, suggestion string) error {
 	return &ValidationError{
 		Code:       "field_too_large",
 		Field:      field,
-		Message:    fmt.Sprintf("max %d characters", max),
+		Message:    fmt.Sprintf("max %d bytes (got %d)", max, len(value)),
+		Limit:      max,
+		Actual:     len(value),
 		Retryable:  true,
 		Suggestion: suggestion,
 	}
@@ -553,6 +638,16 @@ func checkTagsForSecrets(tags string) error {
 	if tags == "" {
 		return nil
 	}
+	// Fast path: one Scrub over the whole tags string. Clean tags (the common
+	// case) cost a single detector pass instead of one per token. Scrubbing the
+	// joined string can only detect a superset of the per-token hits — more
+	// surrounding context never suppresses a match — so a zero here guarantees
+	// every individual tag is clean.
+	if _, whole := Scrub(tags); whole.RedactionCount == 0 {
+		return nil
+	}
+	// A redaction fired. Re-scrub per token to name the offenders for the
+	// diagnostic error. This path is rare (a real leak) and not latency-bound.
 	tokens := strings.Fields(tags)
 	var offending []string
 	matched := map[string]struct{}{}
@@ -566,8 +661,14 @@ func checkTagsForSecrets(tags string) error {
 			matched[name] = struct{}{}
 		}
 	}
-	if len(offending) == 0 {
-		return nil
+	// Fallback: the whole-string match spanned a token boundary and couldn't be
+	// localized. Report the whole-string patterns so the save is still rejected
+	// rather than silently passing.
+	if len(matched) == 0 {
+		_, whole := Scrub(tags)
+		for name := range whole.PerPatternCounts {
+			matched[name] = struct{}{}
+		}
 	}
 	patterns := make([]string, 0, len(matched))
 	for n := range matched {
@@ -581,6 +682,33 @@ func checkTagsForSecrets(tags string) error {
 		Retryable:       true,
 		Suggestion:      "remove sensitive tokens from tags; tags are stored unscrubbed for search",
 		OffendingTags:   offending,
+		MatchedPatterns: patterns,
+	}
+}
+
+// checkIdentifierForSecrets strict-rejects a save whose identifier field
+// (task_type, session_id) matches any scrub detector. Identifiers are stored
+// unscrubbed by design — they are routing keys, not prose — so redaction is
+// not an option; rejection with a retryable error is.
+func checkIdentifierForSecrets(field, value string) error {
+	if value == "" {
+		return nil
+	}
+	_, rep := Scrub(value)
+	if rep.RedactionCount == 0 {
+		return nil
+	}
+	patterns := make([]string, 0, len(rep.PerPatternCounts))
+	for name := range rep.PerPatternCounts {
+		patterns = append(patterns, name)
+	}
+	sort.Strings(patterns)
+	return &ValidationError{
+		Code:            field + "_contains_secret",
+		Field:           field,
+		Message:         "value matches a scrub detector and identifiers are stored unscrubbed",
+		Retryable:       true,
+		Suggestion:      "use a short non-sensitive slug for " + field,
 		MatchedPatterns: patterns,
 	}
 }
@@ -658,6 +786,47 @@ func normalizeForFP(s string) string {
 	words := strings.Fields(s)
 	sort.Strings(words)
 	return strings.Join(words, " ")
+}
+
+// sortTermsByIDF orders terms longest-first (length proxies IDF) so capping
+// keeps the highest-signal tokens; alphabetical tie-break for stable runs.
+func sortTermsByIDF(terms []string) {
+	sort.Slice(terms, func(a, b int) bool {
+		if len(terms[a]) != len(terms[b]) {
+			return len(terms[a]) > len(terms[b])
+		}
+		return terms[a] < terms[b]
+	})
+}
+
+// dedupeTokens normalizes body once and returns both the ordered unique term
+// slice (for the BM25 candidate query) and the token set (for Jaccard scoring).
+// Folds what searchTerms + tokenSet previously did in two passes — each
+// re-lowercased and re-scanned the full ~13 KB concatenated body — into a
+// single ToLower → strip-punct → collapse-whitespace → Fields sweep.
+//
+// Punctuation splits tokens (replaced with a space) so the BM25 query and the
+// Jaccard set index the same atoms the FTS5 unicode61 tokenizer produces —
+// the alignment decision #18 mandates. Tokens of len <= 2 are dropped as noise,
+// matching both source functions.
+func dedupeTokens(body string) ([]string, map[string]struct{}) {
+	body = strings.ToLower(body)
+	body = rePunct.ReplaceAllString(body, " ")
+	body = reWhitespace.ReplaceAllString(body, " ")
+	words := strings.Fields(strings.TrimSpace(body))
+	set := make(map[string]struct{}, len(words))
+	terms := make([]string, 0, len(words))
+	for _, w := range words {
+		if len(w) <= 2 {
+			continue
+		}
+		if _, ok := set[w]; ok {
+			continue
+		}
+		set[w] = struct{}{}
+		terms = append(terms, w)
+	}
+	return terms, set
 }
 
 // searchTerms extracts unique lowercase words (len > 2) for BM25 queries.

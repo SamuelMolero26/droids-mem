@@ -3,7 +3,7 @@ package main
 import (
 	"errors"
 
-	"github.com/samuelmolero/droids-mem/internal/store"
+	"github.com/SamuelMolero26/droids-mem/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -11,6 +11,7 @@ func newContextCmd(a *app) *cobra.Command {
 	var (
 		taskType string
 		query    string
+		mode     string
 	)
 
 	cmd := &cobra.Command{
@@ -32,13 +33,18 @@ deep-read any browse-tier item.`,
 			resp, err := s.Context(cmd.Context(), store.ContextRequest{
 				TaskType: taskType,
 				Query:    query,
+				Mode:     store.ContextMode(mode),
 			})
 			if err != nil {
 				var ve *store.ValidationError
 				if errors.As(err, &ve) {
+					suggestion := ve.Suggestion
+					if suggestion == "" {
+						suggestion = "provide --" + ve.Field
+					}
 					writeError("validation_failed", ve.Message, false,
 						withField(ve.Field),
-						withSuggestion("provide --"+ve.Field),
+						withSuggestion(suggestion),
 					)
 					exitWith(ExitUsage)
 				}
@@ -52,6 +58,7 @@ deep-read any browse-tier item.`,
 
 	cmd.Flags().StringVar(&taskType, "task-type", "", "Task type to load context for (required)")
 	cmd.Flags().StringVar(&query, "query", "", "Optional FTS query for browse-tier ranking (defaults to task-type tokens)")
+	cmd.Flags().StringVar(&mode, "mode", "orient", "Retrieval depth: orient | deep | refresh")
 
 	_ = cmd.MarkFlagRequired("task-type")
 

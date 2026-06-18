@@ -1,4 +1,4 @@
-package store
+package scrub
 
 import (
 	_ "embed"
@@ -9,16 +9,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// corpusCutMarker is stripped from fixture inputs/expectations at load time.
+//go:embed testdata/scrub/corpus.yaml
+var embeddedCorpus []byte
+
+// CutMarker is stripped from fixture inputs/expectations at load time.
 // Fixtures embed it mid-token (e.g. "ghp_[CUT]FIXTURE...") so the at-rest
 // YAML never contains a string matching any secret scanner's token shape —
 // GitHub push protection and GitGuardian both match on shape regardless of
 // FIXTURE/NOTAREAL words. The runtime value, with the marker removed, still
 // exercises the real pattern.
-const corpusCutMarker = "[CUT]"
-
-//go:embed testdata/scrub/corpus.yaml
-var embeddedCorpus []byte
+const CutMarker = "[CUT]"
 
 // CorpusCase is one fixture entry: a category, an input, the expected scrubbed
 // output, and the per-pattern counts the engine should report. Mirrors the
@@ -64,12 +64,12 @@ func RunCorpus() (*CorpusReport, error) {
 	}
 	rep := &CorpusReport{
 		Total:          len(c.Cases),
-		PatternVersion: ScrubPatternVersion,
+		PatternVersion: Version,
 		Cases:          make([]CorpusCaseResult, 0, len(c.Cases)),
 	}
 	for _, tc := range c.Cases {
-		tc.Input = strings.ReplaceAll(tc.Input, corpusCutMarker, "")
-		tc.Expected = strings.ReplaceAll(tc.Expected, corpusCutMarker, "")
+		tc.Input = strings.ReplaceAll(tc.Input, CutMarker, "")
+		tc.Expected = strings.ReplaceAll(tc.Expected, CutMarker, "")
 		got, report := Scrub(tc.Input)
 		want := tc.Counts
 		if want == nil {
