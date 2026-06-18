@@ -1,8 +1,6 @@
 # droids-mem — Product Requirements Document
 
-> **Version:** 1.3 · **Status:** Draft · **Last Updated:** June 2026
->
-> **Changelog (1.3):** v1.0 scope restaged. v1.0 ships PII scrub pipeline (ADR-0007, Accepted) + `scope` column only. Workspace model (ADR-0005) deferred to v1.1. Git-jsonl sync (ADR-0006) deferred to v1.2. §9 milestones marked with target release. §11 release criteria pruned to v1.0 deliverables. See `docs/v1.0-implementation-plan.md` for locked decisions.
+> **Version:** 1.2 · **Status:** Draft · **Last Updated:** June 2026
 >
 > **Changelog (1.2):** Workspace model (ADR-0005), git-jsonl sync for project workspaces (ADR-0006), PII scrub pipeline (ADR-0007), `scope` field on memories, expanded command surface (`init`, `sync`, `workspace`, `scrub`), release criteria checklist.
 
@@ -82,9 +80,7 @@ Droids-mem V1 solves these problems by enforcing a small set of structured memor
 | Binary startup time | < 200ms |
 | Binary size (compiled) | < 20MB |
 | Duplicate memory rate | ≤ 10% of saved memories are near-duplicates |
-| Context payload size — always tier | 1 `last_session` (full body) + ≤ 5 `user_rules` (full body) |
-| Context payload size — browse tier | ≤ 10 `error_resolution` + ≤ 10 `task_pattern` (title + 120-rune snippet each) |
-| Context payload size — total ceiling | ≤ 26 items, ~34 KB at always-tier-saturated worst case |
+| Context payload size | ≤ 10 memory items returned by `context` |
 | Storage footprint (first 90 days, single-user local usage) | < 25MB |
 | Scrub redaction false-positive rate (per 1000 prose lines) | < 5 per pattern category |
 | Scrub latency on 10 KB body (p95, M-series Mac) | < 500 µs |
@@ -706,24 +702,21 @@ Schema and content migrations across droids-mem versions.
 
 ## 9. Development Milestones
 
-| Phase | Target | Deliverable | Success Criteria |
-|---|---|---|---|
-| **M1** | shipped | SQLite schema | `memories` table and `memories_fts` index created successfully |
-| **M2** | shipped | `save` implementation | Structured memories save locally with validation |
-| **M3** | shipped | Fingerprint dedupe | Exact duplicates are skipped reliably |
-| **M4** | shipped | `search` implementation | Relevant FTS results returned with exact filters |
-| **M5** | shipped | `context` implementation | Latest session summary + relevant memories returned in compact form |
-| **M6** | shipped | Local CLI or stdio wrapper | Tool can be exercised end-to-end on a laptop |
-| **M7** | shipped | End-to-end memory loop | A second run uses a first run's memories successfully |
-| **M8** | **v1.1** | Workspace model (ADR-0005) | `user`/`project`/`workflow` types load from `workspace.yml`; resolution order works; merge-on-query returns tagged union |
-| **M9** | **v1.0** | PII scrub pipeline (ADR-0007) | Pattern set lands; fixture corpus passes; redaction reports in `mem_save` response; benchmark p95 < 500 µs |
-| **M9a** | **v1.0** | `scope` column + schema migration | `PRAGMA user_version` ladder; v0→v1 adds `scope`, `scrub_pattern_version`, `scrub_counts`, `meta` kv; boot gate requires `scrub_baseline_complete` sentinel |
-| **M9b** | **v1.0** | `migrate --rescrub` / `--no-rescrub` | Pre-v1.0 DB boot fails → `migrate` produces ready DB; atomic per DB |
-| **M9c** | **v1.0** | `scrub --check` + `doctor --scrub-stats` | Human-facing CLI for scrub debugging + operator aggregation |
-| **M10** | **v1.2** | Project workspace sync (ADR-0006) | `init` + `sync` work end-to-end; JSONL byte-deterministic; coworker clone + sync produces identical DB |
-| **M11** | **v1.0** | Release packaging | GitHub releases (linux/amd64, linux/arm64, darwin/arm64, darwin/amd64), `go install` path, README + quick-start, CHANGELOG, license |
+| Phase | Deliverable | Success Criteria |
+|---|---|---|
+| **M1** | SQLite schema | `memories` table and `memories_fts` index created successfully |
+| **M2** | `save` implementation | Structured memories save locally with validation |
+| **M3** | Fingerprint dedupe | Exact duplicates are skipped reliably |
+| **M4** | `search` implementation | Relevant FTS results returned with exact filters |
+| **M5** | `context` implementation | Latest session summary + relevant memories returned in compact form |
+| **M6** | Local CLI or stdio wrapper | Tool can be exercised end-to-end on a laptop |
+| **M7** | End-to-end memory loop | A second run uses a first run's memories successfully |
+| **M8** | Workspace model (ADR-0005) | `user`/`project`/`workflow` types load from `workspace.yml`; resolution order works; merge-on-query returns tagged union |
+| **M9** | PII scrub pipeline (ADR-0007) | Pattern set lands; fixture corpus passes; redaction reports in `mem_save` response; benchmark p95 < 500 µs |
+| **M10** | Project workspace sync (ADR-0006) | `init` + `sync` work end-to-end; JSONL byte-deterministic; coworker clone + sync produces identical DB |
+| **M11** | Release packaging | GitHub releases (linux/amd64, linux/arm64, darwin/arm64, darwin/amd64), `go install` path, README + quick-start, CHANGELOG, license |
 
----
+  * [ ] ---
 
 ## 10. Risks & Mitigations
 
@@ -747,23 +740,19 @@ Schema and content migrations across droids-mem versions.
 
 ## 11. Release Criteria
 
-Pre-release blockers before tagging v1.0.0. v1.0 scope = scrub pipeline + `scope` column + schema migration mechanic. Workspace model (M8) and JSONL sync (M10) deferred to v1.1 / v1.2 respectively. See `docs/v1.0-implementation-plan.md` for locked decisions.
+Pre-release blockers before tagging v1.0.0:
 
 **Correctness**
 - [ ] All existing tests pass on `main` (currently one broken test flagged in last commit — fix or quarantine).
-- [ ] M9 + M9a + M9b + M9c implemented with end-to-end test coverage.
-- [ ] Schema migration v0 → v1 idempotent; fresh-DDL schema byte-equivalent to ALTER-migrated schema.
-- [ ] Scrub fixture corpus (`internal/store/testdata/scrub/corpus.yaml`) passes.
+- [ ] M8-M10 implemented with end-to-end test coverage.
+- [ ] JSONL round-trip determinism test passes (export → import → export byte-identical).
+- [ ] Scrub fixture corpus (`internal/store/testdata/scrub/`) passes.
 - [ ] Scrub benchmark p95 < 500 µs on 10 KB body.
-- [ ] E2E: pre-v1.0 fixture DB → boot fails → `migrate --rescrub` succeeds → boot succeeds.
 
 **Safety**
-- [ ] PII scrub pipeline (ADR-0007) live in save path; pattern set committed in declaration order (pem_key first → email last).
-- [ ] Boot gate refuses to start without `scrub_baseline_complete` sentinel in `meta` table.
-- [ ] Empty-after-scrub on `learned` rejected (`scrub_emptied_learned`).
-- [ ] Tag-with-secret rejected (`tag_contains_secret`, `retryable:true`).
-- [ ] Field caps enforced (title=200, what=8192, learned=4096, tags=500).
-- [ ] Redaction tokens bracketed per-category ([EMAIL], [AWS_KEY], …).
+- [ ] PII scrub pipeline (ADR-0007) live in save path; pattern set committed.
+- [ ] `enabled: false` on `project` workspace with `sync.mode: git-jsonl` rejected at workspace load.
+- [ ] Per-workspace token isolation verified (workflow bot cannot read user MCP).
 
 **Packaging**
 - [ ] GitHub Actions release builds: `linux/amd64`, `linux/arm64`, `darwin/arm64`, `darwin/amd64`.
@@ -772,21 +761,14 @@ Pre-release blockers before tagging v1.0.0. v1.0 scope = scrub pipeline + `scope
 - [ ] LICENSE file committed (recommended: MIT or Apache-2.0).
 
 **Documentation**
-- [ ] `README.md` with: install, quick start (save/search/context), scrub behavior, first-run `migrate --rescrub`, troubleshooting.
+- [ ] `README.md` with: install, quick start (user/project/workflow workspace), troubleshooting.
 - [ ] `CHANGELOG.md` seeded with v1.0.0 entry.
-- [ ] ADR 0001-0007 committed and linked from `README.md`. ADR-0005/0006 marked Deferred. ADR-0007 marked Accepted.
+- [ ] ADR 0001-0007 committed and linked from `README.md`.
 - [ ] `droids-mem doctor --scrub-stats` documented for operators.
 
 **Migration**
-- [ ] `droids-mem migrate --rescrub` walks rows through scrub pipeline atomically; sets `scrub_baseline_complete=1`.
-- [ ] `droids-mem migrate --no-rescrub` sets sentinel without rewriting (documented escape hatch for trusted DBs).
-
-**Out of v1.0 release criteria** (deferred to v1.1 / v1.2):
-- ~~Workspace model end-to-end test coverage~~ → v1.1
-- ~~JSONL round-trip determinism test~~ → v1.2
-- ~~`enabled: false` on `project` workspace rejected~~ → v1.1
-- ~~Per-workspace token isolation~~ → v1.1
-- ~~`migrate --rescrub-workspace`~~ → v1.2 (v1.0 ships single-DB `migrate --rescrub`)
+- [ ] `droids-mem migrate` path from pre-workspace V1 layout (`~/.droids-mem/mem.db`) to user-workspace layout (`~/.droids-mem/local/mem.db`).
+- [ ] One-shot rescrub migration documented (`migrate --rescrub-workspace`).
 
 ---
 
