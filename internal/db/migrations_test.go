@@ -2,6 +2,7 @@ package db_test
 
 import (
 	"database/sql"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -222,7 +223,8 @@ func TestMigrate_V1toV2AddsExpandColumns(t *testing.T) {
 	if !hasLast {
 		t.Error("migrated DB missing memories.last_expanded_at")
 	}
-	if got, want := userVersion(t, conn), 2; got != want {
+	// Migrate runs the full ladder, so the version lands on the current head.
+	if got, want := userVersion(t, conn), db.CurrentSchemaVersion; got != want {
 		t.Errorf("post-migrate user_version = %d, want %d", got, want)
 	}
 }
@@ -380,6 +382,66 @@ func TestInit_FreshMatchesMigratedShape(t *testing.T) {
 	}
 	if got, want := indexNames(t, fresh), indexNames(t, migrated); !equalStringSlices(got, want) {
 		t.Errorf("index set diverges:\n fresh   = %v\n migrate = %v", got, want)
+	}
+}
+
+func TestInit_FreshDBHasOriginColumnAndIndex(t *testing.T) {
+	conn := newTestDB(t)
+	if !slices.Contains(tableColumns(t, conn, "memories"), "origin") {
+		t.Error("fresh DB missing memories.origin")
+	}
+	if !slices.Contains(indexNames(t, conn), "idx_memories_origin_created") {
+		t.Error("fresh DB missing idx_memories_origin_created")
+	}
+}
+
+// v2→v3 adds origin; existing rows must backfill to 'manual' via the DEFAULT,
+// and the recency index must exist after migrate.
+func TestMigrate_V2toV3AddsOriginBackfillsManual(t *testing.T) {
+	conn := newPreV1DB(t)
+	now := int64(1000000)
+	if _, err := conn.Exec(`
+		INSERT INTO memories (id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at)
+		VALUES ('mem_o', 'sess', 'crm', 'task_pattern', 't', 'w', 'l', '', 'fp_o', ?, ?)`,
+		now, now); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+	if err := db.Migrate(conn); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if !slices.Contains(tableColumns(t, conn, "memories"), "origin") {
+		t.Fatal("migrated DB missing memories.origin")
+	}
+	var origin string
+	if err := conn.QueryRow(`SELECT origin FROM memories WHERE id = 'mem_o'`).Scan(&origin); err != nil {
+		t.Fatalf("read origin: %v", err)
+	}
+	if origin != "manual" {
+		t.Errorf("backfilled origin = %q, want 'manual'", origin)
+	}
+	if got, want := userVersion(t, conn), 3; got != want {
+		t.Errorf("post-migrate user_version = %d, want %d", got, want)
+	}
+	if !slices.Contains(indexNames(t, conn), "idx_memories_origin_created") {
+		t.Error("migrated DB missing idx_memories_origin_created")
+	}
+}
+
+// The CHECK constraint must reject any origin outside {manual, auto} and accept
+// 'auto' (the value an Auto-session-summary carries).
+func TestOrigin_CheckConstraint(t *testing.T) {
+	conn := newTestDB(t)
+	if _, err := conn.Exec(`
+		INSERT INTO memories (id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at, origin)
+		VALUES ('mem_bad', 'sess', 'crm', 'task_pattern', 't', 'w', 'l', '', 'fp_bad', 1, 1, 'bogus')`,
+	); err == nil {
+		t.Error("expected CHECK violation for origin='bogus', got nil")
+	}
+	if _, err := conn.Exec(`
+		INSERT INTO memories (id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at, origin)
+		VALUES ('mem_auto', 'sess', 'claude_session', 'session_summary', 't', 'w', 'l', '', 'fp_auto', 1, 1, 'auto')`,
+	); err != nil {
+		t.Errorf("insert origin='auto' should succeed: %v", err)
 	}
 }
 

@@ -30,6 +30,10 @@ _Avoid_: rule, override, setting
 A Memory written once at the end of a Run capturing intent, outcome, and what to remember next time.
 _Avoid_: report, recap, postmortem
 
+**Auto-session-summary**:
+A session_summary composed and saved automatically at the end of a Claude Code Run rather than by an explicit agent decision. Not a separate Kind — it is a `session_summary` distinguished by `origin: auto` and routed to the reserved `claude_session` task_type so it gets its own retention budget and never pollutes workflow recall. Contrast: an ordinary session_summary is `origin: manual`.
+_Avoid_: auto-summary kind, fifth kind, session log
+
 ### Grouping and scope
 
 **Session**:
@@ -47,6 +51,10 @@ _Avoid_: domain, category, workflow, job
 **Scope**:
 A Memory's visibility classification; either `personal` (private to the user) or `shared` (eligible for cross-agent reuse). Defaults to `shared` and is forward-compat for the v1.1 workspace model.
 _Avoid_: visibility, privacy, audience
+
+**Origin**:
+A Memory's provenance; either `manual` (default — saved by an explicit agent/operator decision) or `auto` (machine-composed by a session-end enforcement path). Orthogonal to Kind and Scope — it records *how* a Memory was authored, not what it means. Lets retention, ranking, and audit treat machine-forced writes differently without overloading Kind.
+_Avoid_: source, type, automated flag
 
 ### Dedupe and retrieval
 
@@ -164,6 +172,10 @@ _Avoid_: full mode, verbose mode, expanded mode
 A Context mode returning always-tier only (latest session_summary + ≤5 user_rules, no browse tier, no rule stubs). Designed for cheap mid-run re-anchor. Passing `--query` with `refresh` is a validation error.
 _Avoid_: lite mode, fast mode, cheap mode
 
+**TOON encoding** _(Deferred — ADR-0017)_:
+An opt-in, token-saving tabular rendering of the Context bundle's browse Tier (`format: toon`), where the uniform browse rows share one field header instead of repeating keys per object. Additive only — JSON stays the default and the error envelope is always JSON. The always Tier and envelope stay JSON; only the browse array is rendered as TOON. Encoded at the edge, post-Scrub. _Deferred: the Phase-0 spike measured a net win below the ship bar on prose-heavy rows; parked pending a tightened re-measurement._
+_Avoid_: format swap, serialization mode, compact JSON
+
 **Expand signal**:
 The `expand_count` + `last_expanded_at` (unix seconds) pair on a Memory, incremented by an agent-facing `get` (CLI `get`, MCP `mem_get`) and surviving force-save. Operator/TUI reads go through the non-counting fetch and never move it. Surfaced by `doctor --expand-stats` to inform future browse-tier sizing decisions.
 _Avoid_: access count, hit count, view count, expand tracker
@@ -193,6 +205,32 @@ _Avoid_: caller, consumer, user (overloaded with end-user)
 **Memory inspector**:
 The interactive terminal browser (`droids-mem tui`) an operator uses to filter, search, read, and Prune the local corpus in-process. An operator tool, not an Agent client — its reads never move the Expand signal.
 _Avoid_: dashboard, viewer, console, admin UI
+
+### Session-end auto-save
+
+**Staged summary**:
+A complete, model-composed `mem_save` payload for an Auto-session-summary, written to a file under `~/.droids-mem/` during a Claude Code Run and flushed to the store at session end. Lives outside the data model — the DB only ever sees the final committed Memory, never the draft.
+_Avoid_: draft row, pending summary, buffer
+
+**Intake gate**:
+The dual condition a Claude Code Run must pass before its Staged summary is persisted as an Auto-session-summary: a mechanical change-count threshold AND the model's judgment that the Run was worth recalling. Failing either yields no Auto-session-summary. The primary defense against retaining low-value sessions — junk is kept out at intake, not evicted later.
+_Avoid_: filter, gate check, save guard
+
+**Meaningful change**:
+A counted Run action (Edit / Write / Bash exec, or a git commit) used as the mechanical half of the Intake gate. Tallied DB-free in a sentinel file via the Claude Code `PostToolUse` hook; the same marker drives the Stop-hook staleness check.
+_Avoid_: edit count, activity, mutation
+
+**Checkpoint**:
+An enforced re-stage of the Staged summary at a stopping point (Claude Code `Stop` hook, fired per turn) once Meaningful changes since the last stage cross the Intake gate threshold. The hook blocks once per threshold-crossing to force the re-stage, then unblocks. Makes staging a per-stopping-point guarantee, not a single end-of-Run gamble.
+_Avoid_: autosave, snapshot, commit
+
+**Recovery flush**:
+The session-start step that flushes an orphaned Staged summary left by a crashed Run to the store, then cleans the file — recovering the last Checkpoint instead of discarding it. A 7-day TTL reaps any staged file too corrupt to flush.
+_Avoid_: replay, restore, crash recovery
+
+**Relevance-gated pull**:
+The read-side enforcement that guarantees prior Memories about the current task surface when the agent starts it: a Claude Code `UserPromptSubmit` hook runs a score-floored search over the prompt and injects a hit only above a relevance floor, deduped to once per Memory per Session. Distinct from a recency push — applicability, not recency, is the gate; below the floor it injects nothing.
+_Avoid_: auto-recall, context injection, recency push
 
 ## Relationships
 

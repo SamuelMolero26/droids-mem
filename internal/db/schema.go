@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS memories (
     scrub_counts          TEXT,
     expand_count          INTEGER NOT NULL DEFAULT 0,
     last_expanded_at      INTEGER,
+    origin                TEXT    NOT NULL DEFAULT 'manual' CHECK(origin IN ('manual','auto')),
     CHECK(updated_at >= created_at)
 );
 
@@ -49,6 +50,10 @@ CREATE INDEX IF NOT EXISTS idx_memories_kind              ON memories(kind);
 -- migration — DROP line removed v1.0 per perf-engineer rec #5.)
 CREATE INDEX IF NOT EXISTS idx_memories_task_kind_created ON memories(task_type, kind, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_created_at        ON memories(created_at DESC);
+-- idx_memories_origin_created serves the auto-summary recency read
+-- (recent-sessions: WHERE origin='auto' ORDER BY created_at DESC LIMIT N) and
+-- the origin-keyed eviction scan (ADR-0016). Never joined on FTS.
+CREATE INDEX IF NOT EXISTS idx_memories_origin_created    ON memories(origin, created_at DESC);
 
 -- FTS5 tokenizer (locked decision #17): unicode61 with underscore + hyphen
 -- promoted to token chars so identifiers like snake_case and kebab-case stay

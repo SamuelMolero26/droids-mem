@@ -97,6 +97,75 @@ first `db.Init` on a new file.
 
 ---
 
+## Use with Claude Code
+
+Two complementary layers:
+
+1. **MCP tools** — give the agent `mem_save` / `mem_search` / `mem_context` /
+   `mem_get` to read and write memory on demand.
+2. **Session memory** — guarantee a memory is recorded at the **end of every
+   session** and surface relevant prior memories when you start related work,
+   via Claude Code hooks handled natively by the binary (no shell scripts, no
+   `jq`). See [ADR-0016](docs/adr/0016-native-claude-code-session-auto-summary.md).
+
+You can enable either layer on its own; together they give the full experience.
+
+```
+# 0. Install the binary (if you haven't — see Install above)
+go install github.com/samuelmolero/droids-mem/cmd/droids-mem@latest
+```
+
+### 1. Add the MCP tools
+
+```
+# Start the local MCP bridge (idempotent — spawns a detached server if down)
+droids-mem ensure-server
+
+# Register it with Claude Code (HTTP transport + bearer token)
+claude mcp add --transport http droids-mem http://127.0.0.1:7777/mcp \
+  --header "Authorization: Bearer $(tr -d '\n' < ~/.droids-mem/token)"
+```
+
+The agent now has the four `mem_*` tools. (Bind address and token are
+configurable — see [Configuration](#configuration).)
+
+### 2. Add guaranteed session memory
+
+```
+# Wire the hooks into Claude Code's settings.json (idempotent, non-destructive)
+droids-mem install
+
+# Tell the model when to record a summary
+cat hooks/session-memory.md >> ~/.claude/CLAUDE.md
+```
+
+`install` merges hook entries into `~/.claude/settings.json`, pointing every
+event at `droids-mem session hook`. Options: `--project` targets
+`./.claude/settings.json`; `--print` previews the block without writing.
+
+`droids-mem session hook` reads each hook's JSON on stdin and dispatches:
+
+| Claude Code event | Behaviour |
+|-------------------|-----------|
+| `PostToolUse` (Edit/Write/Bash/…) | count meaningful changes (intake gate) |
+| `Stop` | once enough work is unstaged, ask the model to record progress |
+| `SessionEnd` | save the staged summary if the gate passes |
+| `SessionStart` | recover summaries from crashed runs |
+| `UserPromptSubmit` | inject relevant prior memories for the prompt |
+
+Every hook **fails open** — a memory hiccup never breaks your session.
+
+### Verify
+
+```
+claude mcp list                       # droids-mem should be listed + reachable
+droids-mem recent-sessions            # after a session with edits: your auto-summaries
+```
+
+Full hook reference: [`hooks/README.md`](hooks/README.md).
+
+---
+
 ## Secret scrub behaviour
 
 On every `save`, `title` / `what` / `learned` are scrubbed in a single pass.
@@ -203,6 +272,9 @@ the token (anti port-squatting).
 | `context` | Load start-of-run context bundle for a task type |
 | `get` | Get a single memory by ID |
 | `list` | List recent memories |
+| `recent-sessions` | List recent auto-saved Claude Code session summaries |
+| `session` | Claude Code session-memory plumbing (stage, check, flush, recover, hook) |
+| `install` | Wire droids-mem session memory into Claude Code (settings.json hooks) |
 | `doctor` | Check FTS integrity, rebuild if divergent, optimize, VACUUM, `--scrub-stats` |
 | `schema` | Show parameter schema for a command (or all commands) |
 | `scrub` | Run the v1.0 scrub engine ad-hoc (`--check`, `--test`) |

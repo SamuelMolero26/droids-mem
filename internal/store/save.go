@@ -28,10 +28,19 @@ var validScopes = map[string]bool{
 	"shared":   true,
 }
 
+var validOrigins = map[string]bool{
+	"manual": true,
+	"auto":   true,
+}
+
 // DefaultScope is what the save path stamps when the caller omits the scope
 // field. Matches the column default in schema.go so behavior is consistent
 // whether the row arrives through the API or a direct INSERT.
 const DefaultScope = "shared"
+
+// DefaultOrigin is stamped when the caller omits origin. 'auto' is reserved for
+// the session-end enforcement path (ADR-0016); every explicit save is 'manual'.
+const DefaultOrigin = "manual"
 
 // Field caps (locked decision #8). Hard limits — any field exceeding its cap
 // triggers a `field_too_large` rejection. Caps are forcing functions for
@@ -82,10 +91,11 @@ type SaveRequest struct {
 	Title     string `json:"title"`
 	What      string `json:"what"`
 	Learned   string `json:"learned"`
-	Tags      string `json:"tags"`            // space-delimited tokens
-	Scope     string `json:"scope,omitempty"` // "personal" | "shared", defaults to "shared"
-	Force     bool   `json:"force"`           // HITL correction: overwrite matched fingerprint
-	DryRun    bool   `json:"dry_run"`         // run full pipeline (validate → scrub → dedupe) then ROLLBACK
+	Tags      string `json:"tags"`             // space-delimited tokens
+	Scope     string `json:"scope,omitempty"`  // "personal" | "shared", defaults to "shared"
+	Origin    string `json:"origin,omitempty"` // "manual" | "auto", defaults to "manual" (ADR-0016)
+	Force     bool   `json:"force"`            // HITL correction: overwrite matched fingerprint
+	DryRun    bool   `json:"dry_run"`          // run full pipeline (validate → scrub → dedupe) then ROLLBACK
 }
 
 type SaveResponse struct {
@@ -244,11 +254,14 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 	// kept as defense in depth. Scope + scrub_pattern_version + scrub_counts
 	// are stamped on every insert and refreshed on conflict so the row's
 	// scrub provenance always matches the most recent body.
+	// origin is intentionally NOT in the ON CONFLICT SET: a fingerprint
+	// collision overwrites the body/provenance-of-scrub but preserves how the
+	// existing row was originally authored.
 	_, err = conn.ExecContext(ctx, `
 		INSERT INTO memories
 			(id, session_id, task_type, kind, title, what, learned, tags, fingerprint,
-			 created_at, updated_at, scope, scrub_pattern_version, scrub_counts)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 created_at, updated_at, scope, scrub_pattern_version, scrub_counts, origin)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(fingerprint) DO UPDATE SET
 			title                 = excluded.title,
 			what                  = excluded.what,
@@ -260,14 +273,21 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 			scrub_pattern_version = excluded.scrub_pattern_version,
 			scrub_counts          = excluded.scrub_counts
 	`, id, sessionID, req.TaskType, req.Kind, req.Title, req.What, req.Learned, req.Tags, fp,
-		now, now, req.Scope, ScrubPatternVersion, scrubCountsJSON)
+		now, now, req.Scope, ScrubPatternVersion, scrubCountsJSON, req.Origin)
 	if err != nil {
 		return nil, fmt.Errorf("insert memory: %w", err)
 	}
 
-	// prune inside the txn so rolling-window cap is atomic with insert
+	// prune inside the txn so the rolling-window cap is atomic with insert.
+	// session_summary retention splits by origin (ADR-0016): manual summaries
+	// keep newest-5 per task_type; auto summaries keep a global newest-M budget
+	// evicted value-aware by the Expand signal.
 	if req.Kind == "session_summary" {
-		if err := pruneSessionSummariesConn(ctx, conn, req.TaskType); err != nil {
+		if req.Origin == "auto" {
+			if err := pruneAutoSummariesConn(ctx, conn); err != nil {
+				return nil, fmt.Errorf("prune auto summaries: %w", err)
+			}
+		} else if err := pruneSessionSummariesConn(ctx, conn, req.TaskType); err != nil {
 			return nil, fmt.Errorf("prune session summaries: %w", err)
 		}
 	}
@@ -299,17 +319,64 @@ func endTxn(ctx context.Context, conn *sql.Conn, dryRun bool) error {
 
 const maxSessionSummaries = 5
 
+// maxAutoSummaries (M) is the global budget for origin='auto' session summaries;
+// autoSummaryGrace (K) is the cold-start window protected from value-eviction.
+// K < M is required (ADR-0016 pt 6). Hardcoded constants for v1, consistent with
+// the hardcoded context-tier sizes.
+const (
+	maxAutoSummaries = 30
+	autoSummaryGrace = 5
+)
+
+// pruneSessionSummariesConn enforces the per-task_type newest-5 cap for MANUAL
+// session summaries. Scoped to origin='manual' so it never evicts an auto
+// summary that happens to share a task_type bucket.
 func pruneSessionSummariesConn(ctx context.Context, conn *sql.Conn, taskType string) error {
 	_, err := conn.ExecContext(ctx, `
 		DELETE FROM memories
-		WHERE task_type = ? AND kind = 'session_summary'
+		WHERE task_type = ? AND kind = 'session_summary' AND origin = 'manual'
 		AND id NOT IN (
 			SELECT id FROM memories
-			WHERE task_type = ? AND kind = 'session_summary'
+			WHERE task_type = ? AND kind = 'session_summary' AND origin = 'manual'
 			ORDER BY created_at DESC
 			LIMIT ?
 		)
 	`, taskType, taskType, maxSessionSummaries)
+	return err
+}
+
+// pruneAutoSummariesConn enforces the global newest-M budget for origin='auto'
+// session summaries, evicting value-aware via the Expand signal (ADR-0016 pt 6).
+// The keep set is the M most-keepable autos ranked, highest first, by:
+//  1. inside the newest-K by created_at (cold-start grace — always kept),
+//  2. ever-expanded over never-expanded (proven value),
+//  3. warmer last_expanded_at (LRU; SQLite sorts NULL last under DESC),
+//  4. newer created_at.
+//
+// Everything outside that set is deleted — which reproduces the eviction
+// precedence: never-expanded-outside-K-oldest dies first, then
+// expanded-outside-K-coldest, then (only if all rows sit inside K) oldest
+// overall. M is the hard cap; K is a shield, not a veto.
+func pruneAutoSummariesConn(ctx context.Context, conn *sql.Conn) error {
+	_, err := conn.ExecContext(ctx, `
+		DELETE FROM memories
+		WHERE kind = 'session_summary' AND origin = 'auto'
+		AND id NOT IN (
+			SELECT id FROM memories
+			WHERE kind = 'session_summary' AND origin = 'auto'
+			ORDER BY
+				(CASE WHEN id IN (
+					SELECT id FROM memories
+					WHERE kind = 'session_summary' AND origin = 'auto'
+					ORDER BY created_at DESC
+					LIMIT ?
+				) THEN 1 ELSE 0 END) DESC,
+				(CASE WHEN expand_count > 0 THEN 1 ELSE 0 END) DESC,
+				last_expanded_at DESC,
+				created_at DESC
+			LIMIT ?
+		)
+	`, autoSummaryGrace, maxAutoSummaries)
 	return err
 }
 
@@ -469,6 +536,18 @@ func validate(req *SaveRequest) (*ScrubReport, error) {
 			Message:    "must be 'personal' or 'shared'",
 			Retryable:  true,
 			Suggestion: "omit scope to use the default ('shared')",
+		}
+	}
+
+	if req.Origin == "" {
+		req.Origin = DefaultOrigin
+	}
+	if !validOrigins[req.Origin] {
+		return nil, &ValidationError{
+			Field:      "origin",
+			Message:    "must be 'manual' or 'auto'",
+			Retryable:  true,
+			Suggestion: "omit origin to use the default ('manual')",
 		}
 	}
 

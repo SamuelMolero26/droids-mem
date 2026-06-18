@@ -7,7 +7,7 @@ import (
 
 // CurrentSchemaVersion is the user_version that a fully-initialized
 // database reports. Bump when adding a new entry to the migrations ladder.
-const CurrentSchemaVersion = 2
+const CurrentSchemaVersion = 3
 
 // migration is one rung in the PRAGMA user_version ladder. Each rung runs
 // inside its own transaction; partial failure rolls back atomically.
@@ -32,6 +32,7 @@ type migration struct {
 var migrations = []migration{
 	{from: 0, to: 1, sql: migrationV0ToV1},
 	{from: 1, to: 2, sql: migrationV1ToV2},
+	{from: 2, to: 3, sql: migrationV2ToV3},
 }
 
 const migrationV0ToV1 = `
@@ -67,6 +68,19 @@ AFTER UPDATE OF title, what, learned, tags ON memories BEGIN
     INSERT INTO memories_fts(rowid, title, what, learned, tags)
     VALUES (NEW.rowid, NEW.title, NEW.what, NEW.learned, NEW.tags);
 END;
+`
+
+// migrationV2ToV3 adds the Origin column (ADR-0016): memory provenance,
+// 'manual' (default) or 'auto' for machine-composed session-end summaries.
+// Purely additive — ALTER ADD COLUMN with a constant default is O(1) metadata,
+// and existing rows backfill to 'manual' via the DEFAULT (every pre-v3 memory
+// was authored by an explicit decision). The composite index serves the
+// auto-summary recency read (recent-sessions) and origin-keyed eviction scan;
+// it never touches FTS, the boot gate, or the scrub baseline.
+const migrationV2ToV3 = `
+ALTER TABLE memories ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'
+    CHECK(origin IN ('manual','auto'));
+CREATE INDEX IF NOT EXISTS idx_memories_origin_created ON memories(origin, created_at DESC);
 `
 
 // Migrate advances db's schema from its current user_version up to
