@@ -222,9 +222,12 @@ func RecordInjected(ccID string, ids []string) error {
 	if err != nil {
 		return fmt.Errorf("open injected set: %w", err)
 	}
-	defer f.Close()
 	if _, err := f.WriteString(strings.Join(ids, "\n") + "\n"); err != nil {
+		_ = f.Close()
 		return fmt.Errorf("write injected set: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close injected set: %w", err)
 	}
 	return nil
 }

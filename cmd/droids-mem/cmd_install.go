@@ -110,7 +110,7 @@ func newHookEntry(matcher, hookCmd string) map[string]any {
 // event already pointing at hookCmd is left untouched.
 func mergeHooksInto(path, hookCmd string) ([]string, error) {
 	settings := map[string]any{}
-	if b, err := os.ReadFile(path); err == nil {
+	if b, err := os.ReadFile(path); err == nil { // #nosec G304 -- path is the settings.json location, not user input
 		if err := json.Unmarshal(b, &settings); err != nil {
 			return nil, fmt.Errorf("parse %s: %w", path, err)
 		}
@@ -134,14 +134,14 @@ func mergeHooksInto(path, hookCmd string) ([]string, error) {
 	}
 	settings["hooks"] = hooks
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, fmt.Errorf("create settings dir: %w", err)
 	}
 	out, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("marshal settings: %w", err)
 	}
-	if err := os.WriteFile(path, append(out, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(path, append(out, '\n'), 0o600); err != nil {
 		return nil, fmt.Errorf("write %s: %w", path, err)
 	}
 	return added, nil
