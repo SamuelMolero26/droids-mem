@@ -66,7 +66,6 @@ var schemaDefinitions = map[string]any{
 		"description": "Check FTS integrity, rebuild if divergent, optimize, VACUUM; or emit a stats report",
 		"flags": []map[string]any{
 			{"name": "scrub-stats", "type": "bool", "required": false, "default": false, "description": "Emit scrub-coverage report instead of the FTS pipeline"},
-			{"name": "expand-stats", "type": "bool", "required": false, "default": false, "description": "Emit Expand signal report (most/recently expanded memories) instead of the FTS pipeline"},
 		},
 		"response": map[string]any{
 			"status":          "string",

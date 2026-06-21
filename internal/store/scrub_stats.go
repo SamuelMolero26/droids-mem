@@ -3,55 +3,20 @@ package store
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
-	"sync/atomic"
 )
-
-// Process-lifetime save-rejection counters. Bumped from validate() the moment
-// a save is rejected for the corresponding scrub reason. Reset to zero on
-// process restart by design — persistent provenance lives in scrub_counts on
-// memories. Refactor target post-v1.1 (locked decision #15).
-var (
-	rejectedScrubEmptiedLearned atomic.Int64
-	rejectedTagContainsSecret   atomic.Int64
-)
-
-// recordScrubRejection bumps the appropriate counter for a ValidationError
-// whose Code identifies it as a scrub-driven rejection. No-op for other
-// codes so save.go can call it unconditionally on every validate() error.
-func recordScrubRejection(err error) {
-	var ve *ValidationError
-	if !errors.As(err, &ve) || ve == nil {
-		return
-	}
-	switch ve.Code {
-	case "scrub_emptied_learned":
-		rejectedScrubEmptiedLearned.Add(1)
-	case "tag_contains_secret":
-		rejectedTagContainsSecret.Add(1)
-	}
-}
-
-// RejectedSavesCounters is the process-lifetime view exposed in
-// ScrubStatsReport. Values are snapshot reads — not cumulative across runs.
-type RejectedSavesCounters struct {
-	ScrubEmptiedLearned int64 `json:"scrub_emptied_learned"`
-	TagContainsSecret   int64 `json:"tag_contains_secret"`
-}
 
 // ScrubStatsReport is the shape emitted by `droids-mem doctor --scrub-stats`.
-// Locked decision #15: aggregate + per_pattern + rejected_saves. Per-row
+// Aggregate + per_pattern over the durable scrub_counts column. Per-row
 // scrub_counts is collapsed via json_extract so the column stays sparse.
 type ScrubStatsReport struct {
-	Status             string                `json:"status"`
-	RowsTotal          int                   `json:"rows_total"`
-	RowsWithRedactions int                   `json:"rows_with_redactions"`
-	TotalRedactions    int                   `json:"total_redactions"`
-	RedactionRate      float64               `json:"redaction_rate"`
-	PerPattern         map[string]int        `json:"per_pattern"`
-	RejectedSaves      RejectedSavesCounters `json:"rejected_saves"`
-	PatternVersion     int                   `json:"pattern_version"`
+	Status             string         `json:"status"`
+	RowsTotal          int            `json:"rows_total"`
+	RowsWithRedactions int            `json:"rows_with_redactions"`
+	TotalRedactions    int            `json:"total_redactions"`
+	RedactionRate      float64        `json:"redaction_rate"`
+	PerPattern         map[string]int `json:"per_pattern"`
+	PatternVersion     int            `json:"pattern_version"`
 }
 
 // ScrubStats aggregates per-row scrub_counts across memories and returns a
@@ -63,10 +28,6 @@ func (s *Store) ScrubStats() (*ScrubStatsReport, error) {
 		Status:         "ok",
 		PerPattern:     map[string]int{},
 		PatternVersion: ScrubPatternVersion,
-		RejectedSaves: RejectedSavesCounters{
-			ScrubEmptiedLearned: rejectedScrubEmptiedLearned.Load(),
-			TagContainsSecret:   rejectedTagContainsSecret.Load(),
-		},
 	}
 
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memories`).
@@ -117,11 +78,4 @@ func (s *Store) ScrubStats() (*ScrubStatsReport, error) {
 	}
 
 	return rep, nil
-}
-
-// ResetScrubRejectionCountersForTest zeroes the process-lifetime counters.
-// Test-only hook — never call from production code paths.
-func ResetScrubRejectionCountersForTest() {
-	rejectedScrubEmptiedLearned.Store(0)
-	rejectedTagContainsSecret.Store(0)
 }

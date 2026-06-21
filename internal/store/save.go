@@ -138,7 +138,6 @@ func (e *ValidationError) Error() string {
 func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error) {
 	scrubReport, err := validate(&req)
 	if err != nil {
-		recordScrubRejection(err)
 		return nil, err
 	}
 

@@ -133,10 +133,6 @@ func TestE2E_DoctorScrubStats(t *testing.T) {
 		TotalRedactions    int            `json:"total_redactions"`
 		PerPattern         map[string]int `json:"per_pattern"`
 		PatternVersion     int            `json:"pattern_version"`
-		RejectedSaves      struct {
-			ScrubEmptiedLearned int `json:"scrub_emptied_learned"`
-			TagContainsSecret   int `json:"tag_contains_secret"`
-		} `json:"rejected_saves"`
 	}
 	mustParseJSON(t, out, &rep)
 
@@ -157,11 +153,6 @@ func TestE2E_DoctorScrubStats(t *testing.T) {
 	}
 	if rep.PatternVersion < 1 {
 		t.Errorf("pattern_version = %d, want >= 1", rep.PatternVersion)
-	}
-	// Rejected counters are per-process — the binary forks fresh per cli()
-	// invocation, so they should always be zero at the start of doctor.
-	if rep.RejectedSaves.ScrubEmptiedLearned != 0 || rep.RejectedSaves.TagContainsSecret != 0 {
-		t.Errorf("rejected_saves expected zero on fresh process, got %+v", rep.RejectedSaves)
 	}
 }
 
