@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/samuelmolero26/droids-mem/internal/store"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/samuelmolero26/droids-mem/internal/store"
 )
 
 var (

@@ -1,8 +1,8 @@
 package main
 
 import (
-	"github.com/samuelmolero26/droids-mem/internal/tui"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/samuelmolero26/droids-mem/internal/tui"
 	"github.com/spf13/cobra"
 )
 

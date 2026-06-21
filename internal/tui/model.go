@@ -4,11 +4,11 @@ import (
 	"context"
 	"time"
 
-	"github.com/samuelmolero26/droids-mem/internal/store"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/samuelmolero26/droids-mem/internal/store"
 )
 
 const (
