@@ -9,7 +9,9 @@ package db
 // FTS5 external-content sync (memories_fts) keys on this rowid. Do NOT use
 // INSERT OR REPLACE or REPLACE INTO on memories — those reassign rowid and
 // silently desync the FTS index. Use ON CONFLICT DO UPDATE for upserts.
-const ddl = `
+const ddl = ddlTables + FTSSchema + ddlMeta
+
+const ddlTables = `
 CREATE TABLE IF NOT EXISTS memories (
     id                    TEXT    PRIMARY KEY,
     session_id            TEXT    NOT NULL,
@@ -54,12 +56,19 @@ CREATE INDEX IF NOT EXISTS idx_memories_created_at        ON memories(created_at
 -- (recent-sessions: WHERE origin='auto' ORDER BY created_at DESC LIMIT N) and
 -- the origin-keyed eviction scan (ADR-0016). Never joined on FTS.
 CREATE INDEX IF NOT EXISTS idx_memories_origin_created    ON memories(origin, created_at DESC);
+`
 
--- FTS5 tokenizer (locked decision #17): unicode61 with underscore + hyphen
--- promoted to token chars so identifiers like snake_case and kebab-case stay
--- atomic. Existing pre-v1.0 databases keep their trigram FTS until the
--- operator runs 'droids-mem migrate --rescrub', which drops + recreates this
--- table with the same DDL.
+// FTSSchema is the FTS5 virtual table + the three sync triggers (AI/AD/AU).
+// Single source of truth: the fresh-DB ddl embeds it, and `migrate --rescrub`
+// re-executes it verbatim after dropping the old index (internal/store/migrate.go),
+// so a tokenizer change here propagates to migrated DBs automatically.
+//
+// FTS5 tokenizer (locked decision #17): unicode61 with underscore + hyphen
+// promoted to token chars so identifiers like snake_case and kebab-case stay
+// atomic. Existing pre-v1.0 databases keep their trigram FTS until the
+// operator runs 'droids-mem migrate --rescrub', which drops + recreates this
+// table with the same DDL.
+const FTSSchema = `
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     title,
     what,
@@ -96,7 +105,9 @@ AFTER UPDATE OF title, what, learned, tags ON memories BEGIN
     INSERT INTO memories_fts(rowid, title, what, learned, tags)
     VALUES (NEW.rowid, NEW.title, NEW.what, NEW.learned, NEW.tags);
 END;
+`
 
+const ddlMeta = `
 -- Fresh DBs come up scrub-ready: there are no pre-scrub rows to rewrite, so
 -- the boot gate sentinel is stamped immediately. Old databases reach this
 -- key via 'droids-mem migrate --rescrub' (writes '1' after rewriting rows)

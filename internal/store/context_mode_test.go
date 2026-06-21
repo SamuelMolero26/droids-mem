@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/SamuelMolero26/droids-mem/internal/store"
+	"github.com/samuelmolero26/droids-mem/internal/store"
 )
 
 // Distinct vocabulary per row so neither the Fingerprint nor the Jaccard

@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/SamuelMolero26/droids-mem/internal/store"
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/samuelmolero26/droids-mem/internal/store"
 )
 
 type fakeStore struct {

@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/SamuelMolero26/droids-mem/internal/db"
+	"github.com/samuelmolero26/droids-mem/internal/db"
 	_ "modernc.org/sqlite"
 )
 

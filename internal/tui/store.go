@@ -7,7 +7,7 @@ package tui
 import (
 	"context"
 
-	"github.com/SamuelMolero26/droids-mem/internal/store"
+	"github.com/samuelmolero26/droids-mem/internal/store"
 )
 
 // memStore is the four-method surface the inspector needs. *store.Store

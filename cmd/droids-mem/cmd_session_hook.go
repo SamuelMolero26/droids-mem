@@ -6,7 +6,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/SamuelMolero26/droids-mem/internal/state"
+	"github.com/samuelmolero26/droids-mem/internal/state"
 	"github.com/spf13/cobra"
 )
 

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/SamuelMolero26/droids-mem/internal/store"
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/samuelmolero26/droids-mem/internal/store"
 )
 
 // listItem is the thin projection the list renders — the common denominator of

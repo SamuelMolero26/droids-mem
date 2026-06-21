@@ -6,8 +6,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/SamuelMolero26/droids-mem/internal/mcpserver"
-	"github.com/SamuelMolero26/droids-mem/internal/state"
+	"github.com/samuelmolero26/droids-mem/internal/mcpserver"
+	"github.com/samuelmolero26/droids-mem/internal/state"
 )
 
 func newServeCmd(a *app) *cobra.Command {

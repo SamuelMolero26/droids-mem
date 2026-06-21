@@ -1,13 +1,12 @@
 package main
 
 import (
-	"github.com/SamuelMolero26/droids-mem/internal/db"
+	"github.com/samuelmolero26/droids-mem/internal/db"
 	"github.com/spf13/cobra"
 )
 
 func newDoctorCmd(a *app) *cobra.Command {
 	var scrubStats bool
-	var expandStats bool
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check FTS integrity, rebuild if divergent, optimize, and VACUUM",
@@ -21,36 +20,18 @@ Default mode runs in this order:
 
 Pass --scrub-stats to skip the FTS pipeline and instead emit an aggregate
 report of scrub coverage across the corpus (rows_total, rows_with_redactions,
-per_pattern counts, process-lifetime rejected-save counters).
-
-Pass --expand-stats to skip the FTS pipeline and emit the Expand signal report:
-which memories agents expand most (top_by_count) and most recently
-(top_by_recency), plus corpus totals. Informs future browse-tier sizing.
+per_pattern counts).
 
 Safe to run at any time.`,
 		Example: `  droids-mem doctor
-  droids-mem doctor --scrub-stats
-  droids-mem doctor --expand-stats`,
+  droids-mem doctor --scrub-stats`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if scrubStats && expandStats {
-				writeError("invalid_arguments", "--scrub-stats and --expand-stats are mutually exclusive", true)
-				exitWith(ExitUsage)
-			}
 			s, err := a.store()
 			if err != nil {
 				return err
 			}
 			if scrubStats {
 				rep, err := s.ScrubStats()
-				if err != nil {
-					writeError("doctor_failed", err.Error(), true)
-					exitWith(ExitError)
-				}
-				writeJSON(rep)
-				return nil
-			}
-			if expandStats {
-				rep, err := s.ExpandStats()
 				if err != nil {
 					writeError("doctor_failed", err.Error(), true)
 					exitWith(ExitError)
@@ -69,7 +50,5 @@ Safe to run at any time.`,
 	}
 	cmd.Flags().BoolVar(&scrubStats, "scrub-stats", false,
 		"Emit an aggregate scrub-coverage report instead of running the FTS pipeline.")
-	cmd.Flags().BoolVar(&expandStats, "expand-stats", false,
-		"Emit the Expand signal report (most/recently expanded memories) instead of running the FTS pipeline.")
 	return cmd
 }
