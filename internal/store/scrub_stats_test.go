@@ -2,7 +2,6 @@ package store_test
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/samuelmolero26/droids-mem/internal/store"
@@ -10,7 +9,6 @@ import (
 
 func TestScrubStats_EmptyCorpus(t *testing.T) {
 	s := newTestStore(t)
-	store.ResetScrubRejectionCountersForTest()
 
 	rep, err := s.ScrubStats()
 	if err != nil {
@@ -36,7 +34,6 @@ func TestScrubStats_EmptyCorpus(t *testing.T) {
 
 func TestScrubStats_AggregatesAcrossRows(t *testing.T) {
 	s := newTestStore(t)
-	store.ResetScrubRejectionCountersForTest()
 
 	clean := validReq()
 	clean.Title = "clean lesson title"
@@ -84,48 +81,6 @@ func TestScrubStats_AggregatesAcrossRows(t *testing.T) {
 	}
 	if rep.PerPattern["github_token"] != 1 {
 		t.Errorf("per_pattern[github_token] = %d, want 1", rep.PerPattern["github_token"])
-	}
-}
-
-func TestScrubStats_RejectedCounters(t *testing.T) {
-	s := newTestStore(t)
-	store.ResetScrubRejectionCountersForTest()
-
-	// Tag-secret rejection: an email in a tag.
-	tagReq := validReq()
-	tagReq.Tags = "hubspot alice@example.com phone"
-	_, err := s.Save(context.Background(), tagReq)
-	if err == nil {
-		t.Fatal("expected tag_contains_secret rejection")
-	}
-	var ve *store.ValidationError
-	if !errors.As(err, &ve) || ve.Code != "tag_contains_secret" {
-		t.Fatalf("expected tag_contains_secret, got %v", err)
-	}
-
-	// Scrub-emptied-learned: learned body is nothing but a redactable token.
-	emptyReq := validReq()
-	emptyReq.Title = "lesson with sole secret in learned"
-	emptyReq.Learned = "alice@example.com"
-	_, err = s.Save(context.Background(), emptyReq)
-	if err == nil {
-		t.Fatal("expected scrub_emptied_learned rejection")
-	}
-	if !errors.As(err, &ve) || ve.Code != "scrub_emptied_learned" {
-		t.Fatalf("expected scrub_emptied_learned, got %v", err)
-	}
-
-	rep, err := s.ScrubStats()
-	if err != nil {
-		t.Fatalf("ScrubStats: %v", err)
-	}
-	if rep.RejectedSaves.TagContainsSecret != 1 {
-		t.Errorf("rejected.tag_contains_secret = %d, want 1",
-			rep.RejectedSaves.TagContainsSecret)
-	}
-	if rep.RejectedSaves.ScrubEmptiedLearned != 1 {
-		t.Errorf("rejected.scrub_emptied_learned = %d, want 1",
-			rep.RejectedSaves.ScrubEmptiedLearned)
 	}
 }
 

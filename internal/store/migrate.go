@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+
+	"github.com/samuelmolero26/droids-mem/internal/db"
 )
 
 // MigrateOptions controls the v1.0 baseline migration. Exactly one mode is
@@ -31,38 +33,6 @@ type MigrateSummary struct {
 	BaselineSet        bool   `json:"scrub_baseline_complete_set"` // sentinel persisted
 	PatternVersion     int    `json:"pattern_version"`             // ScrubPatternVersion used
 }
-
-// rescrubFTSDDL is the v1.0 FTS5 schema (matches db/schema.go). Defined here
-// so the migration owns its rebuild story without reaching into the db
-// package's private const. Keep both in sync.
-const rescrubFTSDDL = `
-CREATE VIRTUAL TABLE memories_fts USING fts5(
-    title, what, learned, tags,
-    content='memories',
-    content_rowid='rowid',
-    tokenize='unicode61 tokenchars ''_-'''
-);
-
-CREATE TRIGGER memories_ai
-AFTER INSERT ON memories BEGIN
-    INSERT INTO memories_fts(rowid, title, what, learned, tags)
-    VALUES (NEW.rowid, NEW.title, NEW.what, NEW.learned, NEW.tags);
-END;
-
-CREATE TRIGGER memories_ad
-AFTER DELETE ON memories BEGIN
-    INSERT INTO memories_fts(memories_fts, rowid, title, what, learned, tags)
-    VALUES ('delete', OLD.rowid, OLD.title, OLD.what, OLD.learned, OLD.tags);
-END;
-
-CREATE TRIGGER memories_au
-AFTER UPDATE OF title, what, learned, tags ON memories BEGIN
-    INSERT INTO memories_fts(memories_fts, rowid, title, what, learned, tags)
-    VALUES ('delete', OLD.rowid, OLD.title, OLD.what, OLD.learned, OLD.tags);
-    INSERT INTO memories_fts(rowid, title, what, learned, tags)
-    VALUES (NEW.rowid, NEW.title, NEW.what, NEW.learned, NEW.tags);
-END;
-`
 
 // Migrate establishes the v1.0 scrub baseline on s.DB(). It is intended to
 // be invoked by the `migrate` subcommand and runs atomically: any failure
@@ -109,7 +79,7 @@ func Migrate(s *Store, opts MigrateOptions) (*MigrateSummary, error) {
 		}
 	}
 
-	if _, err := conn.ExecContext(ctx, rescrubFTSDDL); err != nil {
+	if _, err := conn.ExecContext(ctx, db.FTSSchema); err != nil {
 		return nil, fmt.Errorf("recreate FTS: %w", err)
 	}
 	if _, err := conn.ExecContext(ctx, `
