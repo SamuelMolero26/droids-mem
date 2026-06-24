@@ -35,9 +35,7 @@ Thumbs.db
 !.env.example
 
 # Internal planning / personal artifacts
-docs/V1-plan-updated.md
-docs/v1.0-implementation-plan.md
-docs/project-breakdown.md
+docs/breakdown/
 files/
 future.todo
 CONTEXT.md

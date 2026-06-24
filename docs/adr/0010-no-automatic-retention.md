@@ -19,6 +19,8 @@ The system never deletes knowledge-kind memories on its own. Memories are distil
 
 The `session_summary` rolling-5 prune is unchanged — summaries are explicitly ephemeral state, not knowledge.
 
+**Superseded by ADR-0018 for one narrow case.** This ADR's "never deletes on its own" rule has one carve-out: write-time **supersession** (ADR-0018). When an agent saves a Memory with `supersedes: <id>`, it is *asserting* the named row is replaced — that is an explicit intent at the source, not a recency/age heuristic, so it does not contradict this ADR's actual thesis (machine eviction by poor value proxies is what's banned). The distinction this ADR draws — *the agent knows; recency doesn't* — is exactly why supersession is allowed and auto-TTL is not.
+
 ## Mechanics (suggest-dupes)
 
 - Greedy consumed-set clustering: iterate rows in `created_at` order (deterministic, reproducible runs); each unconsumed row seeds a cluster via one FTS5 query + Jaccard filter; all members marked consumed (`map[string]struct{}` keyed by ULID). Denser duplicates → fewer queries.

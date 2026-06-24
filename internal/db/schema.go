@@ -63,11 +63,16 @@ CREATE INDEX IF NOT EXISTS idx_memories_origin_created    ON memories(origin, cr
 // re-executes it verbatim after dropping the old index (internal/store/migrate.go),
 // so a tokenizer change here propagates to migrated DBs automatically.
 //
-// FTS5 tokenizer (locked decision #17): unicode61 with underscore + hyphen
-// promoted to token chars so identifiers like snake_case and kebab-case stay
-// atomic. Existing pre-v1.0 databases keep their trigram FTS until the
-// operator runs 'droids-mem migrate --rescrub', which drops + recreates this
-// table with the same DDL.
+// FTS5 tokenizer (decision #17, + porter ADR-0018-era retrieval pass): the
+// porter stemmer wraps unicode61, folding morphological variants (cancel /
+// cancellation, panic / panicked) to a common stem at both index and query
+// time so paraphrased lessons match. unicode61's underscore + hyphen token
+// chars are preserved underneath, keeping snake_case and kebab-case atomic.
+// porter does NOT bridge true synonyms (panic <-> nil pointer) — that gap is
+// left to write-time canonical tags, not retrieval-side machinery (embeddings
+// rejected: local-first, pure-Go, no CGO).
+// Existing databases pick up the stemmer by running 'droids-mem migrate'
+// (either mode drops + recreates this table from FTSSchema and reindexes).
 const FTSSchema = `
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     title,
@@ -76,7 +81,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     tags,
     content='memories',
     content_rowid='rowid',
-    tokenize='unicode61 tokenchars ''_-'''
+    tokenize='porter unicode61 tokenchars ''_-'''
 );
 
 -- FTS sync: INSERT
