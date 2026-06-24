@@ -96,6 +96,10 @@ type SaveRequest struct {
 	Origin    string `json:"origin,omitempty"` // "manual" | "auto", defaults to "manual" (ADR-0016)
 	Force     bool   `json:"force"`            // HITL correction: overwrite matched fingerprint
 	DryRun    bool   `json:"dry_run"`          // run full pipeline (validate → scrub → dedupe) then ROLLBACK
+	// Supersedes is the id of a Memory this save replaces (ADR-0018). Hard-deleted
+	// in the same txn on successful insert, scope-bound so a mismatched/missing
+	// target is a benign no-op. Empty = no supersession.
+	Supersedes string `json:"supersedes,omitempty"`
 }
 
 type SaveResponse struct {
@@ -108,6 +112,7 @@ type SaveResponse struct {
 	Reason         string       `json:"reason,omitempty"`          // duplicate | near_duplicate
 	Score          float64      `json:"score,omitempty"`           // Jaccard similarity for near_duplicate
 	Scrub          *ScrubReport `json:"scrub,omitempty"`           // present only when redactions occurred
+	Superseded     string       `json:"superseded,omitempty"`      // id deleted via supersedes (ADR-0018); absent when target didn't match
 }
 
 // ValidationError is the structured error envelope returned for any save-path
@@ -277,6 +282,25 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 		return nil, fmt.Errorf("insert memory: %w", err)
 	}
 
+	// Supersede (ADR-0018): hard-delete the named target in the same txn, only
+	// after a successful insert. The WHERE is scope-bound to the NEW memory's
+	// kind/task_type/scope, so a mismatched or missing target matches 0 rows —
+	// cross-boundary deletion is impossible by construction, no validate branch
+	// needed. Runs on the INSERT path only; a force-update (fingerprint twin)
+	// returns earlier and is its own replacement.
+	var supersededID string
+	if req.Supersedes != "" {
+		res, err := conn.ExecContext(ctx,
+			`DELETE FROM memories WHERE id=? AND kind=? AND task_type=? AND scope=?`,
+			req.Supersedes, req.Kind, req.TaskType, req.Scope)
+		if err != nil {
+			return nil, fmt.Errorf("supersede delete: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			supersededID = req.Supersedes
+		}
+	}
+
 	// prune inside the txn so the rolling-window cap is atomic with insert.
 	// session_summary retention splits by origin (ADR-0016): manual summaries
 	// keep newest-5 per task_type; auto summaries keep a global newest-M budget
@@ -297,10 +321,11 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 	committed = true
 
 	return &SaveResponse{
-		Status:    "saved",
-		ID:        id,
-		SessionID: sessionID,
-		Scrub:     responseScrub,
+		Status:     "saved",
+		ID:         id,
+		SessionID:  sessionID,
+		Scrub:      responseScrub,
+		Superseded: supersededID,
 	}, nil
 }
 
@@ -440,6 +465,10 @@ func nearDuplicateConn(ctx context.Context, conn *sql.Conn, req SaveRequest) (*m
 	}
 	query := strings.Join(quoted, " OR ")
 
+	// m.id != ? exempts the supersedes target (ADR-0018): a replacement resembles
+	// what it replaces, so the target is the row most likely to trip the Jaccard
+	// gate and self-defeatingly skip the save. Empty Supersedes never matches a
+	// real mem_ id, so the clause is a no-op on ordinary saves.
 	rows, err := conn.QueryContext(ctx, `
 		SELECT m.id, m.title, m.what, m.learned, m.tags
 		FROM memories_fts fts
@@ -447,9 +476,10 @@ func nearDuplicateConn(ctx context.Context, conn *sql.Conn, req SaveRequest) (*m
 		WHERE memories_fts MATCH ?
 		AND m.task_type = ?
 		AND m.kind = ?
+		AND m.id != ?
 		ORDER BY bm25(memories_fts, 3, 1, 2, 1)
 		LIMIT ?
-	`, query, req.TaskType, req.Kind, bm25CandidateLimit)
+	`, query, req.TaskType, req.Kind, req.Supersedes, bm25CandidateLimit)
 	if err != nil {
 		return nil, 0, err
 	}

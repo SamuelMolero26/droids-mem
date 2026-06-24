@@ -23,15 +23,16 @@ func registerTools(s *server.MCPServer, st *store.Store) {
 // ---------- mem_save ----------
 
 type saveArgs struct {
-	Kind      string `json:"kind"`
-	Title     string `json:"title"`
-	What      string `json:"what"`
-	Learned   string `json:"learned"`
-	TaskType  string `json:"task_type"`
-	Tags      string `json:"tags,omitempty"`
-	Scope     string `json:"scope,omitempty"`
-	SessionID string `json:"session_id,omitempty"`
-	Force     bool   `json:"force,omitempty"`
+	Kind       string `json:"kind"`
+	Title      string `json:"title"`
+	What       string `json:"what"`
+	Learned    string `json:"learned"`
+	TaskType   string `json:"task_type"`
+	Tags       string `json:"tags,omitempty"`
+	Scope      string `json:"scope,omitempty"`
+	SessionID  string `json:"session_id,omitempty"`
+	Force      bool   `json:"force,omitempty"`
+	Supersedes string `json:"supersedes,omitempty"`
 }
 
 func saveToolDef() mcp.Tool {
@@ -59,21 +60,24 @@ func saveToolDef() mcp.Tool {
 			mcp.Description("Session id from mem_context. Omit on first save in a Run to mint a new one.")),
 		mcp.WithBoolean("force",
 			mcp.Description("HITL correction: overwrite an existing memory matched by fingerprint instead of skipping.")),
+		mcp.WithString("supersedes",
+			mcp.Description("Id of a memory this save replaces. The target is hard-deleted on successful insert (same kind/task_type/scope required, else no-op). Response echoes 'superseded' with the deleted id.")),
 	)
 }
 
 func saveHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, saveArgs) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, _ mcp.CallToolRequest, a saveArgs) (*mcp.CallToolResult, error) {
 		resp, err := st.Save(ctx, store.SaveRequest{
-			SessionID: a.SessionID,
-			TaskType:  a.TaskType,
-			Kind:      a.Kind,
-			Title:     a.Title,
-			What:      a.What,
-			Learned:   a.Learned,
-			Tags:      a.Tags,
-			Scope:     a.Scope,
-			Force:     a.Force,
+			SessionID:  a.SessionID,
+			TaskType:   a.TaskType,
+			Kind:       a.Kind,
+			Title:      a.Title,
+			What:       a.What,
+			Learned:    a.Learned,
+			Tags:       a.Tags,
+			Scope:      a.Scope,
+			Force:      a.Force,
+			Supersedes: a.Supersedes,
 		})
 		if err != nil {
 			return toolErr(err), nil
