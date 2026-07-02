@@ -24,6 +24,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/samuelmolero26/droids-mem/internal/graph"
 	"github.com/samuelmolero26/droids-mem/internal/store"
 )
 
@@ -64,7 +65,9 @@ AS YOU WORK, when you learn something worth reusing next time, call mem_save:
 - user_rule — a correction or stable preference the user gave you.
 Save only a genuinely reusable lesson, not routine steps. Re-saving the same lesson is harmless (the store deduplicates), so prefer saving over forgetting. Thread the session_id returned by mem_context (or the first mem_save) through later saves in the same run. If you call mem_context again in the same run (topic pivot, mode=refresh), pass that existing session_id back in — omitting it mints a new one and fragments the run's memories.
 
-Do NOT save session summaries here — your host may record those automatically at session end; saving one yourself would duplicate it. Never put secrets, tokens, or keys in any field; the store scrubs on save, but keep them out anyway.`
+Do NOT save session summaries here — your host may record those automatically at session end; saving one yourself would duplicate it. Never put secrets, tokens, or keys in any field; the store scrubs on save, but keep them out anyway.
+
+FOR CODE QUESTIONS in a Go repo, prefer the graph tools over grep and file reading — they answer from a pre-built call graph in one call. graph_package orients you in an area (exported surface, signatures only); graph_symbol shows one symbol's source plus callers/callees as signature stubs, blast radius via direction=up depth>1, call paths via 'to'. Expand a stub by re-querying its exact qname. Pass your project root as 'repo'.`
 
 // Config controls the MCP bridge server. Zero values fall back to defaults.
 type Config struct {
@@ -72,6 +75,7 @@ type Config struct {
 	Endpoint string // e.g. "/mcp"
 	Token    string // required bearer token; Run errors if empty
 	Logger   *log.Logger
+	Graphs   *graph.Manager // optional code-graph subsystem (ADR-0020); nil skips graph tools
 }
 
 // Run starts the MCP bridge and blocks until ctx is canceled or the server
@@ -99,6 +103,9 @@ func Run(ctx context.Context, cfg Config, st *store.Store) error {
 		server.WithInstructions(serverInstructions),
 	)
 	registerTools(s, st)
+	if cfg.Graphs != nil {
+		registerGraphTools(s, cfg.Graphs)
+	}
 
 	mcpHandler := server.NewStreamableHTTPServer(s,
 		server.WithEndpointPath(cfg.Endpoint),

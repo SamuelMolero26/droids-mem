@@ -266,7 +266,7 @@ func TestServeE2E_HealthzNoAuth(t *testing.T) {
 	}
 }
 
-func TestServeE2E_ToolsListExposesFourTools(t *testing.T) {
+func TestServeE2E_ToolsListExposesToolSurface(t *testing.T) {
 	s := startServer(t)
 	defer s.stop()
 	sid := s.initSession(t)
@@ -281,7 +281,7 @@ func TestServeE2E_ToolsListExposesFourTools(t *testing.T) {
 	for _, tool := range tools {
 		got[tool.(map[string]any)["name"].(string)] = true
 	}
-	for _, want := range []string{"mem_save", "mem_search", "mem_context", "mem_get"} {
+	for _, want := range []string{"mem_save", "mem_search", "mem_context", "mem_get", "graph_symbol", "graph_package"} {
 		if !got[want] {
 			t.Errorf("missing tool: %s (have %v)", want, got)
 		}
