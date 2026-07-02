@@ -43,5 +43,8 @@ install step above.
 - The hook JSON field names (`session_id`, `prompt`, `tool_name`) follow the
   Claude Code hooks spec; verify against your version.
 - Every hook path **fails open** — a memory hiccup never breaks your session.
-- The relevance **floor** (default `0.0` = accept any match) is tunable; tighten
-  once the T1.2 recall eval lands (ADR-0016 open item).
+- The relevance **floor** (default `0.3` — at least ~a third of the prompt's
+  meaningful tokens must appear in the memory) is tunable via
+  `session pull --floor`; provisional until the T1.2 recall eval lands
+  (ADR-0016 open item). Search terms are OR-joined, so without the floor a
+  memory sharing one common word with the prompt would be injected.

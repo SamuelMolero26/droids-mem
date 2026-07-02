@@ -142,3 +142,39 @@ field ships first against Claude; stdio + opencode/codex adapters are tracked in
   tracked in `future.todo` (Cross-host MCP integration kit).
 - Whether per-tool description sharpening alone moves compliance enough to make
   the server `instructions` block optional — measure, do not assume.
+
+## Addendum — agent-first friction fixes (2026-07-02)
+
+An agent-first usability review found gaps this ADR's original scope left open.
+Resolved as follows:
+
+1. **Registration bootstrap.** This ADR started from "tools already exist" and
+   never covered how they come to exist on a fresh host. `droids-mem install
+   --all` now performs the full Claude bootstrap in one idempotent command:
+   hooks → `ensure-server` → `claude mcp add --scope user` → append the
+   compose-guidance block (embedded `cmd/droids-mem/claude_snippet.md`, the
+   canonical copy) to `~/.claude/CLAUDE.md`. MCP itself has no
+   self-registration primitive, so driving the client's own CLI is the ceiling;
+   non-Claude hosts remain manual until their adapters land.
+2. **Daemon liveness for Layer 1.** Hooks talk to the store directly, but the
+   model's own `mem_*` calls need `serve` up — after a reboot nothing restarted
+   it. The `SessionStart` hook now runs `ensure-server` (best-effort, fails
+   open) before orphan recovery.
+3. **Recall floor made real — and re-based.** The shipped
+   `DefaultRelevanceFloor = 0.0` was a no-op gate, violating ADR-0016 pt 8
+   ("no match above floor → inject nothing"): search terms are OR-joined, so
+   any memory sharing one common word matched. An absolute BM25 floor cannot
+   fix this — rank magnitudes scale with corpus size (FTS5 IDF ≈ 0 on tiny
+   DBs). The gate is now prompt-token overlap (`store.TokenOverlap`,
+   corpus-size-invariant), default 0.3; still provisional until the T1.2
+   recall eval.
+4. **session_id re-threading.** "Call recall again on topic pivot" plus
+   `mode=refresh` combined into a silent fragmentation hole: a repeat
+   `mem_context` without the prior session_id mints a new one. The server
+   `instructions` and the `session_id` parameter description now say
+   explicitly: pass the existing id on any repeat call in the same Run.
+5. **Imperative tool descriptions.** Hosts that drop `initialize.instructions`
+   previously fell back to passive capability blurbs. Each of the 4 tool
+   descriptions now carries its own "call this on your own" clause, and the
+   `task_type` hint is mechanical (repo/directory name, reuse the exact
+   string) to curb write-side slug drift.

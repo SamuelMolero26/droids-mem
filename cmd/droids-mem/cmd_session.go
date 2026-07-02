@@ -36,11 +36,15 @@ func newSessionCmd(a *app) *cobra.Command {
 	return cmd
 }
 
-// DefaultRelevanceFloor — keep a search hit only when its BM25 rank is ≤ this
-// (more negative = stronger match). 0.0 accepts any genuine FTS match; tighten
-// (toward negative) to reject weak hits. The production value is tuned against
-// the T1.2 recall eval (ADR-0016 open item).
-const DefaultRelevanceFloor = 0.0
+// DefaultRelevanceFloor — keep a search hit only when the fraction of prompt
+// tokens found in its title+learned is ≥ this. The floor is mandatory
+// (ADR-0016 pt 8): search terms are OR-joined, so a memory sharing one common
+// word with a five-word prompt matches and would otherwise be injected. An
+// absolute BM25 floor cannot do this job — rank magnitudes scale with corpus
+// size (FTS5 IDF ≈ 0 on tiny DBs) — token overlap is corpus-size-invariant.
+// 0.3 ≈ a third of the prompt's meaningful tokens; provisional until the
+// T1.2 recall eval tunes it (ADR-0016 open item).
+const DefaultRelevanceFloor = 0.3
 
 // relevancePullLimit caps how many prior memories a single prompt may surface.
 const relevancePullLimit = 3
@@ -71,7 +75,7 @@ func newSessionPullCmd(a *app) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&ccID, "session", "", "Claude Code session id (required)")
 	cmd.Flags().StringVar(&query, "query", "", "Prompt text to find prior memories for (required)")
-	cmd.Flags().Float64Var(&floor, "floor", DefaultRelevanceFloor, "Relevance floor: keep hits with BM25 rank ≤ this")
+	cmd.Flags().Float64Var(&floor, "floor", DefaultRelevanceFloor, "Relevance floor: keep hits whose prompt-token overlap is ≥ this. Normal range 0..1; a value >1 rejects every hit")
 	cmd.Flags().StringVar(&format, "format", "json", "Output format: json (default) | text (for hook injection)")
 	_ = cmd.MarkFlagRequired("session")
 	_ = cmd.MarkFlagRequired("query")
@@ -83,9 +87,10 @@ func newSessionPullCmd(a *app) *cobra.Command {
 const maxRelevanceCandidates = 10
 
 // relevancePull runs the relevance-gated recall (ADR-0016 pt 8): search the
-// prompt, keep hits at/under the floor, drop ones already injected this session,
-// cap to relevancePullLimit, and record the newly injected ids. A search failure
-// returns nothing — recall must never break the user's prompt.
+// prompt, keep hits whose prompt-token overlap meets the floor, drop ones
+// already injected this session, cap to relevancePullLimit, and record the
+// newly injected ids. A search failure returns nothing — recall must never
+// break the user's prompt.
 func relevancePull(ctx context.Context, s *store.Store, ccID, query string, floor float64) []store.SearchResult {
 	resp, err := s.Search(ctx, store.SearchRequest{Query: query, Limit: maxRelevanceCandidates})
 	if err != nil {
@@ -98,7 +103,7 @@ func relevancePull(ctx context.Context, s *store.Store, ccID, query string, floo
 		if len(picked) >= relevancePullLimit {
 			break
 		}
-		if r.Score > floor || injected[r.ID] { // weaker than floor, or already shown
+		if store.TokenOverlap(query, r.Title+" "+r.Learned) < floor || injected[r.ID] { // weaker than floor, or already shown
 			continue
 		}
 		picked = append(picked, r)
