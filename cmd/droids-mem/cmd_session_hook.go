@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/samuelmolero26/droids-mem/internal/state"
@@ -64,6 +66,11 @@ func newSessionHookCmd(a *app) *cobra.Command {
 					}
 				}
 			case "sessionstart":
+				// Keep the MCP bridge alive for the model's own mem_* calls
+				// (ADR-0019 Layer 1): hooks talk to the store directly, but the
+				// MCP tools need `droids-mem serve` up — this is the only
+				// lifecycle event that can restart it after a reboot or crash.
+				ensureServerBestEffort()
 				if s, err := a.store(); err == nil {
 					recoverOrphans(cmd.Context(), s)
 				}
@@ -77,6 +84,19 @@ func newSessionHookCmd(a *app) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// ensureServerBestEffort re-execs `droids-mem ensure-server` so the MCP bridge
+// is up before the model's first mem_* tool call. Fail open: a spawn failure
+// must never break the session (the hook contract), and ensure-server itself
+// is idempotent, so calling it on every SessionStart is safe.
+func ensureServerBestEffort() {
+	self, err := os.Executable()
+	if err != nil {
+		return
+	}
+	// #nosec G204 -- re-exec of our own binary (os.Executable), fixed argv.
+	_ = exec.Command(self, "ensure-server").Run()
 }
 
 // normalizeEvent canonicalizes a hook event name to a lowercase, separator-free

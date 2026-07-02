@@ -1,13 +1,31 @@
 package main
 
 import (
+	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/samuelmolero26/droids-mem/internal/mcpserver"
+	"github.com/samuelmolero26/droids-mem/internal/state"
 )
+
+// claudeSnippet is the CLAUDE.md compose-guidance block (the model-judgment
+// half of the intake gate, ADR-0016). Embedded so `install --all` can append
+// it without needing the repo checkout; hooks/session-memory.md carries the
+// same content for manual installs.
+//
+//go:embed claude_snippet.md
+var claudeSnippet string
+
+// claudeSnippetMarker detects a prior append (idempotency).
+const claudeSnippetMarker = "## droids-mem session memory"
 
 // hookEvent maps a Claude Code hook event to an optional tool matcher. A matcher
 // limits how often the hook fires (fewer binary spawns); event-less hooks fire
@@ -29,14 +47,17 @@ var claudeHookEvents = []hookEvent{
 // it merges the hook entries into settings.json, idempotently, pointing every
 // event at `<this binary> session hook`. No shell scripts, no jq.
 func newInstallCmd() *cobra.Command {
-	var project, printOnly bool
+	var project, printOnly, all bool
 	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Wire droids-mem session memory into Claude Code (settings.json hooks)",
 		Long: "Merge the session-memory hooks into Claude Code's settings.json.\n" +
 			"Default target is the user settings (~/.claude/settings.json); use\n" +
 			"--project to target ./.claude/settings.json instead. Idempotent and\n" +
-			"non-destructive — existing settings and hooks are preserved.",
+			"non-destructive — existing settings and hooks are preserved.\n\n" +
+			"--all performs the full bootstrap in one shot: hooks + start the MCP\n" +
+			"bridge + register it with the Claude Code CLI (user scope) + append\n" +
+			"the compose-guidance block to CLAUDE.md. Each step is idempotent.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			self, err := os.Executable()
 			if err != nil {
@@ -60,19 +81,125 @@ func newInstallCmd() *cobra.Command {
 				writeError("install_failed", err.Error(), true)
 				exitWith(ExitError)
 			}
-			writeJSON(map[string]any{
+			result := map[string]any{
 				"status":       "installed",
 				"settings":     path,
 				"events_added": added,
 				"command":      hookCmd,
-				"next_step":    "append hooks/session-memory.md to your CLAUDE.md so the model knows when to stage summaries",
-			})
+			}
+
+			if !all {
+				result["next_step"] = "run `droids-mem install --all` for the full bootstrap, or append cmd/droids-mem/claude_snippet.md to your CLAUDE.md manually"
+				writeJSON(result)
+				return nil
+			}
+
+			// --all: best-effort per step — report each outcome instead of
+			// aborting the whole bootstrap on the first failure.
+			result["server"] = stepStatus(runEnsureServer(self))
+			result["mcp_registration"] = stepStatus(registerClaudeMCP())
+			mdPath, appended, err := appendClaudeSnippet(project)
+			switch {
+			case err != nil:
+				result["claude_md"] = "error: " + err.Error()
+			case appended:
+				result["claude_md"] = "appended: " + mdPath
+			default:
+				result["claude_md"] = "already_present: " + mdPath
+			}
+			writeJSON(result)
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&project, "project", false, "Install into ./.claude/settings.json instead of the user settings")
 	cmd.Flags().BoolVar(&printOnly, "print", false, "Print the hooks block instead of writing settings.json")
+	cmd.Flags().BoolVar(&all, "all", false, "Full bootstrap: hooks + ensure-server + claude mcp add + CLAUDE.md snippet")
 	return cmd
+}
+
+// stepStatus renders a bootstrap step outcome for the result JSON.
+func stepStatus(err error) string {
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	return "ok"
+}
+
+// runEnsureServer starts (or confirms) the MCP bridge via `<self> ensure-server`.
+func runEnsureServer(self string) error {
+	// #nosec G204 -- re-exec of our own binary (os.Executable), fixed argv.
+	if out, err := exec.Command(self, "ensure-server").CombinedOutput(); err != nil {
+		return fmt.Errorf("ensure-server: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// registerClaudeMCP registers the bridge with the Claude Code CLI at user scope
+// (available in every project) unless already registered. Registration is the
+// one bootstrap step MCP itself cannot do — a server cannot add itself to a
+// client's config — so we drive the client's own CLI.
+func registerClaudeMCP() error {
+	claude, err := exec.LookPath("claude")
+	if err != nil {
+		return errors.New("claude CLI not found in PATH — register manually: claude mcp add --scope user --transport http droids-mem <url> --header 'Authorization: Bearer <token>'")
+	}
+	if exec.Command(claude, "mcp", "get", "droids-mem").Run() == nil {
+		return nil // already registered
+	}
+	tok, err := state.LoadOrCreateToken()
+	if err != nil {
+		return fmt.Errorf("load token: %w", err)
+	}
+	url := baseURL(envOr("DROIDS_MEM_MCP_ADDR", mcpserver.DefaultAddr)) +
+		envOr("DROIDS_MEM_MCP_ENDPOINT", mcpserver.DefaultEndpoint)
+	out, err := exec.Command(claude, "mcp", "add",
+		"--scope", "user",
+		"--transport", "http",
+		"droids-mem", url,
+		"--header", "Authorization: Bearer "+tok,
+	).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("claude mcp add: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// appendClaudeSnippet appends the embedded compose-guidance block to CLAUDE.md
+// (~/.claude/CLAUDE.md, or ./CLAUDE.md with --project). Idempotent: a file
+// already containing the snippet heading is left untouched.
+func appendClaudeSnippet(project bool) (path string, appended bool, err error) {
+	if project {
+		path = "CLAUDE.md"
+	} else {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", false, fmt.Errorf("resolve home dir: %w", err)
+		}
+		path = filepath.Join(home, ".claude", "CLAUDE.md")
+	}
+	existing, err := os.ReadFile(path) // #nosec G304 -- fixed CLAUDE.md location, not user input
+	if err != nil && !os.IsNotExist(err) {
+		return path, false, fmt.Errorf("read %s: %w", path, err)
+	}
+	if strings.Contains(string(existing), claudeSnippetMarker) {
+		return path, false, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return path, false, fmt.Errorf("create dir: %w", err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) // #nosec G304
+	if err != nil {
+		return path, false, fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close()
+	block := claudeSnippet
+	if len(existing) > 0 {
+		block = "\n" + block
+	}
+	if _, err := f.WriteString(block); err != nil {
+		return path, false, fmt.Errorf("append %s: %w", path, err)
+	}
+	return path, true, nil
 }
 
 func claudeSettingsPath(project bool) (string, error) {

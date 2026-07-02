@@ -129,6 +129,19 @@ You can enable either layer on its own; together they give the full experience.
 go install github.com/samuelmolero/droids-mem/cmd/droids-mem@latest
 ```
 
+### One-shot bootstrap
+
+```
+droids-mem install --all
+```
+
+Does everything below in one idempotent command: merges the hooks into
+`~/.claude/settings.json`, starts the MCP bridge (`ensure-server`), registers
+it with the Claude Code CLI at user scope (`claude mcp add`), and appends the
+compose-guidance block to `~/.claude/CLAUDE.md`. Each step reports its own
+status; a missing `claude` CLI degrades to a manual instruction instead of
+failing the rest. The steps below remain for manual / non-Claude setups.
+
 ### 1. Add the MCP tools
 
 ```
@@ -150,7 +163,7 @@ configurable — see [Configuration](#configuration).)
 droids-mem install
 
 # Tell the model when to record a summary
-cat hooks/session-memory.md >> ~/.claude/CLAUDE.md
+cat cmd/droids-mem/claude_snippet.md >> ~/.claude/CLAUDE.md
 ```
 
 `install` merges hook entries into `~/.claude/settings.json`, pointing every
@@ -164,7 +177,7 @@ event at `droids-mem session hook`. Options: `--project` targets
 | `PostToolUse` (Edit/Write/Bash/…) | count meaningful changes (intake gate) |
 | `Stop` | once enough work is unstaged, ask the model to record progress |
 | `SessionEnd` | save the staged summary if the gate passes |
-| `SessionStart` | recover summaries from crashed runs |
+| `SessionStart` | start the MCP bridge if down; recover summaries from crashed runs |
 | `UserPromptSubmit` | inject relevant prior memories for the prompt |
 
 Every hook **fails open** — a memory hiccup never breaks your session.

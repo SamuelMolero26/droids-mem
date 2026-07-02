@@ -146,3 +146,28 @@ func phraseFTSQuery(q string) string {
 	}
 	return strings.Join(quoted, " OR ")
 }
+
+// TokenOverlap returns the fraction of query tokens (3+ chars, lowercased)
+// that appear literally in text. It is the corpus-size-invariant relevance
+// signal for the UserPromptSubmit recall gate (ADR-0016 pt 8): BM25 rank
+// magnitudes scale with corpus size (FTS5 IDF ≈ 0 on tiny DBs), so an
+// absolute rank floor cannot separate a junk single-word OR-match from a
+// genuine one across DB sizes — token overlap can.
+//
+// Literal equality only: porter stems match in FTS ("mapping" finds "map")
+// but not here, so the floor must stay lenient; tune with the T1.2 recall
+// eval (ADR-0016 open item).
+func TokenOverlap(query, text string) float64 {
+	q := tokenSet(query)
+	if len(q) == 0 {
+		return 0
+	}
+	d := tokenSet(text)
+	hits := 0
+	for t := range q {
+		if _, ok := d[t]; ok {
+			hits++
+		}
+	}
+	return float64(hits) / float64(len(q))
+}

@@ -136,9 +136,10 @@ func TestE2E_SessionPullRelevanceFloorAndDedupe(t *testing.T) {
 		t.Errorf("second pull must be deduped, got %d", p2.Count)
 	}
 
-	// Fresh session, impossible floor → the gate rejects even a real match.
+	// Fresh session, impossible floor (overlap is capped at 1.0) → the gate
+	// rejects even a real match.
 	var p3 pullResp
-	mustParseJSON(t, sess(t, home, db, "session", "pull", "--session", "cc-strict", "--query", "phone field mapping", "--floor", "-1000"), &p3)
+	mustParseJSON(t, sess(t, home, db, "session", "pull", "--session", "cc-strict", "--query", "phone field mapping", "--floor", "1.01"), &p3)
 	if p3.Count != 0 {
 		t.Errorf("strict floor must reject all, got %d", p3.Count)
 	}
