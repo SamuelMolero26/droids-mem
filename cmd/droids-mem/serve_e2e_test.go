@@ -293,6 +293,35 @@ func TestServeE2E_ToolsListExposesFourTools(t *testing.T) {
 	}
 }
 
+// TestServeE2E_InitializeExposesInstructions guards the ADR-0019 Layer-1 lever:
+// the proactive protocol must reach the client via the initialize response, or
+// non-Claude hosts get no nudge to call the tools on their own.
+func TestServeE2E_InitializeExposesInstructions(t *testing.T) {
+	s := startServer(t)
+	defer s.stop()
+
+	_, resp, _ := s.jsonRPC(t, "", s.token, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+		"params": map[string]any{
+			"protocolVersion": "2024-11-05",
+			"capabilities":    map[string]any{},
+			"clientInfo":      map[string]any{"name": "e2e", "version": "1"},
+		},
+	})
+	result, ok := resp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("initialize: missing result; resp=%v", resp)
+	}
+	instr, _ := result["instructions"].(string)
+	for _, want := range []string{"mem_search", "mem_context", "mem_save"} {
+		if !strings.Contains(instr, want) {
+			t.Errorf("initialize instructions missing %q; got %q", want, instr)
+		}
+	}
+}
+
 func TestServeE2E_ContextMintsSessionAndSaveReusesIt(t *testing.T) {
 	s := startServer(t)
 	defer s.stop()

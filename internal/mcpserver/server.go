@@ -46,6 +46,26 @@ const (
 	maxIdentityNonceLen = 128
 )
 
+// serverInstructions is the proactive protocol surfaced to the model via the
+// MCP initialize response (ADR-0019, Layer 1). MCP has no auto-call primitive,
+// so this — plus the per-tool descriptions — is the only cross-host lever to
+// make an agent call droids-mem on its own. It is best-effort: the floor is
+// model judgment, backstopped by the store's dedup. Hard enforcement stays a
+// per-host hook concern (ADR-0016 is the Claude Code adapter).
+const serverInstructions = `droids-mem is your persistent memory across sessions. Prior lessons — fixes, decisions, conventions — are stored here so you do not relearn them. Call these tools on your own; do not wait to be asked.
+
+AT THE START of a task, and again whenever the topic shifts:
+- Call mem_search with a short description of what you are about to do. This surfaces relevant prior lessons by relevance and needs no task_type. If the results look weak or unrelated, ignore them.
+- If you know a stable workflow tag for this work (e.g. a repo or project slug), also call mem_context with that task_type for curated continuity (prior session summary + standing user rules). A miss here is harmless — the search above already covers you.
+
+AS YOU WORK, when you learn something worth reusing next time, call mem_save:
+- error_resolution — a problem you hit and the fix that worked.
+- task_pattern — a repeatable approach worth reusing.
+- user_rule — a correction or stable preference the user gave you.
+Save only a genuinely reusable lesson, not routine steps. Re-saving the same lesson is harmless (the store deduplicates), so prefer saving over forgetting. Thread the session_id returned by mem_context (or the first mem_save) through later saves in the same run.
+
+Do NOT save session summaries here — your host may record those automatically at session end; saving one yourself would duplicate it. Never put secrets, tokens, or keys in any field; the store scrubs on save, but keep them out anyway.`
+
 // Config controls the MCP bridge server. Zero values fall back to defaults.
 type Config struct {
 	Addr     string // e.g. ":7777"
@@ -76,6 +96,7 @@ func Run(ctx context.Context, cfg Config, st *store.Store) error {
 	s := server.NewMCPServer(ServerName, ServerVersion,
 		server.WithToolCapabilities(true),
 		server.WithLogging(),
+		server.WithInstructions(serverInstructions),
 	)
 	registerTools(s, st)
 
