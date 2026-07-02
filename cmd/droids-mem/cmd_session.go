@@ -116,21 +116,24 @@ func relevancePull(ctx context.Context, s *store.Store, ccID, query string, floo
 }
 
 // sessionNeedsStage reports whether a Stop-time checkpoint should fire: the
-// change threshold is met AND the staged summary is missing or stale.
+// change threshold is met AND the staged summary is missing or stale. Staleness
+// is count-based, not mtime-based: staging runs through a counted tool (Bash),
+// so comparing file mtimes marked every fresh stage stale and re-blocked forever.
+// A stage goes stale only after a further IntakeThreshold of meaningful changes
+// lands on top of the tally captured at stage time.
 func sessionNeedsStage(ccID string) bool {
 	count, err := state.ChangeCount(ccID)
 	if err != nil || count < state.IntakeThreshold {
 		return false
 	}
-	stagedAt, hasStaged, err := state.StagedModTime(ccID)
+	staged, err := state.ReadStaged(ccID)
 	if err != nil {
-		return false
+		return false // unreadable staged file: fail open, never wedge the session
 	}
-	if !hasStaged {
+	if staged == nil {
 		return true
 	}
-	lastChange, ok, _ := state.CountModTime(ccID)
-	return ok && stagedAt.Before(lastChange)
+	return count-staged.CountAtStage >= state.IntakeThreshold
 }
 
 func writeRelevanceText(rs []store.SearchResult) {

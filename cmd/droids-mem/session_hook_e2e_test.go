@@ -68,6 +68,51 @@ func TestE2E_HookStopBlocksWhenUnstaged(t *testing.T) {
 	}
 }
 
+// Stop with stop_hook_active set: never block, even when a block would
+// otherwise fire — re-blocking a turn that is already continuing because of a
+// Stop hook loops until the host force-ends it.
+func TestE2E_HookStopStandsDownWhenStopHookActive(t *testing.T) {
+	home := t.TempDir()
+	db := filepath.Join(t.TempDir(), "mem.db")
+
+	for range 3 {
+		sessStdin(t, home, db, `{"hook_event_name":"PostToolUse","session_id":"cc-a","tool_name":"Edit"}`, "session", "hook")
+	}
+	out := sessStdin(t, home, db, `{"hook_event_name":"Stop","session_id":"cc-a","stop_hook_active":true}`, "session", "hook")
+	if strings.TrimSpace(string(out)) != "" {
+		t.Errorf("Stop with stop_hook_active should be silent, got %q", out)
+	}
+}
+
+// Staging must satisfy the Stop gate even though the staging command itself
+// bumps the change counter (it runs through Bash, a counted tool). Only a
+// further IntakeThreshold of changes on top of the stage re-arms the block.
+func TestE2E_HookStopFreshStageNotStale(t *testing.T) {
+	home := t.TempDir()
+	db := filepath.Join(t.TempDir(), "mem.db")
+
+	for range 3 {
+		sessStdin(t, home, db, `{"hook_event_name":"PostToolUse","session_id":"cc-f","tool_name":"Edit"}`, "session", "hook")
+	}
+	stageRun(t, home, db, "cc-f", "checkpointed run")
+	// The stage command's own PostToolUse(Bash) lands after the staged file.
+	sessStdin(t, home, db, `{"hook_event_name":"PostToolUse","session_id":"cc-f","tool_name":"Bash"}`, "session", "hook")
+
+	out := sessStdin(t, home, db, `{"hook_event_name":"Stop","session_id":"cc-f"}`, "session", "hook")
+	if strings.TrimSpace(string(out)) != "" {
+		t.Errorf("Stop right after staging should be silent, got %q", out)
+	}
+
+	// A threshold of new meaningful work makes the stage stale again.
+	for range 3 {
+		sessStdin(t, home, db, `{"hook_event_name":"PostToolUse","session_id":"cc-f","tool_name":"Edit"}`, "session", "hook")
+	}
+	out = sessStdin(t, home, db, `{"hook_event_name":"Stop","session_id":"cc-f"}`, "session", "hook")
+	if !strings.Contains(string(out), "block") {
+		t.Errorf("Stop after threshold of new changes should block, got %q", out)
+	}
+}
+
 // Stop with no work accumulated: no output, no block.
 func TestE2E_HookStopSilentWhenQuiet(t *testing.T) {
 	home := t.TempDir()
