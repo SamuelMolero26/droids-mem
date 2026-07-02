@@ -18,8 +18,8 @@ import (
 
 // claudeSnippet is the CLAUDE.md compose-guidance block (the model-judgment
 // half of the intake gate, ADR-0016). Embedded so `install --all` can append
-// it without needing the repo checkout; hooks/session-memory.md carries the
-// same content for manual installs.
+// it without needing the repo checkout. This file is the single source of the
+// block; hooks/session-memory.md points here rather than duplicating it.
 //
 //go:embed claude_snippet.md
 var claudeSnippet string
@@ -89,7 +89,7 @@ func newInstallCmd() *cobra.Command {
 			}
 
 			if !all {
-				result["next_step"] = "run `droids-mem install --all` for the full bootstrap, or append cmd/droids-mem/claude_snippet.md to your CLAUDE.md manually"
+				result["next_step"] = "run `droids-mem install --all` for the full bootstrap (appends the embedded CLAUDE.md snippet; no repo checkout needed)"
 				writeJSON(result)
 				return nil
 			}
@@ -129,7 +129,7 @@ func stepStatus(err error) string {
 func runEnsureServer(self string) error {
 	// #nosec G204 -- re-exec of our own binary (os.Executable), fixed argv.
 	if out, err := exec.Command(self, "ensure-server").CombinedOutput(); err != nil {
-		return fmt.Errorf("ensure-server: %v: %s", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("ensure-server: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -143,6 +143,7 @@ func registerClaudeMCP() error {
 	if err != nil {
 		return errors.New("claude CLI not found in PATH — register manually: claude mcp add --scope user --transport http droids-mem <url> --header 'Authorization: Bearer <token>'")
 	}
+	// #nosec G204 -- claude path from exec.LookPath, fixed argv.
 	if exec.Command(claude, "mcp", "get", "droids-mem").Run() == nil {
 		return nil // already registered
 	}
@@ -152,6 +153,7 @@ func registerClaudeMCP() error {
 	}
 	url := baseURL(envOr("DROIDS_MEM_MCP_ADDR", mcpserver.DefaultAddr)) +
 		envOr("DROIDS_MEM_MCP_ENDPOINT", mcpserver.DefaultEndpoint)
+	// #nosec G204 -- claude path from exec.LookPath, token is our own bearer.
 	out, err := exec.Command(claude, "mcp", "add",
 		"--scope", "user",
 		"--transport", "http",
@@ -159,7 +161,7 @@ func registerClaudeMCP() error {
 		"--header", "Authorization: Bearer "+tok,
 	).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("claude mcp add: %v: %s", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("claude mcp add: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -191,13 +193,18 @@ func appendClaudeSnippet(project bool) (path string, appended bool, err error) {
 	if err != nil {
 		return path, false, fmt.Errorf("open %s: %w", path, err)
 	}
-	defer f.Close()
 	block := claudeSnippet
 	if len(existing) > 0 {
 		block = "\n" + block
 	}
 	if _, err := f.WriteString(block); err != nil {
+		_ = f.Close()
 		return path, false, fmt.Errorf("append %s: %w", path, err)
+	}
+	// Explicit Close (not defer): a write-back flush can fail and losing that
+	// error silently drops appended data.
+	if err := f.Close(); err != nil {
+		return path, false, fmt.Errorf("close %s: %w", path, err)
 	}
 	return path, true, nil
 }

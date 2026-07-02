@@ -159,11 +159,11 @@ configurable — see [Configuration](#configuration).)
 ### 2. Add guaranteed session memory
 
 ```
-# Wire the hooks into Claude Code's settings.json (idempotent, non-destructive)
-droids-mem install
+# One-shot: hooks + server + MCP registration + CLAUDE.md snippet (idempotent)
+droids-mem install --all
 
-# Tell the model when to record a summary
-cat cmd/droids-mem/claude_snippet.md >> ~/.claude/CLAUDE.md
+# Or hooks only, without the full bootstrap
+droids-mem install
 ```
 
 `install` merges hook entries into `~/.claude/settings.json`, pointing every

@@ -12,7 +12,7 @@ The canonical block lives at
 # One-shot bootstrap (hooks + server + MCP registration + CLAUDE.md block)
 droids-mem install --all
 
-# Or append just the block manually
+# Or append just the block manually (from a repo checkout)
 cat cmd/droids-mem/claude_snippet.md >> ~/.claude/CLAUDE.md
 ```
 

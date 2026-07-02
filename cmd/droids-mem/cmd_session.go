@@ -75,7 +75,7 @@ func newSessionPullCmd(a *app) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&ccID, "session", "", "Claude Code session id (required)")
 	cmd.Flags().StringVar(&query, "query", "", "Prompt text to find prior memories for (required)")
-	cmd.Flags().Float64Var(&floor, "floor", DefaultRelevanceFloor, "Relevance floor: keep hits whose prompt-token overlap is ≥ this (0..1)")
+	cmd.Flags().Float64Var(&floor, "floor", DefaultRelevanceFloor, "Relevance floor: keep hits whose prompt-token overlap is ≥ this. Normal range 0..1; a value >1 rejects every hit")
 	cmd.Flags().StringVar(&format, "format", "json", "Output format: json (default) | text (for hook injection)")
 	_ = cmd.MarkFlagRequired("session")
 	_ = cmd.MarkFlagRequired("query")
