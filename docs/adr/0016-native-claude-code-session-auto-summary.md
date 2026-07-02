@@ -2,6 +2,7 @@
 
 **Status**: Proposed
 **Date**: 2026-06-17
+**Extended by**: ADR-0019 (cross-host portable integration kit)
 
 ## Context
 
@@ -217,7 +218,7 @@ the gate, not recency.
 
 ## Alternatives considered
 
-- **Pure prompt protocol** (engram-style "MANDATORY before done") — rejected as
+- **Pure prompt protocol** ( "MANDATORY before done") — rejected as
   the sole mechanism: best-effort, model forgets, abnormal exits escape. Kept as
   the *composition* half, paired with hook enforcement.
 - **A new `auto_session_summary` kind** — rejected. Breaks the frozen 4-kind
