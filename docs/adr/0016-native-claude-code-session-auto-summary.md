@@ -244,3 +244,26 @@ the gate, not recency.
   without weak-hit noise.
 - N = 3 (intake + checkpoint threshold) and the Stop-hook block-once semantics
   are locked defaults; tune N against false-positive auto-summaries in practice.
+
+## Implementation note (2026-07-02): the checkpoint gate as shipped violated this ADR
+
+The first implementation of decision point 2 drifted from the spec and produced
+an infinite Stop-block loop, force-ended only by Claude Code's 9-block cap:
+
+1. **Staleness was mtime-based, not count-based.** `sessionNeedsStage` compared
+   the staged file's mtime against the change-counter file's mtime. But the
+   staging command itself runs through Bash — a counted tool — so its own
+   `PostToolUse` bumped the counter *after* the staged file was written. Every
+   fresh stage was born stale; re-staging could never satisfy the gate. Fixed by
+   implementing what this ADR specified: `StagedSummary` records
+   `count_at_stage`, and a stage goes stale only after a further
+   `IntakeThreshold` of meaningful changes on top of it.
+2. **`stop_hook_active` was ignored.** The Claude Code hook contract sets
+   `stop_hook_active: true` on Stop invocations that fire while the turn is
+   already continuing due to a Stop-hook block; a hook must stand down then.
+   The `stop` case now returns silently when the flag is set — this is what
+   makes "block once per threshold-crossing" hold mechanically.
+
+General rule extracted: **a Stop hook that asks the model to run a shell command
+must not count that command toward its own work gate** — otherwise the
+compliance action re-arms the trigger it was meant to satisfy.

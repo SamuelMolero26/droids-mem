@@ -53,6 +53,11 @@ type StagedSummary struct {
 	Learned   string `json:"learned"`
 	Tags      string `json:"tags,omitempty"`
 	StagedAt  int64  `json:"staged_at"`
+	// CountAtStage is the meaningful-change tally captured when this summary was
+	// staged. The Stop-hook staleness check compares the live tally against it —
+	// an mtime comparison can't work, because the staging command itself runs
+	// through a counted tool (Bash) and would mark every fresh stage stale.
+	CountAtStage int `json:"count_at_stage"`
 }
 
 func sessionsDir() (string, error) {
@@ -118,6 +123,9 @@ func StageSummary(ccID string, s StagedSummary) error {
 	if s.StagedAt == 0 {
 		s.StagedAt = time.Now().Unix()
 	}
+	if n, err := ChangeCount(ccID); err == nil {
+		s.CountAtStage = n
+	}
 	b, err := json.Marshal(s)
 	if err != nil {
 		return fmt.Errorf("marshal staged summary: %w", err)
@@ -160,24 +168,6 @@ func StagedModTime(ccID string) (time.Time, bool, error) {
 	}
 	if err != nil {
 		return time.Time{}, false, fmt.Errorf("stat staged summary: %w", err)
-	}
-	return fi.ModTime(), true, nil
-}
-
-// CountModTime returns the change-counter file's modification time (≈ the last
-// meaningful change) and whether it exists. The Stop-hook staleness check
-// compares this against the staged file's mtime.
-func CountModTime(ccID string) (time.Time, bool, error) {
-	path, err := sessionPath(ccID, countExt)
-	if err != nil {
-		return time.Time{}, false, err
-	}
-	fi, err := os.Stat(path)
-	if os.IsNotExist(err) {
-		return time.Time{}, false, nil
-	}
-	if err != nil {
-		return time.Time{}, false, fmt.Errorf("stat change count: %w", err)
 	}
 	return fi.ModTime(), true, nil
 }

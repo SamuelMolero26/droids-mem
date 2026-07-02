@@ -17,6 +17,10 @@ type hookInput struct {
 	SessionID     string `json:"session_id"`
 	Prompt        string `json:"prompt"`
 	ToolName      string `json:"tool_name"`
+	// StopHookActive is true when the turn is already continuing because a Stop
+	// hook blocked it. Blocking again while it's set loops until the host's cap
+	// force-ends the turn, so the Stop case must stand down.
+	StopHookActive bool `json:"stop_hook_active"`
 }
 
 // meaningfulTools are the PostToolUse tools that count toward the intake gate
@@ -53,7 +57,7 @@ func newSessionHookCmd(a *app) *cobra.Command {
 					_, _ = state.IncrementChange(in.SessionID)
 				}
 			case "stop":
-				if in.SessionID != "" && sessionNeedsStage(in.SessionID) {
+				if in.SessionID != "" && !in.StopHookActive && sessionNeedsStage(in.SessionID) {
 					emitStopBlock(in.SessionID)
 				}
 			case "sessionend":
