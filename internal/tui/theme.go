@@ -70,6 +70,10 @@ var (
 	metaStyle  = lipgloss.NewStyle().Foreground(colMeta)
 	bodyStyle  = lipgloss.NewStyle().Foreground(colText)
 
+	// CONNECTIONS rows (detail-pane BM25 neighbors, ADR-0021).
+	connDot   = lipgloss.NewStyle().Foreground(colAccent)
+	connTitle = lipgloss.NewStyle().Foreground(colText)
+
 	footerStyle = lipgloss.NewStyle().Foreground(colDim)
 	footerKey   = lipgloss.NewStyle().Foreground(colMeta)
 	dangerStyle = lipgloss.NewStyle().Bold(true).Foreground(colDanger)

@@ -141,6 +141,38 @@ func TestE2E_HookUserPromptSubmitInjects(t *testing.T) {
 	}
 }
 
+// File provenance (ADR-0021 Phase 2): PostToolUse captures touched file paths;
+// SessionEnd flush records them under the summary's session_id; Bash (no path)
+// is ignored.
+func TestE2E_HookCapturesFileProvenanceOnFlush(t *testing.T) {
+	home := t.TempDir()
+	db := filepath.Join(t.TempDir(), "mem.db")
+
+	// Stage with a known droids-mem session_id so we can query provenance after.
+	sess(t, home, db, "session", "stage",
+		"--session", "cc-p", "--session-id", "sess_prov",
+		"--title", "provenance run", "--what", "touched files", "--learned", "remember paths")
+
+	// Read + Edit carry file_path → captured. Bash carries none → ignored, but
+	// still bumps the change counter to clear the intake gate.
+	sessStdin(t, home, db, `{"hook_event_name":"PostToolUse","session_id":"cc-p","tool_name":"Read","tool_input":{"file_path":"/repo/a.go"}}`, "session", "hook")
+	sessStdin(t, home, db, `{"hook_event_name":"PostToolUse","session_id":"cc-p","tool_name":"Edit","tool_input":{"file_path":"/repo/b.go"}}`, "session", "hook")
+	for range 3 {
+		sessStdin(t, home, db, `{"hook_event_name":"PostToolUse","session_id":"cc-p","tool_name":"Bash"}`, "session", "hook")
+	}
+
+	sessStdin(t, home, db, `{"hook_event_name":"SessionEnd","session_id":"cc-p"}`, "session", "hook")
+
+	var fr struct {
+		Files []string `json:"files"`
+		Total int      `json:"total"`
+	}
+	mustParseJSON(t, sess(t, home, db, "session", "files", "--session-id", "sess_prov"), &fr)
+	if fr.Total != 2 {
+		t.Fatalf("provenance files = %+v, want 2 (a.go, b.go; Bash ignored)", fr)
+	}
+}
+
 // SessionEnd: flushes the staged summary through the gate.
 func TestE2E_HookSessionEndFlushes(t *testing.T) {
 	home := t.TempDir()

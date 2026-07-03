@@ -10,16 +10,18 @@ import (
 )
 
 type fakeStore struct {
-	listResp   *store.ListResponse
-	searchResp *store.SearchResponse
-	getResp    *store.Memory
-	countsResp *store.CountsResponse
+	listResp      *store.ListResponse
+	searchResp    *store.SearchResponse
+	getResp       *store.Memory
+	countsResp    *store.CountsResponse
+	neighborsResp []store.Neighbor
 
-	listCalls, searchCalls, getCalls, pruneCalls, countsCalls int
-	lastList                                                  store.ListRequest
-	lastSearch                                                store.SearchRequest
-	lastGetID                                                 string
-	lastPrune                                                 store.PruneRequest
+	listCalls, searchCalls, getCalls, pruneCalls, countsCalls, neighborsCalls int
+	lastList                                                                  store.ListRequest
+	lastSearch                                                                store.SearchRequest
+	lastGetID                                                                 string
+	lastPrune                                                                 store.PruneRequest
+	lastNeighborsID                                                           string
 }
 
 func (f *fakeStore) List(_ context.Context, r store.ListRequest) (*store.ListResponse, error) {
@@ -54,6 +56,11 @@ func (f *fakeStore) Counts(_ context.Context) (*store.CountsResponse, error) {
 		return &store.CountsResponse{ByKind: map[string]int{}}, nil
 	}
 	return f.countsResp, nil
+}
+func (f *fakeStore) Neighbors(_ context.Context, id string, _ int) ([]store.Neighbor, error) {
+	f.neighborsCalls++
+	f.lastNeighborsID = id
+	return f.neighborsResp, nil
 }
 
 func upd(t *testing.T, m Model, msg tea.Msg) (Model, tea.Cmd) {
@@ -267,6 +274,27 @@ func TestListNav_DetailFollowsCursor(t *testing.T) {
 		t.Errorf("detail loaded id=%q, want mem_b", fs.lastGetID)
 	}
 	_ = m
+}
+
+func TestDetailLoad_FetchesNeighbors(t *testing.T) {
+	fs := &fakeStore{
+		getResp:       &store.Memory{ID: "mem_b", Title: "T"},
+		neighborsResp: []store.Neighbor{{ID: "mem_c", Title: "near", Score: 0.5}},
+	}
+	m := New(fs)
+	m.focus = focusList
+	m.list.SetItems(listOf("mem_a", "mem_b"))
+	_, cmd := upd(t, m, key("down")) // move to mem_b → detail loads it + neighbors
+	msg, ok := firstOf[detailMsg](collect(cmd))
+	if !ok {
+		t.Fatal("list nav did not load detail")
+	}
+	if fs.neighborsCalls != 1 || fs.lastNeighborsID != "mem_b" {
+		t.Errorf("neighbors fetch = %d id=%q, want 1 mem_b", fs.neighborsCalls, fs.lastNeighborsID)
+	}
+	if len(msg.neighbors) != 1 || msg.neighbors[0].ID != "mem_c" {
+		t.Errorf("detailMsg neighbors = %+v, want [mem_c]", msg.neighbors)
+	}
 }
 
 func TestEnter_FocusesDetailPane(t *testing.T) {

@@ -419,11 +419,44 @@ func TestMigrate_V2toV3AddsOriginBackfillsManual(t *testing.T) {
 	if origin != "manual" {
 		t.Errorf("backfilled origin = %q, want 'manual'", origin)
 	}
-	if got, want := userVersion(t, conn), 3; got != want {
+	if got, want := userVersion(t, conn), db.CurrentSchemaVersion; got != want {
 		t.Errorf("post-migrate user_version = %d, want %d", got, want)
 	}
 	if !slices.Contains(indexNames(t, conn), "idx_memories_origin_created") {
 		t.Error("migrated DB missing idx_memories_origin_created")
+	}
+}
+
+// A fresh DB carries the file-provenance relation.
+func TestInit_FreshDBHasMemoryFilesTable(t *testing.T) {
+	conn := newTestDB(t)
+	if !tableExists(t, conn, "memory_files") {
+		t.Error("fresh DB missing memory_files table")
+	}
+}
+
+// v3→v4 adds memory_files without disturbing existing memories rows.
+func TestMigrate_V3toV4AddsMemoryFiles(t *testing.T) {
+	conn := newPreV1DB(t)
+	now := int64(1000000)
+	if _, err := conn.Exec(`
+		INSERT INTO memories (id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at)
+		VALUES ('mem_f', 'sess_f', 'crm', 'task_pattern', 't', 'w', 'l', '', 'fp_f', ?, ?)`,
+		now, now); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+	if err := db.Migrate(conn); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if !tableExists(t, conn, "memory_files") {
+		t.Fatal("migrated DB missing memory_files table")
+	}
+	if got, want := userVersion(t, conn), db.CurrentSchemaVersion; got != want {
+		t.Errorf("post-migrate user_version = %d, want %d", got, want)
+	}
+	var id string
+	if err := conn.QueryRow(`SELECT id FROM memories WHERE id = 'mem_f'`).Scan(&id); err != nil {
+		t.Errorf("pre-existing row lost after migrate: %v", err)
 	}
 }
 

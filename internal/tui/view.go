@@ -138,10 +138,10 @@ func (m Model) footerView() string {
 }
 
 // renderDetail is the detail-pane body for one Memory: MEMORY label, title,
-// outlined tag chips, the prose, and a CONNECTIONS placeholder box (the derived
-// connections graph is deferred, ADR-0021). Content is wrapped to w so the
+// outlined tag chips, the prose, and a CONNECTIONS list of the most related
+// memories (BM25-neighbor fast-follow, ADR-0021). Content is wrapped to w so the
 // non-wrapping viewport doesn't clip long titles and bodies.
-func renderDetail(mem *store.Memory, w int) string {
+func renderDetail(mem *store.Memory, neighbors []store.Neighbor, w int) string {
 	if mem == nil {
 		return metaStyle.Render("no memory selected")
 	}
@@ -169,9 +169,27 @@ func renderDetail(mem *store.Memory, w int) string {
 	b.WriteString("\n\n")
 	b.WriteString(sectionLabel.Render("CONNECTIONS"))
 	b.WriteString("\n")
-	box := lipgloss.NewStyle().Foreground(colDim).
-		Border(lipgloss.RoundedBorder()).BorderForeground(colChip).
-		Padding(1, 2).Render("derived links — Phase 3")
-	b.WriteString(box)
+	b.WriteString(renderConnections(neighbors, wrap))
+	return b.String()
+}
+
+// renderConnections lists related memories as one line each: a similarity dot,
+// the title (truncated to fit), and a dim kind tag. Empty → a dim placeholder.
+func renderConnections(neighbors []store.Neighbor, wrap int) string {
+	if len(neighbors) == 0 {
+		return metaStyle.Render("no related memories")
+	}
+	var b strings.Builder
+	for i, n := range neighbors {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		tag := metaStyle.Render(n.Kind)
+		room := max(10, wrap-lipgloss.Width(tag)-4) // "• " + space before tag
+		b.WriteString(connDot.Render("• "))
+		b.WriteString(connTitle.Render(truncate(n.Title, room)))
+		b.WriteByte(' ')
+		b.WriteString(tag)
+	}
 	return b.String()
 }

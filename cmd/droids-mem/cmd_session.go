@@ -31,8 +31,36 @@ func newSessionCmd(a *app) *cobra.Command {
 		newSessionFlushCmd(a),
 		newSessionRecoverCmd(a),
 		newSessionPullCmd(a),
+		newSessionFilesCmd(a),
 		newSessionHookCmd(a),
 	)
+	return cmd
+}
+
+// newSessionFilesCmd reports the file provenance recorded for a droids-mem
+// session_id (ADR-0021 Phase 2) — the files a run read or changed, keyed by the
+// session_id its memories carry. Operator/inspection surface, not on MCP.
+func newSessionFilesCmd(a *app) *cobra.Command {
+	var sessionID string
+	cmd := &cobra.Command{
+		Use:   "files",
+		Short: "List the file provenance recorded for a droids-mem session_id",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			s, err := a.store()
+			if err != nil {
+				return err
+			}
+			paths, err := s.FilesForSession(cmd.Context(), sessionID)
+			if err != nil {
+				writeError("files_failed", err.Error(), true)
+				exitWith(ExitError)
+			}
+			writeJSON(map[string]any{"session_id": sessionID, "files": paths, "total": len(paths)})
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&sessionID, "session-id", "", "droids-mem session_id (required)")
+	_ = cmd.MarkFlagRequired("session-id")
 	return cmd
 }
 
@@ -368,6 +396,12 @@ func flushSession(ctx context.Context, s *store.Store, ccID string) flushResult 
 	})
 	if err != nil {
 		return flushResult{reason: "save_failed", err: err}
+	}
+	// Attach file provenance (ADR-0021 Phase 2) under the session_id the summary
+	// saved with — the run's session_id, so any manual saves in the run share it.
+	// Best-effort: provenance is a bonus, never a reason to fail the flush.
+	if files, ferr := state.ReadFiles(ccID); ferr == nil && len(files) > 0 {
+		_ = s.RecordFiles(ctx, resp.SessionID, files)
 	}
 	return flushResult{flushed: true, id: resp.ID, sessionID: resp.SessionID}
 }
