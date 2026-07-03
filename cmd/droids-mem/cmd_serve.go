@@ -31,10 +31,16 @@ Requires DROIDS_MEM_MCP_TOKEN. Env overrides:
 			if err != nil {
 				return fmt.Errorf("load token: %w", err)
 			}
+			gm, err := graphManager()
+			if err != nil {
+				return err
+			}
+			defer gm.Close()
 			cfg := mcpserver.Config{
 				Addr:     envOr("DROIDS_MEM_MCP_ADDR", addr),
 				Endpoint: envOr("DROIDS_MEM_MCP_ENDPOINT", endpoint),
 				Token:    tok,
+				Graphs:   gm,
 			}
 			return mcpserver.Run(cmd.Context(), cfg, s)
 		},
