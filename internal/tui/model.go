@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/samuelmolero26/droids-mem/internal/store"
 )
 
@@ -16,25 +17,52 @@ const (
 	minSearchRunes = 3   // below this, search is skipped and the list falls back to List
 	listPageLimit  = 100 // static-filter page size
 	searchLimit    = 20  // live-search result cap
+	sidebarWidth   = 26  // fixed sidebar column
 )
 
-type viewState int
+// focus is which of the three panes owns the arrow keys (ADR-0021). Printable
+// keys always feed search regardless of focus; tab cycles this.
+type focus int
 
 const (
-	stateList viewState = iota
-	stateDetail
-	stateConfirm
+	focusSidebar focus = iota
+	focusList
+	focusDetail
 )
 
-// queryDesc is the single source of truth for what the list shows. A non-empty
-// search (≥ minSearchRunes) drives store.Search; otherwise store.List with the
-// kind/task_type filters. Both the initial load and every refresh (filter
-// change, post-delete) re-issue this descriptor, so the view never refreshes
-// into a different shape than the user was looking at (ADR-0015).
+// tab is the top-bar view. Graph is a deferred stub (ADR-0021 Phase 3).
+type tab int
+
+const (
+	tabMemories tab = iota
+	tabGraph
+)
+
+// mode is a modal sub-state that steals keys from the normal flow.
+type mode int
+
+const (
+	modeNormal mode = iota
+	modeConfirm
+)
+
+// sidebarKinds is the fixed KINDS rotation shown in the sidebar; "" is the
+// "all" row (no kind filter). Order matches the mockup.
+var sidebarKinds = []string{"", "session_summary", "task_pattern", "user_rule", "error_resolution"}
+
+func kindLabel(k string) string {
+	if k == "" {
+		return "all"
+	}
+	return k
+}
+
+// queryDesc is the single source of truth for what the list shows (ADR-0015). A
+// non-empty search (≥ minSearchRunes) drives store.Search; otherwise store.List
+// with the kind filter. Both the initial load and every refresh re-issue it.
 type queryDesc struct {
-	search   string
-	kind     string
-	taskType string
+	search string
+	kind   string
 }
 
 // --- messages ---
@@ -45,8 +73,14 @@ type itemsMsg struct {
 	err   error
 }
 type detailMsg struct {
+	gen int
 	mem *store.Memory
 	err error
+}
+type countsMsg struct {
+	counts map[string]int
+	total  int
+	err    error
 }
 type deletedMsg struct{ err error }
 type tickMsg struct{ gen int }
@@ -54,18 +88,27 @@ type tickMsg struct{ gen int }
 // Model is the root BubbleTea model for the Memory inspector.
 type Model struct {
 	store memStore
-	state viewState
+	mode  mode
+	focus focus
+	tab   tab
 
-	list   list.Model
 	search textinput.Model
+	list   list.Model
 	detail viewport.Model
+
+	kindIdx int
+	counts  map[string]int
+	total   int
 
 	query queryDesc
 
-	// gen is the monotonic generation counter unifying search debounce and
-	// stale-result rejection: any load is stamped with the gen current when it
-	// was scheduled, and results/ticks whose gen != m.gen are dropped.
-	gen int
+	// gen unifies list-load debounce and stale-result rejection; detailGen does
+	// the same for the cursor-following detail pane (a separate stream so a list
+	// reload and a detail load never fight over one counter).
+	gen       int
+	detailGen int
+
+	loadedDetailID string
 
 	confirmTarget listItem
 	status        string
@@ -77,39 +120,30 @@ type Model struct {
 // New builds an inspector model over the given store.
 func New(s memStore) Model {
 	ti := textinput.New()
-	ti.Placeholder = "search (≥3 chars)…"
+	ti.Placeholder = "search memories… (≥3 chars)"
 	ti.Prompt = "/ "
+	ti.Cursor.Style = lipgloss.NewStyle().Foreground(colSelect) // cyan caret
 	ti.Focus()
 
-	l := list.New(nil, list.NewDefaultDelegate(), 0, 0)
-	l.Title = "Memories"
+	l := list.New(nil, memDelegate{}, 0, 0)
+	l.SetShowTitle(false)
 	l.SetShowHelp(false)
 	l.SetFilteringEnabled(false) // we drive search ourselves via store.Search
 	l.SetShowStatusBar(false)
 
 	return Model{
 		store:  s,
-		state:  stateList,
+		mode:   modeNormal,
+		focus:  focusList,
 		list:   l,
 		search: ti,
+		counts: map[string]int{},
 	}
 }
 
 func (m Model) Init() tea.Cmd {
-	// gen 0 initial load.
-	return m.loadCmd(m.gen, m.query)
-}
-
-// kindCycle is the static kind filter rotation driven by tab.
-var kindCycle = []string{"", "error_resolution", "task_pattern", "user_rule", "session_summary"}
-
-func nextKind(cur string) string {
-	for i, k := range kindCycle {
-		if k == cur {
-			return kindCycle[(i+1)%len(kindCycle)]
-		}
-	}
-	return ""
+	// gen 0 initial list load + one-shot census.
+	return tea.Batch(m.loadCmd(m.gen, m.query), m.countsCmd())
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -130,25 +164,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.status = ""
 		m.list.SetItems(msg.items)
-		// clamp cursor to new bounds (post-delete the list is shorter).
 		if n := len(msg.items); n > 0 && m.list.Index() >= n {
 			m.list.Select(n - 1)
 		}
-		return m, nil
+		return m, m.syncDetail() // list changed → refresh the detail pane
 
 	case detailMsg:
+		if msg.gen != m.detailGen {
+			return m, nil // superseded by a newer selection
+		}
 		if msg.err != nil {
-			m.status = "open failed: " + msg.err.Error()
-			m.state = stateList
+			m.detail.SetContent(bodyStyle.Render("open failed: " + msg.err.Error()))
 			return m, nil
 		}
-		if msg.mem == nil {
-			m.status = "memory not found (deleted?)"
-			m.state = stateList
-			return m, nil
-		}
-		m.detail.SetContent(renderDetail(msg.mem))
+		m.detail.SetContent(renderDetail(msg.mem, m.detail.Width))
 		m.detail.GotoTop()
+		return m, nil
+
+	case countsMsg:
+		if msg.err == nil {
+			m.counts, m.total = msg.counts, msg.total
+		}
 		return m, nil
 
 	case deletedMsg:
@@ -157,9 +193,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.status = "deleted"
 		}
-		m.state = stateList
+		m.mode = modeNormal
 		m.gen++
-		return m, m.loadCmd(m.gen, m.query)
+		return m, tea.Batch(m.loadCmd(m.gen, m.query), m.countsCmd())
 
 	case tickMsg:
 		if msg.gen != m.gen {
@@ -177,52 +213,44 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Type == tea.KeyCtrlC {
 		return m, tea.Quit
 	}
-	switch m.state {
-	case stateDetail:
-		switch msg.String() {
-		case "esc", "q":
-			m.state = stateList
-			return m, nil
-		}
-		var cmd tea.Cmd
-		m.detail, cmd = m.detail.Update(msg)
-		return m, cmd
-
-	case stateConfirm:
+	if m.mode == modeConfirm {
 		switch msg.String() {
 		case "y", "Y":
 			id := m.confirmTarget.id
-			m.state = stateList
+			m.mode = modeNormal
 			return m, m.deleteCmd(id)
 		default: // n / esc / anything else cancels
-			m.state = stateList
+			m.mode = modeNormal
 			return m, nil
 		}
-
-	default: // stateList
-		return m.handleListKey(msg)
 	}
+	return m.handleNormalKey(msg)
 }
 
-func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "enter":
-		if it, ok := m.list.SelectedItem().(listItem); ok {
-			m.state = stateDetail
-			m.status = ""
-			return m, m.detailCmd(it.id)
+	case "tab":
+		m.focus = (m.focus + 1) % 3
+		return m, nil
+	case "shift+tab":
+		m.focus = (m.focus + 2) % 3
+		return m, nil
+	case "ctrl+g":
+		if m.tab == tabMemories {
+			m.tab = tabGraph
+		} else {
+			m.tab = tabMemories
 		}
+		return m, nil
+	case "enter":
+		m.focus = focusDetail
 		return m, nil
 	case "ctrl+d":
 		if it, ok := m.list.SelectedItem().(listItem); ok {
 			m.confirmTarget = it
-			m.state = stateConfirm
+			m.mode = modeConfirm
 		}
 		return m, nil
-	case "tab":
-		m.query.kind = nextKind(m.query.kind)
-		m.gen++
-		return m, m.loadCmd(m.gen, m.query)
 	case "esc":
 		if m.search.Value() != "" {
 			m.search.SetValue("")
@@ -230,15 +258,17 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.gen++
 			return m, m.loadCmd(m.gen, m.query)
 		}
+		if m.focus == focusDetail {
+			m.focus = focusList
+			return m, nil
+		}
 		return m, tea.Quit
 	case "up", "down", "pgup", "pgdown", "home", "end":
-		var cmd tea.Cmd
-		m.list, cmd = m.list.Update(msg)
-		return m, cmd
+		return m.handleNav(msg)
 	}
 
-	// Everything else is text input into the search box. A changed value bumps
-	// gen and schedules a debounce; the actual load fires on the matching tick.
+	// Everything else is text input into the search box (always-on, ADR-0021). A
+	// changed value bumps gen and schedules a debounce; the load fires on the tick.
 	var cmd tea.Cmd
 	m.search, cmd = m.search.Update(msg)
 	if v := m.search.Value(); v != m.query.search {
@@ -249,6 +279,37 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// handleNav routes arrow/paging keys to the focused pane.
+func (m Model) handleNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.focus {
+	case focusSidebar:
+		switch msg.String() {
+		case "up":
+			if m.kindIdx > 0 {
+				m.kindIdx--
+			}
+		case "down":
+			if m.kindIdx < len(sidebarKinds)-1 {
+				m.kindIdx++
+			}
+		}
+		if k := sidebarKinds[m.kindIdx]; k != m.query.kind {
+			m.query.kind = k
+			m.gen++
+			return m, m.loadCmd(m.gen, m.query)
+		}
+		return m, nil
+	case focusDetail:
+		var cmd tea.Cmd
+		m.detail, cmd = m.detail.Update(msg)
+		return m, cmd
+	default: // focusList
+		var cmd tea.Cmd
+		m.list, cmd = m.list.Update(msg)
+		return m, tea.Batch(cmd, m.syncDetail())
+	}
+}
+
 // --- commands ---
 
 func (m Model) loadCmd(gen int, q queryDesc) tea.Cmd {
@@ -256,15 +317,13 @@ func (m Model) loadCmd(gen int, q queryDesc) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 		if len([]rune(q.search)) >= minSearchRunes {
-			resp, err := s.Search(ctx, store.SearchRequest{
-				Query: q.search, Kind: q.kind, TaskType: q.taskType, Limit: searchLimit,
-			})
+			resp, err := s.Search(ctx, store.SearchRequest{Query: q.search, Kind: q.kind, Limit: searchLimit})
 			if err != nil {
 				return itemsMsg{gen: gen, err: err}
 			}
 			return itemsMsg{gen: gen, items: itemsFromSearch(resp)}
 		}
-		resp, err := s.List(ctx, store.ListRequest{Kind: q.kind, TaskType: q.taskType, Limit: listPageLimit})
+		resp, err := s.List(ctx, store.ListRequest{Kind: q.kind, Limit: listPageLimit})
 		if err != nil {
 			return itemsMsg{gen: gen, err: err}
 		}
@@ -272,11 +331,40 @@ func (m Model) loadCmd(gen int, q queryDesc) tea.Cmd {
 	}
 }
 
-func (m Model) detailCmd(id string) tea.Cmd {
+// syncDetail issues a detail load if the selected row changed since the last one
+// (detail follows the cursor, ADR-0021). Stale loads are dropped by detailGen.
+func (m *Model) syncDetail() tea.Cmd {
+	id := ""
+	if it, ok := m.list.SelectedItem().(listItem); ok {
+		id = it.id
+	}
+	if id == m.loadedDetailID {
+		return nil
+	}
+	m.loadedDetailID = id
+	m.detailGen++
+	return m.detailCmd(m.detailGen, id)
+}
+
+func (m Model) detailCmd(gen int, id string) tea.Cmd {
 	s := m.store
 	return func() tea.Msg {
+		if id == "" {
+			return detailMsg{gen: gen, mem: nil}
+		}
 		mem, err := s.GetRow(context.Background(), id) // non-counting: no Expand signal
-		return detailMsg{mem: mem, err: err}
+		return detailMsg{gen: gen, mem: mem, err: err}
+	}
+}
+
+func (m Model) countsCmd() tea.Cmd {
+	s := m.store
+	return func() tea.Msg {
+		resp, err := s.Counts(context.Background())
+		if err != nil {
+			return countsMsg{err: err}
+		}
+		return countsMsg{counts: resp.ByKind, total: resp.Total}
 	}
 }
 
@@ -296,10 +384,14 @@ func (m *Model) layout() {
 	if m.width <= 0 || m.height <= 0 {
 		return
 	}
-	listH := m.height - 3 // search line + status line + padding
-	if listH < 1 {
-		listH = 1
-	}
-	m.list.SetSize(m.width, listH)
-	m.detail = viewport.New(m.width, m.height-2)
+	// Borderless (ADR-0021 visual match). Fixed rows: header(1) + underline(1) +
+	// search(1) + top rule(1) + bottom rule(1) + footer(1) = 6.
+	bodyH := max(1, m.height-6)
+	// Two 1-col vertical dividers separate the three columns; sidebar is fixed,
+	// detail ~34% of the remainder, list takes the rest.
+	inner := max(20, m.width-sidebarWidth-2)
+	detailW := inner * 34 / 100
+	listW := inner - detailW
+	m.list.SetSize(listW, bodyH)
+	m.detail = viewport.New(detailW, bodyH)
 }

@@ -13,12 +13,13 @@ type fakeStore struct {
 	listResp   *store.ListResponse
 	searchResp *store.SearchResponse
 	getResp    *store.Memory
+	countsResp *store.CountsResponse
 
-	listCalls, searchCalls, getCalls, pruneCalls int
-	lastList                                     store.ListRequest
-	lastSearch                                   store.SearchRequest
-	lastGetID                                    string
-	lastPrune                                    store.PruneRequest
+	listCalls, searchCalls, getCalls, pruneCalls, countsCalls int
+	lastList                                                  store.ListRequest
+	lastSearch                                                store.SearchRequest
+	lastGetID                                                 string
+	lastPrune                                                 store.PruneRequest
 }
 
 func (f *fakeStore) List(_ context.Context, r store.ListRequest) (*store.ListResponse, error) {
@@ -47,6 +48,13 @@ func (f *fakeStore) Prune(_ context.Context, r store.PruneRequest) (*store.Prune
 	f.lastPrune = r
 	return &store.PruneResponse{Status: "pruned", Count: 1}, nil
 }
+func (f *fakeStore) Counts(_ context.Context) (*store.CountsResponse, error) {
+	f.countsCalls++
+	if f.countsResp == nil {
+		return &store.CountsResponse{ByKind: map[string]int{}}, nil
+	}
+	return f.countsResp, nil
+}
 
 func upd(t *testing.T, m Model, msg tea.Msg) (Model, tea.Cmd) {
 	t.Helper()
@@ -65,6 +73,38 @@ func runCmd(cmd tea.Cmd) tea.Msg {
 	return cmd()
 }
 
+// collect runs a cmd and flattens tea.Batch into the individual messages, so a
+// test can find the message it cares about among a batched result.
+func collect(cmd tea.Cmd) []tea.Msg {
+	if cmd == nil {
+		return nil
+	}
+	switch v := cmd().(type) {
+	case tea.BatchMsg:
+		var out []tea.Msg
+		for _, c := range v {
+			out = append(out, collect(c)...)
+		}
+		return out
+	case nil:
+		return nil
+	default:
+		return []tea.Msg{v}
+	}
+}
+
+func firstOf[T tea.Msg](msgs []tea.Msg) (T, bool) {
+	for _, msg := range msgs {
+		if t, ok := msg.(T); ok {
+			return t, true
+		}
+	}
+	var zero T
+	return zero, false
+}
+
+func sizeMsg(w, h int) tea.WindowSizeMsg { return tea.WindowSizeMsg{Width: w, Height: h} }
+
 func listOf(ids ...string) []list.Item {
 	out := make([]list.Item, 0, len(ids))
 	for _, id := range ids {
@@ -79,8 +119,16 @@ func key(s string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyEnter}
 	case "tab":
 		return tea.KeyMsg{Type: tea.KeyTab}
+	case "shift+tab":
+		return tea.KeyMsg{Type: tea.KeyShiftTab}
+	case "up":
+		return tea.KeyMsg{Type: tea.KeyUp}
+	case "down":
+		return tea.KeyMsg{Type: tea.KeyDown}
 	case "ctrl+d":
 		return tea.KeyMsg{Type: tea.KeyCtrlD}
+	case "ctrl+g":
+		return tea.KeyMsg{Type: tea.KeyCtrlG}
 	case "esc":
 		return tea.KeyMsg{Type: tea.KeyEsc}
 	default:
@@ -88,18 +136,30 @@ func key(s string) tea.KeyMsg {
 	}
 }
 
-func TestInit_LoadsViaList(t *testing.T) {
-	fs := &fakeStore{listResp: &store.ListResponse{Memories: []store.Memory{{ID: "mem_a"}, {ID: "mem_b"}}}}
+func TestInit_LoadsListAndCounts(t *testing.T) {
+	fs := &fakeStore{
+		listResp:   &store.ListResponse{Memories: []store.Memory{{ID: "mem_a"}, {ID: "mem_b"}}},
+		countsResp: &store.CountsResponse{ByKind: map[string]int{"user_rule": 3}, Total: 3},
+	}
 	m := New(fs)
-	msg, ok := runCmd(m.Init()).(itemsMsg)
-	if !ok {
-		t.Fatal("Init did not produce itemsMsg")
+	msgs := collect(m.Init())
+	items, ok := firstOf[itemsMsg](msgs)
+	if !ok || items.gen != 0 || len(items.items) != 2 {
+		t.Errorf("init list load = %+v, want gen 0 / 2 items", items)
 	}
-	if msg.gen != 0 || len(msg.items) != 2 {
-		t.Errorf("init load = gen %d, %d items; want gen 0, 2 items", msg.gen, len(msg.items))
+	if _, ok := firstOf[countsMsg](msgs); !ok {
+		t.Error("init did not load counts")
 	}
-	if fs.listCalls != 1 || fs.searchCalls != 0 {
-		t.Errorf("init used list=%d search=%d, want list=1 search=0", fs.listCalls, fs.searchCalls)
+	if fs.listCalls != 1 || fs.countsCalls != 1 {
+		t.Errorf("init calls list=%d counts=%d, want 1/1", fs.listCalls, fs.countsCalls)
+	}
+}
+
+func TestCountsMsg_StoredForSidebar(t *testing.T) {
+	m := New(&fakeStore{})
+	m, _ = upd(t, m, countsMsg{counts: map[string]int{"task_pattern": 7}, total: 12})
+	if m.total != 12 || m.counts["task_pattern"] != 7 {
+		t.Errorf("counts not stored: total=%d task_pattern=%d", m.total, m.counts["task_pattern"])
 	}
 }
 
@@ -163,19 +223,70 @@ func TestTyping_BumpsGenAndDebounces(t *testing.T) {
 	}
 }
 
-func TestEnter_OpensDetailViaGetRow(t *testing.T) {
-	fs := &fakeStore{getResp: &store.Memory{ID: "mem_x", Title: "T", What: "w", Learned: "l"}}
+func TestTab_CyclesPaneFocus(t *testing.T) {
+	m := New(&fakeStore{}) // starts focusList
+	m, _ = upd(t, m, key("tab"))
+	if m.focus != focusDetail {
+		t.Errorf("tab from list → %v, want detail", m.focus)
+	}
+	m, _ = upd(t, m, key("tab"))
+	if m.focus != focusSidebar {
+		t.Errorf("tab from detail → %v, want sidebar", m.focus)
+	}
+	m, _ = upd(t, m, key("shift+tab"))
+	if m.focus != focusDetail {
+		t.Errorf("shift+tab from sidebar → %v, want detail", m.focus)
+	}
+}
+
+func TestSidebarNav_ChangesKindAndReloads(t *testing.T) {
+	fs := &fakeStore{}
 	m := New(fs)
-	m.list.SetItems(listOf("mem_x"))
-	m, cmd := upd(t, m, key("enter"))
-	if m.state != stateDetail {
-		t.Fatalf("state = %v, want detail", m.state)
+	m.focus = focusSidebar
+	m, cmd := upd(t, m, key("down")) // all → session_summary
+	if m.query.kind != "session_summary" {
+		t.Errorf("kind after one down = %q, want session_summary", m.query.kind)
 	}
-	if _, ok := runCmd(cmd).(detailMsg); !ok {
-		t.Fatal("enter did not produce detailMsg")
+	runCmd(cmd)
+	if fs.lastList.Kind != "session_summary" {
+		t.Errorf("reload kind filter = %q, want session_summary", fs.lastList.Kind)
 	}
-	if fs.getCalls != 1 || fs.lastGetID != "mem_x" {
-		t.Errorf("GetRow calls=%d id=%q, want 1/mem_x", fs.getCalls, fs.lastGetID)
+}
+
+func TestListNav_DetailFollowsCursor(t *testing.T) {
+	fs := &fakeStore{getResp: &store.Memory{ID: "mem_b", Title: "T"}}
+	m := New(fs)
+	m.focus = focusList
+	m.list.SetItems(listOf("mem_a", "mem_b"))
+	m, cmd := upd(t, m, key("down")) // move to mem_b → detail should load it
+	msgs := collect(cmd)
+	if _, ok := firstOf[detailMsg](msgs); !ok {
+		t.Fatal("list nav did not load detail")
+	}
+	if fs.lastGetID != "mem_b" {
+		t.Errorf("detail loaded id=%q, want mem_b", fs.lastGetID)
+	}
+	_ = m
+}
+
+func TestEnter_FocusesDetailPane(t *testing.T) {
+	m := New(&fakeStore{})
+	m.focus = focusList
+	m, _ = upd(t, m, key("enter"))
+	if m.focus != focusDetail {
+		t.Errorf("enter → focus %v, want detail", m.focus)
+	}
+}
+
+func TestCtrlG_TogglesGraphTab(t *testing.T) {
+	m := New(&fakeStore{})
+	m, _ = upd(t, m, key("ctrl+g"))
+	if m.tab != tabGraph {
+		t.Errorf("ctrl+g → tab %v, want graph", m.tab)
+	}
+	m, _ = upd(t, m, key("ctrl+g"))
+	if m.tab != tabMemories {
+		t.Errorf("second ctrl+g → tab %v, want memories", m.tab)
 	}
 }
 
@@ -185,13 +296,13 @@ func TestDelete_ConfirmPruneReload(t *testing.T) {
 	m.list.SetItems(listOf("mem_x"))
 
 	m, _ = upd(t, m, key("ctrl+d"))
-	if m.state != stateConfirm || m.confirmTarget.id != "mem_x" {
-		t.Fatalf("ctrl+d → state=%v target=%q, want confirm/mem_x", m.state, m.confirmTarget.id)
+	if m.mode != modeConfirm || m.confirmTarget.id != "mem_x" {
+		t.Fatalf("ctrl+d → mode=%v target=%q, want confirm/mem_x", m.mode, m.confirmTarget.id)
 	}
 
 	m, cmd := upd(t, m, key("y"))
-	if m.state != stateList {
-		t.Errorf("post-confirm state = %v, want list", m.state)
+	if m.mode != modeNormal {
+		t.Errorf("post-confirm mode = %v, want normal", m.mode)
 	}
 	if _, ok := runCmd(cmd).(deletedMsg); !ok {
 		t.Fatal("confirm-y did not produce deletedMsg")
@@ -200,14 +311,14 @@ func TestDelete_ConfirmPruneReload(t *testing.T) {
 		t.Errorf("prune = %d %+v, want 1 call ID=mem_x Apply=true", fs.pruneCalls, fs.lastPrune)
 	}
 
-	// deletedMsg triggers a reload of the current descriptor.
+	// deletedMsg triggers a reload of the current descriptor + a counts refresh.
 	genBefore := m.gen
 	m, cmd = upd(t, m, deletedMsg{})
 	if m.gen != genBefore+1 {
 		t.Errorf("deletedMsg did not bump gen: %d → %d", genBefore, m.gen)
 	}
-	if _, ok := runCmd(cmd).(itemsMsg); !ok {
-		t.Error("deletedMsg did not reload")
+	if _, ok := firstOf[itemsMsg](collect(cmd)); !ok {
+		t.Error("deletedMsg did not reload the list")
 	}
 }
 
@@ -217,8 +328,8 @@ func TestConfirm_CancelDoesNotPrune(t *testing.T) {
 	m.list.SetItems(listOf("mem_x"))
 	m, _ = upd(t, m, key("ctrl+d"))
 	m, _ = upd(t, m, key("n"))
-	if m.state != stateList {
-		t.Errorf("cancel → state %v, want list", m.state)
+	if m.mode != modeNormal {
+		t.Errorf("cancel → mode %v, want normal", m.mode)
 	}
 	if fs.pruneCalls != 0 {
 		t.Errorf("cancel pruned anyway: %d calls", fs.pruneCalls)
@@ -232,18 +343,5 @@ func TestItemsMsg_ClampsCursor(t *testing.T) {
 	m, _ = upd(t, m, itemsMsg{gen: m.gen, items: listOf("a")})
 	if idx := m.list.Index(); idx != 0 {
 		t.Errorf("cursor after shrink = %d, want 0 (clamped)", idx)
-	}
-}
-
-func TestTab_CyclesKindAndReloads(t *testing.T) {
-	fs := &fakeStore{}
-	m := New(fs)
-	m, cmd := upd(t, m, key("tab"))
-	if m.query.kind != "error_resolution" {
-		t.Errorf("kind after one tab = %q, want error_resolution", m.query.kind)
-	}
-	runCmd(cmd)
-	if fs.lastList.Kind != "error_resolution" {
-		t.Errorf("reload kind filter = %q, want error_resolution", fs.lastList.Kind)
 	}
 }
