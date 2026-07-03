@@ -8,9 +8,10 @@ import (
 )
 
 // stamp fingerprints the repo's Go source state: count, total size, and max
-// mtime of every .go file. Any edit, add, or delete moves it. Deliberately
-// not git-aware — uncommitted edits must invalidate the graph too, and the
-// same path covers non-git repos.
+// mtime of every .go file plus module files (go.mod/go.sum/go.work), since
+// dependency changes alter go/packages analysis and call edges. Any edit, add,
+// or delete moves it. Deliberately not git-aware — uncommitted edits must
+// invalidate the graph too, and the same path covers non-git repos.
 func stamp(repo string) (string, error) {
 	var count int
 	var size, maxMtime int64
@@ -25,7 +26,7 @@ func stamp(repo string) (string, error) {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(p, ".go") {
+		if !strings.HasSuffix(p, ".go") && !isModuleFile(d.Name()) {
 			return nil
 		}
 		info, err := d.Info()
@@ -43,4 +44,10 @@ func stamp(repo string) (string, error) {
 		return "", fmt.Errorf("stamp %s: %w", repo, err)
 	}
 	return fmt.Sprintf("v1:%d:%d:%d", count, size, maxMtime), nil
+}
+
+// isModuleFile reports whether name is a Go module manifest whose changes can
+// alter package resolution and thus the call graph.
+func isModuleFile(name string) bool {
+	return name == "go.mod" || name == "go.sum" || name == "go.work" || name == "go.work.sum"
 }

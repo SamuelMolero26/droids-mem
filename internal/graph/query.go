@@ -116,8 +116,11 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 		if err != nil {
 			return nil, err
 		}
-		if len(targets) != 1 {
-			return nil, fmt.Errorf("path target %q: %w (need exactly one match)", req.To, ErrNotFound)
+		if len(targets) == 0 {
+			return nil, fmt.Errorf("path target %q: %w", req.To, ErrNotFound)
+		}
+		if len(targets) > 1 {
+			return nil, fmt.Errorf("path target %q is ambiguous (%d matches) — use an exact qname", req.To, len(targets))
 		}
 		path, err := callPath(conn, id, targets[0].QName)
 		if err != nil {

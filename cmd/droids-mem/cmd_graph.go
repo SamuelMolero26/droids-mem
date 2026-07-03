@@ -88,6 +88,7 @@ automatically when the repo changes. See docs/adr/0020-native-code-graph.md.`,
 			})
 			if err != nil {
 				writeGraphErr(err)
+				return nil
 			}
 			writeJSON(resp)
 			return nil
@@ -114,6 +115,7 @@ automatically when the repo changes. See docs/adr/0020-native-code-graph.md.`,
 			})
 			if err != nil {
 				writeGraphErr(err)
+				return nil
 			}
 			writeJSON(resp)
 			return nil

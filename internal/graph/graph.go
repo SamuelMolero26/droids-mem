@@ -175,7 +175,10 @@ func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, Freshn
 // perspective): callers treat conn==nil as "no graph yet".
 func (m *Manager) open(path string) (*sql.DB, Freshness, error) {
 	if _, err := os.Stat(path); err != nil {
-		return nil, Freshness{}, nil // absent db is not an error: "no graph yet"
+		if os.IsNotExist(err) {
+			return nil, Freshness{}, nil // absent db is not an error: "no graph yet"
+		}
+		return nil, Freshness{}, fmt.Errorf("stat graph db: %w", err)
 	}
 	m.mu.Lock()
 	conn, ok := m.conns[path]
