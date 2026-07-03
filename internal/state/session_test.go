@@ -135,6 +135,35 @@ func TestInjectedSet(t *testing.T) {
 	}
 }
 
+func TestFilesSentinel_AppendDedupClear(t *testing.T) {
+	withHome(t)
+	if f, _ := ReadFiles("cc-1"); len(f) != 0 {
+		t.Errorf("initial files = %v, want empty", f)
+	}
+	if err := AppendFiles("cc-1", []string{"a.go", "b.go"}); err != nil {
+		t.Fatalf("AppendFiles: %v", err)
+	}
+	if err := AppendFiles("cc-1", []string{"a.go", "c.go"}); err != nil { // a.go repeats
+		t.Fatalf("AppendFiles: %v", err)
+	}
+	files, _ := ReadFiles("cc-1")
+	want := []string{"a.go", "b.go", "c.go"}
+	if len(files) != len(want) {
+		t.Fatalf("files = %v, want deduped %v", files, want)
+	}
+	for i, w := range want {
+		if files[i] != w {
+			t.Errorf("files[%d] = %q, want %q (order-preserving dedup)", i, files[i], w)
+		}
+	}
+	if err := ClearSession("cc-1"); err != nil {
+		t.Fatalf("ClearSession: %v", err)
+	}
+	if f, _ := ReadFiles("cc-1"); len(f) != 0 {
+		t.Error("files sentinel should be cleared")
+	}
+}
+
 func TestSafeID_RejectsTraversal(t *testing.T) {
 	withHome(t)
 	for _, bad := range []string{"", "../escape", "a/b", "has space", "semi;colon"} {

@@ -56,6 +56,18 @@ CREATE INDEX IF NOT EXISTS idx_memories_created_at        ON memories(created_at
 -- (recent-sessions: WHERE origin='auto' ORDER BY created_at DESC LIMIT N) and
 -- the origin-keyed eviction scan (ADR-0016). Never joined on FTS.
 CREATE INDEX IF NOT EXISTS idx_memories_origin_created    ON memories(origin, created_at DESC);
+
+-- memory_files is the file-provenance relation (ADR-0021 Phase 2): the files a
+-- Claude Code session read or changed, keyed by the droids-mem session_id the
+-- session's memories carry. Orthogonal to the Memory model — never joined to
+-- memories_fts, never scrubbed, deduped, or retained; it feeds the future Graph
+-- tab's file→graph-node join. Composite PK dedupes repeat touches of a file.
+CREATE TABLE IF NOT EXISTS memory_files (
+    session_id TEXT    NOT NULL,
+    file_path  TEXT    NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (session_id, file_path)
+);
 `
 
 // FTSSchema is the FTS5 virtual table + the three sync triggers (AI/AD/AU).

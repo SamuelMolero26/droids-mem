@@ -73,9 +73,10 @@ type itemsMsg struct {
 	err   error
 }
 type detailMsg struct {
-	gen int
-	mem *store.Memory
-	err error
+	gen       int
+	mem       *store.Memory
+	neighbors []store.Neighbor
+	err       error
 }
 type countsMsg struct {
 	counts map[string]int
@@ -177,7 +178,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detail.SetContent(bodyStyle.Render("open failed: " + msg.err.Error()))
 			return m, nil
 		}
-		m.detail.SetContent(renderDetail(msg.mem, m.detail.Width))
+		m.detail.SetContent(renderDetail(msg.mem, msg.neighbors, m.detail.Width))
 		m.detail.GotoTop()
 		return m, nil
 
@@ -352,8 +353,13 @@ func (m Model) detailCmd(gen int, id string) tea.Cmd {
 		if id == "" {
 			return detailMsg{gen: gen, mem: nil}
 		}
-		mem, err := s.GetRow(context.Background(), id) // non-counting: no Expand signal
-		return detailMsg{gen: gen, mem: mem, err: err}
+		ctx := context.Background()
+		mem, err := s.GetRow(ctx, id) // non-counting: no Expand signal
+		if err != nil || mem == nil {
+			return detailMsg{gen: gen, mem: mem, err: err}
+		}
+		neighbors, _ := s.Neighbors(ctx, id, 0) // best-effort: no connections on error
+		return detailMsg{gen: gen, mem: mem, neighbors: neighbors}
 	}
 }
 

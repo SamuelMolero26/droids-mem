@@ -21,4 +21,5 @@ type memStore interface {
 	GetRow(context.Context, string) (*store.Memory, error)
 	Prune(context.Context, store.PruneRequest) (*store.PruneResponse, error)
 	Counts(context.Context) (*store.CountsResponse, error)
+	Neighbors(context.Context, string, int) ([]store.Neighbor, error)
 }

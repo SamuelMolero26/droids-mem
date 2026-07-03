@@ -18,10 +18,10 @@ func TestView_RendersThreePanes(t *testing.T) {
 	m, _ = upd(t, m, detailMsg{gen: m.detailGen, mem: &store.Memory{
 		ID: "mem_a", Title: "Hello", Kind: "user_rule", TaskType: "droids-mem",
 		Tags: "tui redesign", What: "what body", Learned: "learned body",
-	}})
+	}, neighbors: []store.Neighbor{{ID: "mem_b", Kind: "task_pattern", Title: "Related lesson", Score: 0.4}}})
 
 	out := m.View()
-	for _, want := range []string{"droids", "Memories", "KINDS", "all", "9 memories", "Hello", "MEMORY", "CONNECTIONS"} {
+	for _, want := range []string{"droids", "Memories", "KINDS", "all", "9 memories", "Hello", "MEMORY", "CONNECTIONS", "Related lesson"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("view missing %q", want)
 		}
