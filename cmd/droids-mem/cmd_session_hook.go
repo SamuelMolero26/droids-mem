@@ -19,6 +19,12 @@ type hookInput struct {
 	SessionID     string `json:"session_id"`
 	Prompt        string `json:"prompt"`
 	ToolName      string `json:"tool_name"`
+	// ToolInput is the tool's argument object; only the file-path fields matter
+	// here (file-provenance capture, ADR-0021 Phase 2).
+	ToolInput struct {
+		FilePath     string `json:"file_path"`
+		NotebookPath string `json:"notebook_path"`
+	} `json:"tool_input"`
 	// StopHookActive is true when the turn is already continuing because a Stop
 	// hook blocked it. Blocking again while it's set loops until the host's cap
 	// force-ends the turn, so the Stop case must stand down.
@@ -31,6 +37,26 @@ type hookInput struct {
 // sessions, forcing a summary turn where nothing changed.
 var meaningfulTools = map[string]bool{
 	"Edit": true, "Write": true, "MultiEdit": true, "NotebookEdit": true,
+}
+
+// fileTools are the PostToolUse tools whose tool_input names a file the session
+// read or changed (ADR-0021 Phase 2 provenance). Includes Read — a file the
+// session read is provenance too — but not Bash (its arg is a command, not a
+// path).
+var fileTools = map[string]bool{
+	"Read": true, "Edit": true, "Write": true, "MultiEdit": true, "NotebookEdit": true,
+}
+
+// hookFilePath extracts the touched file path from a hook's tool_input, or ""
+// when the tool carries none.
+func hookFilePath(in hookInput) string {
+	if !fileTools[in.ToolName] {
+		return ""
+	}
+	if in.ToolInput.FilePath != "" {
+		return in.ToolInput.FilePath
+	}
+	return in.ToolInput.NotebookPath
 }
 
 // newSessionHookCmd is the native Claude Code hook entry point: one command,
@@ -59,6 +85,11 @@ func newSessionHookCmd(a *app) *cobra.Command {
 			case "posttooluse":
 				if in.SessionID != "" && meaningfulTools[in.ToolName] {
 					_, _ = state.IncrementChange(in.SessionID)
+				}
+				if in.SessionID != "" {
+					if fp := hookFilePath(in); fp != "" {
+						_ = state.AppendFiles(in.SessionID, []string{fp})
+					}
 				}
 			case "stop":
 				if in.SessionID != "" && !in.StopHookActive && sessionNeedsStage(in.SessionID) {
