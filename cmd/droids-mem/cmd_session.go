@@ -31,8 +31,36 @@ func newSessionCmd(a *app) *cobra.Command {
 		newSessionFlushCmd(a),
 		newSessionRecoverCmd(a),
 		newSessionPullCmd(a),
+		newSessionFilesCmd(a),
 		newSessionHookCmd(a),
 	)
+	return cmd
+}
+
+// newSessionFilesCmd reports the file provenance recorded for a droids-mem
+// session_id (ADR-0021 Phase 2) — the files a run read or changed, keyed by the
+// session_id its memories carry. Operator/inspection surface, not on MCP.
+func newSessionFilesCmd(a *app) *cobra.Command {
+	var sessionID string
+	cmd := &cobra.Command{
+		Use:   "files",
+		Short: "List the file provenance recorded for a droids-mem session_id",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			s, err := a.store()
+			if err != nil {
+				return err
+			}
+			paths, err := s.FilesForSession(cmd.Context(), sessionID)
+			if err != nil {
+				writeError("files_failed", err.Error(), true)
+				exitWith(ExitError)
+			}
+			writeJSON(map[string]any{"session_id": sessionID, "files": paths, "total": len(paths)})
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&sessionID, "session-id", "", "droids-mem session_id (required)")
+	_ = cmd.MarkFlagRequired("session-id")
 	return cmd
 }
 
@@ -348,6 +376,16 @@ func flushSession(ctx context.Context, s *store.Store, ccID string) flushResult 
 	if staged == nil {
 		return flushResult{reason: "no_staged"}
 	}
+	// File provenance (ADR-0021 Phase 2) is independent of the intake gate: the
+	// files a run touched are worth recording even when the summary is too thin
+	// to flush — otherwise trivial runs (few edits, no Bash counting) drop their
+	// provenance. Record up front when the run carries an explicit session_id (the
+	// only case where the key is known before a save mints one).
+	files, _ := state.ReadFiles(ccID)
+	if staged.SessionID != "" && len(files) > 0 {
+		_ = s.RecordFiles(ctx, staged.SessionID, files)
+	}
+
 	count, err := state.ChangeCount(ccID)
 	if err != nil {
 		return flushResult{reason: "unreadable_count", err: err}
@@ -368,6 +406,11 @@ func flushSession(ctx context.Context, s *store.Store, ccID string) flushResult 
 	})
 	if err != nil {
 		return flushResult{reason: "save_failed", err: err}
+	}
+	// If the summary minted its own session_id (none was staged), attach the
+	// provenance now — best-effort, never a reason to fail the flush.
+	if staged.SessionID == "" && len(files) > 0 {
+		_ = s.RecordFiles(ctx, resp.SessionID, files)
 	}
 	return flushResult{flushed: true, id: resp.ID, sessionID: resp.SessionID}
 }

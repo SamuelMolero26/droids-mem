@@ -7,7 +7,7 @@ import (
 
 // CurrentSchemaVersion is the user_version that a fully-initialized
 // database reports. Bump when adding a new entry to the migrations ladder.
-const CurrentSchemaVersion = 3
+const CurrentSchemaVersion = 4
 
 // migration is one rung in the PRAGMA user_version ladder. Each rung runs
 // inside its own transaction; partial failure rolls back atomically.
@@ -33,6 +33,7 @@ var migrations = []migration{
 	{from: 0, to: 1, sql: migrationV0ToV1},
 	{from: 1, to: 2, sql: migrationV1ToV2},
 	{from: 2, to: 3, sql: migrationV2ToV3},
+	{from: 3, to: 4, sql: migrationV3ToV4},
 }
 
 const migrationV0ToV1 = `
@@ -81,6 +82,19 @@ const migrationV2ToV3 = `
 ALTER TABLE memories ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'
     CHECK(origin IN ('manual','auto'));
 CREATE INDEX IF NOT EXISTS idx_memories_origin_created ON memories(origin, created_at DESC);
+`
+
+// migrationV3ToV4 adds the file-provenance relation (ADR-0021 Phase 2): a new
+// orthogonal table only, no touch to memories, FTS, the scrub baseline, or the
+// boot gate. Purely additive — CREATE TABLE IF NOT EXISTS on a table no
+// pre-v4 DB has. Auto-applied at boot via the ladder; no `migrate` required.
+const migrationV3ToV4 = `
+CREATE TABLE IF NOT EXISTS memory_files (
+    session_id TEXT    NOT NULL,
+    file_path  TEXT    NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (session_id, file_path)
+);
 `
 
 // Migrate advances db's schema from its current user_version up to
