@@ -8,12 +8,6 @@ import (
 	"github.com/samuelmolero26/droids-mem/internal/store"
 )
 
-// tab-bar geometry, reused by the header and its gradient underline.
-const (
-	logoGap = 4 // spaces between logo and the tab bar
-	tabGap  = 3 // spaces between tabs
-)
-
 func (m Model) View() string {
 	if !m.ready {
 		return "loading…"
@@ -21,7 +15,6 @@ func (m Model) View() string {
 	bodyH := max(1, m.height-6)
 	rows := []string{
 		m.headerView(),
-		m.underlineView(),
 		m.searchView(),
 		hrule(m.width),
 		m.bodyView(bodyH),
@@ -35,34 +28,11 @@ func (m Model) logoText() string {
 	return logoGlyph.Render("◉") + " " + logoStyle.Render("droids") + logoDim.Render("-mem")
 }
 
-// tabBar renders the Memories/Graph tabs and returns the rendered string.
-func (m Model) tabBar() string {
-	mem, graph := tabInactive, tabInactive
-	if m.tab == tabMemories {
-		mem = tabActive
-	} else {
-		graph = tabActive
-	}
-	return mem.Render("Memories") + strings.Repeat(" ", tabGap) + graph.Render("Graph")
-}
-
 func (m Model) headerView() string {
-	left := m.logoText() + strings.Repeat(" ", logoGap) + m.tabBar()
+	left := m.logoText()
 	right := headerCount.Render(fmt.Sprintf("%d memories", m.total)) + " " + kbdBadge.Render("⌘K")
 	gap := max(1, m.width-lipgloss.Width(left)-lipgloss.Width(right))
 	return chromeRow(m.width).Render(left + strings.Repeat(" ", gap) + right)
-}
-
-// underlineView draws the magenta→indigo gradient bar beneath the active tab.
-func (m Model) underlineView() string {
-	offset := lipgloss.Width(m.logoText()) + logoGap
-	label := "Memories"
-	if m.tab == tabGraph {
-		offset += lipgloss.Width("Memories") + tabGap
-		label = "Graph"
-	}
-	bar := gradientBar(lipgloss.Width(label), colGradA, colGradB)
-	return chromeRow(m.width).Render(strings.Repeat(" ", offset) + bar)
 }
 
 func (m Model) searchView() string {
@@ -72,14 +42,8 @@ func (m Model) searchView() string {
 	return chromeRow(m.width).Render(left + strings.Repeat(" ", gap) + pill)
 }
 
-// bodyView composes the three borderless columns separated by vertical rules,
-// or the Graph stub.
+// bodyView composes the three borderless columns separated by vertical rules.
 func (m Model) bodyView(bodyH int) string {
-	if m.tab == tabGraph {
-		return lipgloss.NewStyle().Foreground(colMeta).
-			Width(m.width).Height(bodyH).Align(lipgloss.Center, lipgloss.Center).
-			Render("codebase graph — coming soon\n\ncode graph + memory overlay (ADR-0021 Phase 3)")
-	}
 	inner := max(20, m.width-sidebarWidth-2)
 	detailW := inner * 34 / 100
 	listW := inner - detailW
@@ -95,7 +59,7 @@ func (m Model) bodyView(bodyH int) string {
 	return row
 }
 
-// sidebarView renders the KINDS census and the VIEWS card.
+// sidebarView renders the KINDS census.
 func (m Model) sidebarView() string {
 	var b strings.Builder
 	b.WriteString(sectionLabel.Render("KINDS"))
@@ -116,19 +80,13 @@ func (m Model) sidebarView() string {
 		b.WriteString(count)
 		b.WriteByte('\n')
 	}
-	b.WriteString("\n")
-	b.WriteString(sectionLabel.Render("VIEWS"))
-	b.WriteString("\n\n")
-	card := logoGlyph.Render("◈") + " " + "codebase graph\n" + cardHint.Render("^g to open")
-	b.WriteString(cardStyle.Width(sidebarWidth - 4).Render(card))
 	return b.String()
 }
 
 func (m Model) footerView() string {
 	left := footerKey.Render("↵") + footerStyle.Render(" open   ") +
 		footerKey.Render("^d") + footerStyle.Render(" delete   ") +
-		footerKey.Render("⇥") + footerStyle.Render(" kind   ") +
-		footerKey.Render("^g") + footerStyle.Render(" graph")
+		footerKey.Render("⇥") + footerStyle.Render(" kind")
 	right := footerKey.Render("esc") + footerStyle.Render(" quit")
 	if m.status != "" {
 		left = footerStyle.Render(m.status) + "   " + left
@@ -173,23 +131,53 @@ func renderDetail(mem *store.Memory, neighbors []store.Neighbor, w int) string {
 	return b.String()
 }
 
-// renderConnections lists related memories as one line each: a similarity dot,
-// the title (truncated to fit), and a dim kind tag. Empty → a dim placeholder.
+// renderConnections draws the vertical connection spine (Connection Layout
+// mockup): a hollow anchor ring labeled "current memory", then each neighbor
+// as a kind-colored dot + dash + two-line entry (title, dim kind label),
+// linked by a spine line down the left column.
 func renderConnections(neighbors []store.Neighbor, wrap int) string {
-	if len(neighbors) == 0 {
-		return metaStyle.Render("no related memories")
-	}
 	var b strings.Builder
-	for i, n := range neighbors {
-		if i > 0 {
-			b.WriteByte('\n')
-		}
-		tag := metaStyle.Render(n.Kind)
-		room := max(10, wrap-lipgloss.Width(tag)-4) // "• " + space before tag
-		b.WriteString(connDot.Render("• "))
-		b.WriteString(connTitle.Render(truncate(n.Title, room)))
+	b.WriteString(connRing.Render("○"))
+	b.WriteByte(' ')
+	b.WriteString(connTitle.Render("current memory"))
+	if len(neighbors) == 0 {
+		b.WriteByte('\n')
+		b.WriteString(connSpine.Render("│"))
+		b.WriteByte('\n')
+		b.WriteString(metaStyle.Render("no related memories"))
+		return b.String()
+	}
+	room := max(10, wrap-2) // "●─" prefix
+	for _, n := range neighbors {
+		b.WriteByte('\n')
+		b.WriteString(connSpine.Render("│"))
+		b.WriteByte('\n')
+		b.WriteString(connDotStyle(n.Kind).Render("●"))
+		b.WriteString(connSpine.Render("─"))
 		b.WriteByte(' ')
-		b.WriteString(tag)
+		b.WriteString(connTitle.Render(truncate(n.Title, room)))
+		b.WriteByte('\n')
+		b.WriteString(connSpine.Render("│"))
+		b.WriteString("  ")
+		b.WriteString(connMeta.Render(n.Kind))
 	}
 	return b.String()
+}
+
+// connDotStyle maps a Memory Kind to its spine dot color (Connection Layout
+// mockup showed session_summary/error_resolution; task_pattern/user_rule reuse
+// existing theme accents rather than inventing new hexes).
+func connDotStyle(kind string) lipgloss.Style {
+	switch kind {
+	case "error_resolution":
+		return lipgloss.NewStyle().Foreground(colDanger)
+	case "session_summary":
+		return lipgloss.NewStyle().Foreground(colConnBlue)
+	case "task_pattern":
+		return lipgloss.NewStyle().Foreground(colSelect)
+	case "user_rule":
+		return lipgloss.NewStyle().Foreground(colAccent)
+	default:
+		return lipgloss.NewStyle().Foreground(colMeta)
+	}
 }

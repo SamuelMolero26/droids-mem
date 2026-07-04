@@ -30,14 +30,6 @@ const (
 	focusDetail
 )
 
-// tab is the top-bar view. Graph is a deferred stub (ADR-0021 Phase 3).
-type tab int
-
-const (
-	tabMemories tab = iota
-	tabGraph
-)
-
 // mode is a modal sub-state that steals keys from the normal flow.
 type mode int
 
@@ -91,7 +83,6 @@ type Model struct {
 	store memStore
 	mode  mode
 	focus focus
-	tab   tab
 
 	search textinput.Model
 	list   list.Model
@@ -235,13 +226,6 @@ func (m Model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "shift+tab":
 		m.focus = (m.focus + 2) % 3
-		return m, nil
-	case "ctrl+g":
-		if m.tab == tabMemories {
-			m.tab = tabGraph
-		} else {
-			m.tab = tabMemories
-		}
 		return m, nil
 	case "enter":
 		m.focus = focusDetail
