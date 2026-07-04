@@ -305,6 +305,11 @@ func writeGraphDB(dbPath, repo, module, stampVal string, symbols []*symRow, edge
 				return err
 			}
 		}
+		// FTS mirror for the search fallback; rowid == symbols.id for the join back.
+		if _, err := tx.Exec(`INSERT INTO symbols_fts(rowid, qname, name, doc, signature)
+			SELECT id, qname, name, doc, signature FROM symbols`); err != nil {
+			return fmt.Errorf("populate symbols_fts: %w", err)
+		}
 		for k, v := range map[string]string{
 			"stamp": stampVal, "repo": repo, "module": module, "indexed_at": nowUTC(),
 		} {
