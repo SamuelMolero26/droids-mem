@@ -36,7 +36,7 @@ type hookEvent struct {
 }
 
 var claudeHookEvents = []hookEvent{
-	{"PostToolUse", "Edit|Write|MultiEdit|NotebookEdit|Bash"},
+	{"PostToolUse", "Edit|Write|MultiEdit|NotebookEdit"},
 	{"Stop", ""},
 	{"SessionEnd", ""},
 	{"SessionStart", ""},
