@@ -148,3 +148,78 @@ func TestSymbolNotFound(t *testing.T) {
 		t.Fatalf("want ErrNotFound, got %v", err)
 	}
 }
+
+// transitive_callers reports blast size on an exact match, and is absent on a
+// search-menu response (no single symbol to score).
+func TestTransitiveCallers(t *testing.T) {
+	m, repo := testManager(t)
+	ctx := context.Background()
+
+	// main → Announce, so Announce's up-closure is {main} = 1; main has none.
+	resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.TransitiveCallers == nil || *resp.TransitiveCallers != 1 {
+		t.Errorf("Announce transitive_callers = %v, want 1", resp.TransitiveCallers)
+	}
+	resp, err = m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.TransitiveCallers == nil || *resp.TransitiveCallers != 0 {
+		t.Errorf("main transitive_callers = %v, want 0", resp.TransitiveCallers)
+	}
+}
+
+// A name that doesn't resolve falls back to a BM25 search menu instead of
+// not-found, with no scored symbol attached.
+func TestSearchFallback(t *testing.T) {
+	m, repo := testManager(t)
+	resp, err := m.Symbol(context.Background(), SymbolRequest{Repo: repo, Symbol: "greeting through interface"})
+	if err != nil {
+		t.Fatalf("search fallback errored: %v", err)
+	}
+	if resp.Symbol != nil {
+		t.Errorf("search response should carry no exact symbol, got %+v", resp.Symbol)
+	}
+	if len(resp.Matches) == 0 {
+		t.Fatal("search fallback returned no matches")
+	}
+	if resp.TransitiveCallers != nil {
+		t.Errorf("search menu should not score a symbol, got %v", *resp.TransitiveCallers)
+	}
+	if resp.Hint != searchHint {
+		t.Errorf("hint = %q, want searchHint", resp.Hint)
+	}
+}
+
+// A _test.go edit must NOT move the stamp (test files are never indexed, so a
+// rebuild would be pure waste); a source .go edit must.
+func TestStampIgnoresTestFiles(t *testing.T) {
+	repo := t.TempDir()
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module x\n\ngo 1.21\n")
+	write("a.go", "package x\n\nfunc A() {}\n")
+	write("a_test.go", "package x\n")
+
+	base, err := stamp(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	future := time.Now().Add(2 * time.Second)
+	_ = os.Chtimes(filepath.Join(repo, "a_test.go"), future, future)
+	if s, _ := stamp(repo); s != base {
+		t.Errorf("test-file edit moved stamp: %q → %q", base, s)
+	}
+
+	_ = os.Chtimes(filepath.Join(repo, "a.go"), future, future)
+	if s, _ := stamp(repo); s == base {
+		t.Errorf("source edit did not move stamp: still %q", base)
+	}
+}

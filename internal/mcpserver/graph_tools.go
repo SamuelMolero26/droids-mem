@@ -32,11 +32,11 @@ type graphSymbolArgs struct {
 
 func graphSymbolToolDef() mcp.Tool {
 	return mcp.NewTool("graph_symbol",
-		mcp.WithDescription("Query the code graph of a Go repo anchored on one symbol — use this INSTEAD of grep/file-reading to understand code. Returns the symbol's full source plus its callers/callees as one-line signature stubs (interface dispatch resolved). depth>1 with direction=up gives blast radius (everything that transitively calls it); 'to' gives the call path between two symbols. To read a stub's body, call again with its exact qname. The graph auto-rebuilds when the repo changed; a 'stale' freshness flag means the repo currently does not compile and the last good graph is being served."),
+		mcp.WithDescription("Query the code graph of a Go repo anchored on one symbol — use this INSTEAD of grep/file-reading to understand code. Returns the symbol's full source plus its callers/callees as one-line signature stubs (interface dispatch resolved) and 'transitive_callers': the blast size (how many symbols transitively call it) so you know if a change is risky before walking it. depth>1 with direction=up lists that blast radius; 'to' gives the call path between two symbols. To read a stub's body, call again with its exact qname. SEARCH FALLBACK: if 'symbol' does not resolve to a name, it is treated as a task phrase and you get a relevance-ranked 'matches' menu of signatures — re-query with one of their qnames for full context. The graph auto-rebuilds when the repo changed; a 'stale' freshness flag means the repo currently does not compile and the last good graph is being served."),
 		mcp.WithString("repo", mcp.Required(),
 			mcp.Description("Absolute path to the repo root (your project working directory).")),
 		mcp.WithString("symbol", mcp.Required(),
-			mcp.Description("Symbol name ('Save'), receiver-qualified ('Store.Save'), or exact qname from a previous response ('internal/store.Store.Save').")),
+			mcp.Description("A symbol name ('Save'), receiver-qualified ('Store.Save'), or exact qname ('internal/store.Store.Save') — OR a free-text task phrase ('dedupe race on save') to search when you don't know the name.")),
 		mcp.WithString("direction",
 			mcp.Description("Which edges to follow: up (callers — who depends on this), down (callees — what this uses), both (default)."),
 			mcp.Enum("up", "down", "both"),

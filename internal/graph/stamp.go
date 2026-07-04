@@ -8,10 +8,15 @@ import (
 )
 
 // stamp fingerprints the repo's Go source state: count, total size, and max
-// mtime of every .go file plus module files (go.mod/go.sum/go.work), since
-// dependency changes alter go/packages analysis and call edges. Any edit, add,
-// or delete moves it. Deliberately not git-aware — uncommitted edits must
+// mtime of every non-test .go file plus module files (go.mod/go.sum/go.work),
+// since dependency changes alter go/packages analysis and call edges. Any edit,
+// add, or delete moves it. Deliberately not git-aware — uncommitted edits must
 // invalidate the graph too, and the same path covers non-git repos.
+//
+// _test.go files are excluded: buildIndex loads packages with cfg.Tests unset,
+// so test files are never indexed (verified: 0 test symbols). Rebuilding on a
+// test edit would burn a full ~2.5s type-check for a graph that can't change.
+// If test indexing is ever enabled, drop the _test.go filter here in lockstep.
 func stamp(repo string) (string, error) {
 	var count int
 	var size, maxMtime int64
@@ -26,7 +31,8 @@ func stamp(repo string) (string, error) {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(p, ".go") && !isModuleFile(d.Name()) {
+		name := d.Name()
+		if !isModuleFile(name) && (!strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go")) {
 			return nil
 		}
 		info, err := d.Info()

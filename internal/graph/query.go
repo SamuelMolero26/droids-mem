@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
 )
 
 const (
@@ -16,6 +17,9 @@ const (
 	maxPkgSymbols   = 200
 	expandHint      = "neighbors are signatures only; call graph_symbol with a neighbor's exact qname to see its body"
 	ambiguousHint   = "multiple symbols share that name; re-query with one of the qnames in matches"
+	searchHint      = "no exact symbol match; these are the closest by relevance — re-query graph_symbol with one qname from matches for its full body, callers, and callees"
+	maxSeeds        = 10  // search-fallback menu size
+	blastCap        = 500 // transitive-caller count sentinel (compute + number guard)
 	staleGraphHint  = "graph is stale: the repo changed but no longer type-checks, serving the last good index"
 	pkgSymbolsLimit = "exported symbols only; query an unexported symbol by name via graph_symbol"
 )
@@ -61,7 +65,12 @@ type SymbolResponse struct {
 	Path      []Neighbor  `json:"path,omitempty"`
 	Matches   []Neighbor  `json:"matches,omitempty"`
 	Truncated bool        `json:"truncated,omitempty"`
-	Hint      string      `json:"hint,omitempty"`
+	// TransitiveCallers is the blast size: distinct symbols that transitively
+	// call this one (up-closure, capped). A pointer so 0 ("safe to change,
+	// nothing calls it") is distinct from absent (a search-menu response, no
+	// single symbol to score). Set only on an exact match.
+	TransitiveCallers *int   `json:"transitive_callers,omitempty"`
+	Hint              string `json:"hint,omitempty"`
 }
 
 // Symbol resolves and answers a symbol-anchored query against repo's graph.
@@ -81,7 +90,18 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	}
 	switch {
 	case len(rows) == 0:
-		return nil, fmt.Errorf("symbol %q: %w", req.Symbol, ErrNotFound)
+		// No name resolved — treat the input as a task phrase and hand back a
+		// BM25-ranked menu of relevant symbols (graph_symbol as search entry).
+		seeds, err := searchSymbols(conn, req.Symbol)
+		if err != nil {
+			return nil, err
+		}
+		if len(seeds) == 0 {
+			return nil, fmt.Errorf("symbol %q: %w", req.Symbol, ErrNotFound)
+		}
+		resp.Matches = seeds
+		resp.Hint = searchHint
+		return resp, nil
 	case len(rows) > 1:
 		resp.Matches = rows
 		resp.Hint = ambiguousHint
@@ -98,6 +118,12 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 		return nil, err
 	}
 	resp.Symbol = &info
+
+	tc, err := transitiveCallers(conn, id)
+	if err != nil {
+		return nil, err
+	}
+	resp.TransitiveCallers = &tc
 
 	depth := req.Depth
 	if depth < 1 {
@@ -176,6 +202,54 @@ func findSymbol(conn *sql.DB, name string) ([]Neighbor, error) {
 		}
 	}
 	return nil, nil
+}
+
+// searchSymbols ranks symbols by BM25 relevance to a free-text task phrase —
+// the fallback when a name doesn't resolve, turning graph_symbol into a search
+// entry: give it a task, get a ranked signature menu, drill the best by qname.
+func searchSymbols(conn *sql.DB, task string) ([]Neighbor, error) {
+	q := ftsQuery(task)
+	if q == "" {
+		return nil, nil
+	}
+	rows, err := conn.Query(`SELECT s.qname, s.signature, s.file, s.line
+		FROM symbols_fts f JOIN symbols s ON s.id = f.rowid
+		WHERE symbols_fts MATCH ? ORDER BY bm25(symbols_fts) LIMIT ?`, q, maxSeeds)
+	if err != nil {
+		return nil, err
+	}
+	return scanNeighbors(rows, 0)
+}
+
+// ftsQuery turns a task phrase into a safe FTS5 OR-of-terms, dropping 1-char
+// noise and quoting each token so punctuation can't inject MATCH syntax.
+func ftsQuery(s string) string {
+	fields := strings.FieldsFunc(s, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_'
+	})
+	terms := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if len(f) < 2 {
+			continue
+		}
+		terms = append(terms, `"`+f+`"`)
+	}
+	return strings.Join(terms, " OR ")
+}
+
+// transitiveCallers counts distinct symbols that transitively call id (up-
+// closure), cycle-safe (UNION dedupes), and bounded by blastCap so a hot
+// symbol on a big graph can't churn — the outer LIMIT stops the lazy CTE early.
+func transitiveCallers(conn *sql.DB, id int64) (int, error) {
+	var n int
+	err := conn.QueryRow(`
+		WITH RECURSIVE up(sym) AS (
+			SELECT caller FROM edges WHERE callee = ?
+			UNION
+			SELECT e.caller FROM edges e JOIN up ON e.callee = up.sym
+		)
+		SELECT COUNT(*) FROM (SELECT sym FROM up LIMIT ?)`, id, blastCap).Scan(&n)
+	return n, err
 }
 
 func scanNeighbors(rows *sql.Rows, depth int) ([]Neighbor, error) {

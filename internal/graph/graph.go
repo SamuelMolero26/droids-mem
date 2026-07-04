@@ -50,6 +50,13 @@ CREATE TABLE edges (
   PRIMARY KEY (caller, callee)
 ) WITHOUT ROWID;
 CREATE INDEX idx_edges_callee ON edges(callee);
+-- Ranks symbols by relevance to a free-text task phrase (the graph_symbol
+-- search fallback). rowid == symbols.id, so a MATCH joins straight back.
+-- Populated wholesale in writeGraphDB — the graph never updates in place, so
+-- no sync triggers are needed (unlike mem.db).
+CREATE VIRTUAL TABLE symbols_fts USING fts5(
+  qname, name, doc, signature, tokenize='porter unicode61'
+);
 `
 
 // ErrNotFound reports a symbol or package with no match in the graph.
@@ -132,6 +139,14 @@ func (m *Manager) dbPath(repo string) string {
 // first when the working tree changed since the stored stamp. If a rebuild
 // fails (repo does not type-check mid-edit) and a previous graph exists, that
 // graph is served with Freshness.Stale set — honest degradation over failure.
+//
+// Rebuild is a synchronous, whole-program buildIndex (go/packages + cha.CallGraph,
+// no incremental caching) blocking the caller. Measured ~2.5s on this repo, floored
+// by packages.Load type-checking the module+deps (~1.2s) — not "free", but paid ONLY
+// on a genuine source edit (the stamp excludes _test.go), and correct exactly when
+// the agent asks about what it just changed. Async serve-stale was rejected: the 2.5s
+// fires only post-edit, which is precisely when a stale answer would be wrong. Beating
+// the floor is gopls-grade incremental type-checking — not worth it for a local tool.
 func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, Freshness, error) {
 	repo, err := canonicalRepo(repo)
 	if err != nil {
