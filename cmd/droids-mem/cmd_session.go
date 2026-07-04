@@ -376,6 +376,16 @@ func flushSession(ctx context.Context, s *store.Store, ccID string) flushResult 
 	if staged == nil {
 		return flushResult{reason: "no_staged"}
 	}
+	// File provenance (ADR-0021 Phase 2) is independent of the intake gate: the
+	// files a run touched are worth recording even when the summary is too thin
+	// to flush — otherwise trivial runs (few edits, no Bash counting) drop their
+	// provenance. Record up front when the run carries an explicit session_id (the
+	// only case where the key is known before a save mints one).
+	files, _ := state.ReadFiles(ccID)
+	if staged.SessionID != "" && len(files) > 0 {
+		_ = s.RecordFiles(ctx, staged.SessionID, files)
+	}
+
 	count, err := state.ChangeCount(ccID)
 	if err != nil {
 		return flushResult{reason: "unreadable_count", err: err}
@@ -397,10 +407,9 @@ func flushSession(ctx context.Context, s *store.Store, ccID string) flushResult 
 	if err != nil {
 		return flushResult{reason: "save_failed", err: err}
 	}
-	// Attach file provenance (ADR-0021 Phase 2) under the session_id the summary
-	// saved with — the run's session_id, so any manual saves in the run share it.
-	// Best-effort: provenance is a bonus, never a reason to fail the flush.
-	if files, ferr := state.ReadFiles(ccID); ferr == nil && len(files) > 0 {
+	// If the summary minted its own session_id (none was staged), attach the
+	// provenance now — best-effort, never a reason to fail the flush.
+	if staged.SessionID == "" && len(files) > 0 {
 		_ = s.RecordFiles(ctx, resp.SessionID, files)
 	}
 	return flushResult{flushed: true, id: resp.ID, sessionID: resp.SessionID}

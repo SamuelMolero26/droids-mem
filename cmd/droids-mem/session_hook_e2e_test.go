@@ -7,7 +7,17 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/samuelmolero26/droids-mem/internal/state"
 )
+
+// bumpChanges sends n meaningful PostToolUse events for the session.
+func bumpChanges(t *testing.T, home, db, ccID string, n int) {
+	t.Helper()
+	for range n {
+		sessStdin(t, home, db, `{"hook_event_name":"PostToolUse","session_id":"`+ccID+`","tool_name":"Edit"}`, "session", "hook")
+	}
+}
 
 // sessStdin runs the binary with isolated DB+HOME and a stdin payload (the
 // Claude Code hook JSON).
@@ -27,24 +37,23 @@ func sessStdin(t *testing.T, home, db, stdin string, args ...string) []byte {
 	return out
 }
 
-// PostToolUse: a meaningful tool bumps the change counter; a non-meaningful tool
-// (Read) does not.
+// PostToolUse: a meaningful tool bumps the change counter; non-meaningful tools
+// (Read, Bash) do not.
 func TestE2E_HookPostToolUseCountsMeaningfulOnly(t *testing.T) {
 	home := t.TempDir()
 	db := filepath.Join(t.TempDir(), "mem.db")
 
-	for range 3 {
-		sessStdin(t, home, db, `{"hook_event_name":"PostToolUse","session_id":"cc-h","tool_name":"Edit"}`, "session", "hook")
-	}
+	bumpChanges(t, home, db, "cc-h", state.IntakeThreshold)
 	sessStdin(t, home, db, `{"hook_event_name":"PostToolUse","session_id":"cc-h","tool_name":"Read"}`, "session", "hook")
+	sessStdin(t, home, db, `{"hook_event_name":"PostToolUse","session_id":"cc-h","tool_name":"Bash"}`, "session", "hook")
 
 	var chk struct {
 		Count        int  `json:"count"`
 		ThresholdMet bool `json:"threshold_met"`
 	}
 	mustParseJSON(t, sess(t, home, db, "session", "check", "--session", "cc-h"), &chk)
-	if chk.Count != 3 || !chk.ThresholdMet {
-		t.Fatalf("expected count 3 (Read ignored), got %+v", chk)
+	if chk.Count != state.IntakeThreshold || !chk.ThresholdMet {
+		t.Fatalf("expected count %d (Read and Bash ignored), got %+v", state.IntakeThreshold, chk)
 	}
 }
 
@@ -54,9 +63,7 @@ func TestE2E_HookStopBlocksWhenUnstaged(t *testing.T) {
 	home := t.TempDir()
 	db := filepath.Join(t.TempDir(), "mem.db")
 
-	for range 3 {
-		sessStdin(t, home, db, `{"hook_event_name":"PostToolUse","session_id":"cc-s","tool_name":"Edit"}`, "session", "hook")
-	}
+	bumpChanges(t, home, db, "cc-s", state.IntakeThreshold)
 	out := sessStdin(t, home, db, `{"hook_event_name":"Stop","session_id":"cc-s"}`, "session", "hook")
 	var dec struct {
 		Decision string `json:"decision"`
@@ -75,28 +82,21 @@ func TestE2E_HookStopStandsDownWhenStopHookActive(t *testing.T) {
 	home := t.TempDir()
 	db := filepath.Join(t.TempDir(), "mem.db")
 
-	for range 3 {
-		sessStdin(t, home, db, `{"hook_event_name":"PostToolUse","session_id":"cc-a","tool_name":"Edit"}`, "session", "hook")
-	}
+	bumpChanges(t, home, db, "cc-a", state.IntakeThreshold)
 	out := sessStdin(t, home, db, `{"hook_event_name":"Stop","session_id":"cc-a","stop_hook_active":true}`, "session", "hook")
 	if strings.TrimSpace(string(out)) != "" {
 		t.Errorf("Stop with stop_hook_active should be silent, got %q", out)
 	}
 }
 
-// Staging must satisfy the Stop gate even though the staging command itself
-// bumps the change counter (it runs through Bash, a counted tool). Only a
-// further IntakeThreshold of changes on top of the stage re-arms the block.
+// Staging must satisfy the Stop gate. Only a further IntakeThreshold of
+// changes on top of the stage re-arms the block.
 func TestE2E_HookStopFreshStageNotStale(t *testing.T) {
 	home := t.TempDir()
 	db := filepath.Join(t.TempDir(), "mem.db")
 
-	for range 3 {
-		sessStdin(t, home, db, `{"hook_event_name":"PostToolUse","session_id":"cc-f","tool_name":"Edit"}`, "session", "hook")
-	}
+	bumpChanges(t, home, db, "cc-f", state.IntakeThreshold)
 	stageRun(t, home, db, "cc-f", "checkpointed run")
-	// The stage command's own PostToolUse(Bash) lands after the staged file.
-	sessStdin(t, home, db, `{"hook_event_name":"PostToolUse","session_id":"cc-f","tool_name":"Bash"}`, "session", "hook")
 
 	out := sessStdin(t, home, db, `{"hook_event_name":"Stop","session_id":"cc-f"}`, "session", "hook")
 	if strings.TrimSpace(string(out)) != "" {
@@ -104,9 +104,7 @@ func TestE2E_HookStopFreshStageNotStale(t *testing.T) {
 	}
 
 	// A threshold of new meaningful work makes the stage stale again.
-	for range 3 {
-		sessStdin(t, home, db, `{"hook_event_name":"PostToolUse","session_id":"cc-f","tool_name":"Edit"}`, "session", "hook")
-	}
+	bumpChanges(t, home, db, "cc-f", state.IntakeThreshold)
 	out = sessStdin(t, home, db, `{"hook_event_name":"Stop","session_id":"cc-f"}`, "session", "hook")
 	if !strings.Contains(string(out), "block") {
 		t.Errorf("Stop after threshold of new changes should block, got %q", out)
@@ -178,9 +176,7 @@ func TestE2E_HookSessionEndFlushes(t *testing.T) {
 	home := t.TempDir()
 	db := filepath.Join(t.TempDir(), "mem.db")
 	stageRun(t, home, db, "cc-e", "the hooked run")
-	for range 3 {
-		sessStdin(t, home, db, `{"hook_event_name":"PostToolUse","session_id":"cc-e","tool_name":"Bash"}`, "session", "hook")
-	}
+	bumpChanges(t, home, db, "cc-e", state.IntakeThreshold)
 	sessStdin(t, home, db, `{"hook_event_name":"SessionEnd","session_id":"cc-e"}`, "session", "hook")
 
 	var rs recentResp
