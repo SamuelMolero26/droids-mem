@@ -306,18 +306,6 @@ func TestEnter_FocusesDetailPane(t *testing.T) {
 	}
 }
 
-func TestCtrlG_TogglesGraphTab(t *testing.T) {
-	m := New(&fakeStore{})
-	m, _ = upd(t, m, key("ctrl+g"))
-	if m.tab != tabGraph {
-		t.Errorf("ctrl+g → tab %v, want graph", m.tab)
-	}
-	m, _ = upd(t, m, key("ctrl+g"))
-	if m.tab != tabMemories {
-		t.Errorf("second ctrl+g → tab %v, want memories", m.tab)
-	}
-}
-
 func TestDelete_ConfirmPruneReload(t *testing.T) {
 	fs := &fakeStore{}
 	m := New(fs)

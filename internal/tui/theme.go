@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -16,16 +15,14 @@ var (
 	// Grounds. No app-wide fill — the terminal's own background shows through
 	// (full-width painted bands read as shadow strips on real terminals). Only
 	// small chips carry a subtle fill.
-	colChip     = lipgloss.Color("#17171C") // chip fill (kind / ⌘K / tag pills)
-	colChipEdge = lipgloss.Color("#3A3A44") // card border
-	colDiv      = lipgloss.Color("#1E1E24") // divider rules
+	colChip = lipgloss.Color("#17171C") // chip fill (kind / ⌘K / tag pills)
+	colDiv  = lipgloss.Color("#1E1E24") // divider rules
 
-	// Accents — magenta→indigo brand pair; cyan for the live-search caret.
-	colAccent = lipgloss.Color("#C026D3") // magenta: logo, selected-row bar
-	colGradA  = "#C026D3"                 // gradient start (magenta)
-	colGradB  = "#4F46E5"                 // gradient end (indigo)
-	colSelect = lipgloss.Color("#00DFD8") // cyan: search caret
-	colDanger = lipgloss.Color("#D9484D") // delete confirmation
+	// Accents — magenta brand color; cyan for the live-search caret.
+	colAccent   = lipgloss.Color("#C026D3") // magenta: logo, selected-row bar
+	colSelect   = lipgloss.Color("#00DFD8") // cyan: search caret
+	colDanger   = lipgloss.Color("#D9484D") // delete confirmation; error_resolution dot + anchor ring
+	colConnBlue = lipgloss.Color("#0E6CDF") // session_summary dot (Connection Layout mockup)
 
 	// Text ramp.
 	colBright = lipgloss.Color("#E8E8E8") // selected title
@@ -39,8 +36,6 @@ var (
 	logoStyle   = lipgloss.NewStyle().Bold(true).Foreground(colBright)
 	logoDim     = lipgloss.NewStyle().Foreground(colMeta)
 	logoGlyph   = lipgloss.NewStyle().Foreground(colAccent)
-	tabActive   = lipgloss.NewStyle().Bold(true).Foreground(colBright)
-	tabInactive = lipgloss.NewStyle().Foreground(colMeta)
 	headerCount = lipgloss.NewStyle().Foreground(colMeta)
 	// 1-row fill chips — a terminal can't do a single-line rounded pill, so the
 	// mockup's outlined pills become subtle-fill chips.
@@ -62,17 +57,16 @@ var (
 	sidebarSel   = lipgloss.NewStyle().Foreground(colBright).Bold(true)
 	sidebarUnsel = lipgloss.NewStyle().Foreground(colMeta)
 	countStyle   = lipgloss.NewStyle().Foreground(colDim)
-	cardStyle    = lipgloss.NewStyle().Foreground(colText).
-			Border(lipgloss.RoundedBorder()).BorderForeground(colChipEdge).Padding(0, 1)
-	cardHint = lipgloss.NewStyle().Foreground(colDim)
 
 	titleStyle = lipgloss.NewStyle().Foreground(colBright).Bold(true)
 	metaStyle  = lipgloss.NewStyle().Foreground(colMeta)
 	bodyStyle  = lipgloss.NewStyle().Foreground(colText)
 
-	// CONNECTIONS rows (detail-pane BM25 neighbors, ADR-0021).
-	connDot   = lipgloss.NewStyle().Foreground(colAccent)
-	connTitle = lipgloss.NewStyle().Foreground(colText)
+	// CONNECTIONS spine (detail-pane BM25 neighbors, Connection Layout mockup).
+	connRing  = lipgloss.NewStyle().Foreground(colDanger)                 // hollow anchor ring
+	connSpine = lipgloss.NewStyle().Foreground(lipgloss.Color("#3A3E49")) // vertical line + dash
+	connMeta  = lipgloss.NewStyle().Foreground(lipgloss.Color("#8D8D8D")) // dim kind label
+	connTitle = lipgloss.NewStyle().Foreground(colBright).Bold(true)
 
 	footerStyle = lipgloss.NewStyle().Foreground(colDim)
 	footerKey   = lipgloss.NewStyle().Foreground(colMeta)
@@ -93,33 +87,4 @@ func hrule(width int) string {
 func vrule(height int) string {
 	col := lipgloss.NewStyle().Foreground(colDiv).Render("│")
 	return strings.Repeat(col+"\n", max(1, height)-1) + col
-}
-
-// gradientBar renders width cells of "─" interpolated from→to — the magenta→
-// indigo underline beneath the active tab.
-func gradientBar(width int, from, to string) string {
-	if width < 1 {
-		return ""
-	}
-	var b strings.Builder
-	for i := range width {
-		t := 0.0
-		if width > 1 {
-			t = float64(i) / float64(width-1)
-		}
-		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(lerpHex(from, to, t))).Render("─"))
-	}
-	return b.String()
-}
-
-func hexRGB(h string) (r, g, b int) {
-	_, _ = fmt.Sscanf(h, "#%02x%02x%02x", &r, &g, &b)
-	return
-}
-
-func lerpHex(a, b string, t float64) string {
-	ar, ag, ab := hexRGB(a)
-	br, bg, bb := hexRGB(b)
-	lerp := func(x, y int) int { return x + int(float64(y-x)*t) }
-	return fmt.Sprintf("#%02X%02X%02X", lerp(ar, br), lerp(ag, bg), lerp(ab, bb))
 }

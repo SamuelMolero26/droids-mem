@@ -21,18 +21,9 @@ func TestView_RendersThreePanes(t *testing.T) {
 	}, neighbors: []store.Neighbor{{ID: "mem_b", Kind: "task_pattern", Title: "Related lesson", Score: 0.4}}})
 
 	out := m.View()
-	for _, want := range []string{"droids", "Memories", "KINDS", "all", "9 memories", "Hello", "MEMORY", "CONNECTIONS", "Related lesson"} {
+	for _, want := range []string{"droids", "KINDS", "all", "9 memories", "Hello", "MEMORY", "CONNECTIONS", "current memory", "Related lesson"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("view missing %q", want)
 		}
-	}
-}
-
-func TestView_GraphTabShowsStub(t *testing.T) {
-	m := New(&fakeStore{})
-	m, _ = upd(t, m, sizeMsg(120, 40))
-	m, _ = upd(t, m, key("ctrl+g"))
-	if !strings.Contains(m.View(), "coming soon") {
-		t.Error("graph tab did not render the stub")
 	}
 }
