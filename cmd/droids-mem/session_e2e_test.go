@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/samuelmolero26/droids-mem/internal/state"
 )
 
 // sess runs the binary with both DB and HOME isolated (session state lives under
@@ -45,14 +47,14 @@ func stageRun(t *testing.T, home, db, ccID, title string) {
 	)
 }
 
-// Happy path: stage + 3 changes (intake gate met) → flush persists an
+// Happy path: stage + threshold changes (intake gate met) → flush persists an
 // origin='auto' summary that shows up in recent-sessions.
 func TestE2E_SessionFlushHappyPath(t *testing.T) {
 	home := t.TempDir()
 	db := filepath.Join(t.TempDir(), "mem.db")
 
 	stageRun(t, home, db, "cc-happy", "the refactor run")
-	for range 3 {
+	for range state.IntakeThreshold {
 		sess(t, home, db, "session", "mark-change", "--session", "cc-happy")
 	}
 
@@ -158,9 +160,9 @@ func TestE2E_SessionRecoverFlushesIdleOrphan(t *testing.T) {
 	home := t.TempDir()
 	db := filepath.Join(t.TempDir(), "mem.db")
 
-	// Orphan: staged + 3 changes, then aged so it looks like a crashed run.
+	// Orphan: staged + threshold changes, then aged so it looks like a crashed run.
 	stageRun(t, home, db, "cc-orphan", "crashed run work")
-	for range 3 {
+	for range state.IntakeThreshold {
 		sess(t, home, db, "session", "mark-change", "--session", "cc-orphan")
 	}
 	old := time.Now().Add(-2 * time.Hour)

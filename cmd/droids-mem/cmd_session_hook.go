@@ -26,9 +26,11 @@ type hookInput struct {
 }
 
 // meaningfulTools are the PostToolUse tools that count toward the intake gate
-// (ADR-0016 pt 5) — edits and shell execs, the signals of real work.
+// (ADR-0016 pt 5) — file edits only. Bash is deliberately excluded: trivial
+// shell commands (ls, git status, go test) tripped the Stop gate on read-only
+// sessions, forcing a summary turn where nothing changed.
 var meaningfulTools = map[string]bool{
-	"Edit": true, "Write": true, "MultiEdit": true, "NotebookEdit": true, "Bash": true,
+	"Edit": true, "Write": true, "MultiEdit": true, "NotebookEdit": true,
 }
 
 // newSessionHookCmd is the native Claude Code hook entry point: one command,

@@ -27,7 +27,8 @@ const (
 	// IntakeThreshold (N) — meaningful changes a Run must accumulate before its
 	// staged summary is eligible to flush (ADR-0016 pt 5). Mechanical half of
 	// the intake gate; the model-judgment half is "did a staged summary exist".
-	IntakeThreshold = 3
+	// 8 file edits ≈ substantial work; 3 tripped the Stop gate on trivial runs.
+	IntakeThreshold = 8
 
 	// RecoverIdleCutoff — a staged file untouched for longer than this is treated
 	// as belonging to a crashed Run and is eligible for the session-start
