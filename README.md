@@ -35,6 +35,15 @@ spawns on demand.
 
 ## Install
 
+macOS / Linux via [Homebrew](https://brew.sh):
+
+```
+brew tap samuelmolero26/tap
+brew install droids-mem
+```
+
+Or with the Go toolchain:
+
 ```
 go install github.com/samuelmolero26/droids-mem/cmd/droids-mem@latest
 ```
