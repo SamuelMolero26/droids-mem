@@ -7,6 +7,85 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Targets **v1.2.0**. Headline: a native code graph so agents answer
+"what calls X" from a pre-built index instead of grep, plus a retrieval and
+TUI pass.
+
+### Added
+- **Native code graph** (ADR-0020): a per-repo Go symbol + call-edge index
+  (`go/packages` + `callgraph/cha`, interface dispatch resolved,
+  over-approximate) under `~/.droids-mem/graphs/<hash>/`. Auto-rebuilds on repo
+  change; a repo that stops type-checking serves the last good graph flagged
+  `stale`. Shares nothing with the memory model — no scrub, no dedupe, never
+  `mem.db`.
+- `droids-mem graph` CLI: `index` (build/refresh), `symbol <name>` (source +
+  callers/callees as signature stubs), `package <path>` (exported surface).
+- **Two new MCP tools** — `graph_symbol`, `graph_package` — bringing the tool
+  surface to six. Signatures-first: neighbors come back as one-line stubs,
+  full body only for the exact qname asked.
+- `graph_symbol` reports `transitive_callers` (blast size) on an exact match so
+  a change's risk is visible before walking it; `direction=up depth>1` lists
+  the blast radius, `to` gives the call path between two symbols. Bounded at
+  500 (`blastCap`).
+- `graph_symbol` search fallback: an unresolved `symbol` is treated as a task
+  phrase and returns a relevance-ranked `matches` menu of signatures.
+- **Write-time supersession** (ADR-0018): `supersedes=<id>` on save
+  hard-deletes the target row in the same transaction.
+- MCP server instructions for cross-host proactive integration (ADR-0019),
+  plus agent-first friction fixes.
+
+### Changed
+- **FTS5 tokenizer wrapped with the porter stemmer** — folds morphological
+  variants (`cancel` / `cancels` / `cancelling`) for better recall. Does not
+  bridge true synonyms.
+- **TUI redesigned** (phases 1 + 2 + refactor): a **CONNECTIONS** view showing
+  how memories link to each other and to their source files. The stub Graph
+  tab was dropped.
+- Context bundle gained **modes** — `orient` (default, snippets) and `deep`
+  (full bodies).
+- Graph rebuilds skip test-file-only changes.
+
+### Fixed
+- MCP session-hook infinite-block loop and hook overuse (count-based staleness
+  + `stop_hook_active` guard).
+
+### Removed
+- `internal/toon` (unused).
+
+## [1.1.0] — 2026-06-18
+
+Session memory: droids-mem now records a summary at the end of every Claude
+Code session and replays relevant prior memories when related work starts —
+via native hooks, no shell scripts or `jq`.
+
+### Added
+- **Native Claude Code session auto-summary** (ADR-0016). `droids-mem session
+  hook` reads each hook's JSON on stdin and dispatches: `PostToolUse` (intake
+  gate), `Stop` (record progress once enough work is unstaged), `SessionEnd`
+  (flush staged summary), `SessionStart` (start bridge, recover crashed runs),
+  `UserPromptSubmit` (inject relevant memories). Every hook fails open.
+- `droids-mem install` wires the hooks into `~/.claude/settings.json`
+  (`--project` targets `./.claude`, `--print` previews); `install --all` also
+  starts the bridge, runs `claude mcp add`, and appends a CLAUDE.md block.
+- `droids-mem tui`: interactive three-pane terminal browser (KINDS sidebar,
+  list, detail) with live-search.
+- `droids-mem recent-sessions`: list recent auto-saved session summaries.
+- `droids-mem prune` (ADR-0010): manual delete by id + `--suggest-dupes`
+  duplicate-cluster discovery. Retention is never automatic.
+- Context bundle expand signal.
+
+### Changed
+- Module path lowercased to `github.com/samuelmolero26/droids-mem` for
+  `go install` compatibility.
+
+## [1.0.1] — 2026-06-09
+
+### Fixed
+- Corrected the module path so `go install` resolves the repository.
+
+### Removed
+- `CONTEXT.md` and `M0-decisions.md` from the repository.
+
 ## [1.0.0] — 2026-06-09
 
 First public release. v1.0 ships the PII scrub pipeline, the `scope` column,
@@ -98,5 +177,7 @@ normally.
 - `workspace.yml` / inline scrub config → v1.1. v1.0 pattern set + order are
   hardcoded.
 
-[Unreleased]: https://github.com/SamuelMolero26/droids-mem/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/SamuelMolero26/droids-mem/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/SamuelMolero26/droids-mem/compare/v1.0.1...v1.1.0
+[1.0.1]: https://github.com/SamuelMolero26/droids-mem/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/SamuelMolero26/droids-mem/releases/tag/v1.0.0
