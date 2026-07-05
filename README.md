@@ -42,6 +42,8 @@ brew tap samuelmolero26/tap
 brew install droids-mem
 ```
 
+If Homebrew refuses the tap as untrusted, run `brew trust samuelmolero26/tap` first.
+
 Or with the Go toolchain:
 
 ```
