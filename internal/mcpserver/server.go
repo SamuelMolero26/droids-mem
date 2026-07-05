@@ -24,6 +24,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/samuelmolero26/droids-mem/internal/graph"
 	"github.com/samuelmolero26/droids-mem/internal/store"
 )
 
@@ -46,12 +47,35 @@ const (
 	maxIdentityNonceLen = 128
 )
 
+// serverInstructions is the proactive protocol surfaced to the model via the
+// MCP initialize response (ADR-0019, Layer 1). MCP has no auto-call primitive,
+// so this — plus the per-tool descriptions — is the only cross-host lever to
+// make an agent call droids-mem on its own. It is best-effort: the floor is
+// model judgment, backstopped by the store's dedup. Hard enforcement stays a
+// per-host hook concern (ADR-0016 is the Claude Code adapter).
+const serverInstructions = `droids-mem is your persistent memory across sessions. Prior lessons — fixes, decisions, conventions — are stored here so you do not relearn them. Call these tools on your own; do not wait to be asked.
+
+AT THE START of a task, and again whenever the topic shifts:
+- Call mem_search with a short description of what you are about to do. This surfaces relevant prior lessons by relevance and needs no task_type. If the results look weak or unrelated, ignore them.
+- If you know a stable workflow tag for this work, also call mem_context with that task_type for curated continuity (prior session summary + standing user rules). Derive task_type mechanically — the git repo name or top-level directory name — and reuse the exact same string every session for that project; inventing a new slug each time silently orphans prior continuity. A miss here is harmless — the search above already covers you.
+
+AS YOU WORK, when you learn something worth reusing next time, call mem_save:
+- error_resolution — a problem you hit and the fix that worked.
+- task_pattern — a repeatable approach worth reusing.
+- user_rule — a correction or stable preference the user gave you.
+Save only a genuinely reusable lesson, not routine steps. Re-saving the same lesson is harmless (the store deduplicates), so prefer saving over forgetting. Thread the session_id returned by mem_context (or the first mem_save) through later saves in the same run. If you call mem_context again in the same run (topic pivot, mode=refresh), pass that existing session_id back in — omitting it mints a new one and fragments the run's memories.
+
+Do NOT save session summaries here — your host may record those automatically at session end; saving one yourself would duplicate it. Never put secrets, tokens, or keys in any field; the store scrubs free-text fields on save, but tags are stored verbatim (unscrubbed) — keep secrets out of every field anyway.
+
+FOR CODE QUESTIONS in a Go repo, prefer the graph tools over grep and file reading — they answer from a pre-built call graph in one call. graph_package orients you in an area (exported surface, signatures only); graph_symbol shows one symbol's source plus callers/callees as signature stubs, blast radius via direction=up depth>1, call paths via 'to'. Expand a stub by re-querying its exact qname. Pass your project root as 'repo'.`
+
 // Config controls the MCP bridge server. Zero values fall back to defaults.
 type Config struct {
 	Addr     string // e.g. ":7777"
 	Endpoint string // e.g. "/mcp"
 	Token    string // required bearer token; Run errors if empty
 	Logger   *log.Logger
+	Graphs   *graph.Manager // optional code-graph subsystem (ADR-0020); nil skips graph tools
 }
 
 // Run starts the MCP bridge and blocks until ctx is canceled or the server
@@ -76,8 +100,12 @@ func Run(ctx context.Context, cfg Config, st *store.Store) error {
 	s := server.NewMCPServer(ServerName, ServerVersion,
 		server.WithToolCapabilities(true),
 		server.WithLogging(),
+		server.WithInstructions(serverInstructions),
 	)
 	registerTools(s, st)
+	if cfg.Graphs != nil {
+		registerGraphTools(s, cfg.Graphs)
+	}
 
 	mcpHandler := server.NewStreamableHTTPServer(s,
 		server.WithEndpointPath(cfg.Endpoint),

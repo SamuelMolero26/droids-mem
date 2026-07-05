@@ -115,7 +115,8 @@ jobs:
             echo "### Install"
             echo
             echo '```'
-            echo "go install github.com/samuelmolero/droids-mem/cmd/droids-mem@$TAG"
+            echo "brew tap samuelmolero26/tap && brew install droids-mem"
+            echo "go install github.com/samuelmolero26/droids-mem/cmd/droids-mem@$TAG"
             echo '```'
             echo
             echo "Or download a prebuilt binary below. Each artifact ships with a \`.sha256\` checksum."
@@ -131,3 +132,62 @@ jobs:
             --title "$TAG" \
             --notes-file release-notes.md \
             dist/*
+
+      - name: Publish Homebrew formula
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          VERSION="${TAG#v}"
+          REPO="SamuelMolero26/droids-mem"
+          TAP="SamuelMolero26/homebrew-tap"
+          BASE="https://github.com/$REPO/releases/download/$TAG"
+
+          sha() { awk '{print $1}' "dist/droids-mem-$TAG-$1.sha256"; }
+          DARWIN_ARM64=$(sha darwin-arm64)
+          DARWIN_AMD64=$(sha darwin-amd64)
+          LINUX_ARM64=$(sha linux-arm64)
+          LINUX_AMD64=$(sha linux-amd64)
+
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/${TAP}.git" tap
+          mkdir -p tap/Formula
+          cat > tap/Formula/droids-mem.rb <<EOF
+          class DroidsMem < Formula
+            desc "Persistent cross-session memory + native code graph for coding agents"
+            homepage "https://github.com/$REPO"
+            version "$VERSION"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "$BASE/droids-mem-$TAG-darwin-arm64"
+                sha256 "$DARWIN_ARM64"
+              else
+                url "$BASE/droids-mem-$TAG-darwin-amd64"
+                sha256 "$DARWIN_AMD64"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "$BASE/droids-mem-$TAG-linux-arm64"
+                sha256 "$LINUX_ARM64"
+              else
+                url "$BASE/droids-mem-$TAG-linux-amd64"
+                sha256 "$LINUX_AMD64"
+              end
+            end
+
+            def install
+              bin.install Dir["droids-mem-*"].first => "droids-mem"
+            end
+
+            test do
+              assert_match "droids-mem", shell_output("#{bin}/droids-mem --version")
+            end
+          end
+          EOF
+
+          cd tap
+          git add Formula/droids-mem.rb
+          git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" commit -m "droids-mem $VERSION" && git push

@@ -31,16 +31,48 @@ func newSessionCmd(a *app) *cobra.Command {
 		newSessionFlushCmd(a),
 		newSessionRecoverCmd(a),
 		newSessionPullCmd(a),
+		newSessionFilesCmd(a),
 		newSessionHookCmd(a),
 	)
 	return cmd
 }
 
-// DefaultRelevanceFloor — keep a search hit only when its BM25 rank is ≤ this
-// (more negative = stronger match). 0.0 accepts any genuine FTS match; tighten
-// (toward negative) to reject weak hits. The production value is tuned against
-// the T1.2 recall eval (ADR-0016 open item).
-const DefaultRelevanceFloor = 0.0
+// newSessionFilesCmd reports the file provenance recorded for a droids-mem
+// session_id (ADR-0021 Phase 2) — the files a run read or changed, keyed by the
+// session_id its memories carry. Operator/inspection surface, not on MCP.
+func newSessionFilesCmd(a *app) *cobra.Command {
+	var sessionID string
+	cmd := &cobra.Command{
+		Use:   "files",
+		Short: "List the file provenance recorded for a droids-mem session_id",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			s, err := a.store()
+			if err != nil {
+				return err
+			}
+			paths, err := s.FilesForSession(cmd.Context(), sessionID)
+			if err != nil {
+				writeError("files_failed", err.Error(), true)
+				exitWith(ExitError)
+			}
+			writeJSON(map[string]any{"session_id": sessionID, "files": paths, "total": len(paths)})
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&sessionID, "session-id", "", "droids-mem session_id (required)")
+	_ = cmd.MarkFlagRequired("session-id")
+	return cmd
+}
+
+// DefaultRelevanceFloor — keep a search hit only when the fraction of prompt
+// tokens found in its title+learned is ≥ this. The floor is mandatory
+// (ADR-0016 pt 8): search terms are OR-joined, so a memory sharing one common
+// word with a five-word prompt matches and would otherwise be injected. An
+// absolute BM25 floor cannot do this job — rank magnitudes scale with corpus
+// size (FTS5 IDF ≈ 0 on tiny DBs) — token overlap is corpus-size-invariant.
+// 0.3 ≈ a third of the prompt's meaningful tokens; provisional until the
+// T1.2 recall eval tunes it (ADR-0016 open item).
+const DefaultRelevanceFloor = 0.3
 
 // relevancePullLimit caps how many prior memories a single prompt may surface.
 const relevancePullLimit = 3
@@ -71,7 +103,7 @@ func newSessionPullCmd(a *app) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&ccID, "session", "", "Claude Code session id (required)")
 	cmd.Flags().StringVar(&query, "query", "", "Prompt text to find prior memories for (required)")
-	cmd.Flags().Float64Var(&floor, "floor", DefaultRelevanceFloor, "Relevance floor: keep hits with BM25 rank ≤ this")
+	cmd.Flags().Float64Var(&floor, "floor", DefaultRelevanceFloor, "Relevance floor: keep hits whose prompt-token overlap is ≥ this. Normal range 0..1; a value >1 rejects every hit")
 	cmd.Flags().StringVar(&format, "format", "json", "Output format: json (default) | text (for hook injection)")
 	_ = cmd.MarkFlagRequired("session")
 	_ = cmd.MarkFlagRequired("query")
@@ -83,9 +115,10 @@ func newSessionPullCmd(a *app) *cobra.Command {
 const maxRelevanceCandidates = 10
 
 // relevancePull runs the relevance-gated recall (ADR-0016 pt 8): search the
-// prompt, keep hits at/under the floor, drop ones already injected this session,
-// cap to relevancePullLimit, and record the newly injected ids. A search failure
-// returns nothing — recall must never break the user's prompt.
+// prompt, keep hits whose prompt-token overlap meets the floor, drop ones
+// already injected this session, cap to relevancePullLimit, and record the
+// newly injected ids. A search failure returns nothing — recall must never
+// break the user's prompt.
 func relevancePull(ctx context.Context, s *store.Store, ccID, query string, floor float64) []store.SearchResult {
 	resp, err := s.Search(ctx, store.SearchRequest{Query: query, Limit: maxRelevanceCandidates})
 	if err != nil {
@@ -98,7 +131,7 @@ func relevancePull(ctx context.Context, s *store.Store, ccID, query string, floo
 		if len(picked) >= relevancePullLimit {
 			break
 		}
-		if r.Score > floor || injected[r.ID] { // weaker than floor, or already shown
+		if store.TokenOverlap(query, r.Title+" "+r.Learned) < floor || injected[r.ID] { // weaker than floor, or already shown
 			continue
 		}
 		picked = append(picked, r)
@@ -111,21 +144,24 @@ func relevancePull(ctx context.Context, s *store.Store, ccID, query string, floo
 }
 
 // sessionNeedsStage reports whether a Stop-time checkpoint should fire: the
-// change threshold is met AND the staged summary is missing or stale.
+// change threshold is met AND the staged summary is missing or stale. Staleness
+// is count-based, not mtime-based: staging runs through a counted tool (Bash),
+// so comparing file mtimes marked every fresh stage stale and re-blocked forever.
+// A stage goes stale only after a further IntakeThreshold of meaningful changes
+// lands on top of the tally captured at stage time.
 func sessionNeedsStage(ccID string) bool {
 	count, err := state.ChangeCount(ccID)
 	if err != nil || count < state.IntakeThreshold {
 		return false
 	}
-	stagedAt, hasStaged, err := state.StagedModTime(ccID)
+	staged, err := state.ReadStaged(ccID)
 	if err != nil {
-		return false
+		return false // unreadable staged file: fail open, never wedge the session
 	}
-	if !hasStaged {
+	if staged == nil {
 		return true
 	}
-	lastChange, ok, _ := state.CountModTime(ccID)
-	return ok && stagedAt.Before(lastChange)
+	return count-staged.CountAtStage >= state.IntakeThreshold
 }
 
 func writeRelevanceText(rs []store.SearchResult) {
@@ -340,6 +376,16 @@ func flushSession(ctx context.Context, s *store.Store, ccID string) flushResult 
 	if staged == nil {
 		return flushResult{reason: "no_staged"}
 	}
+	// File provenance (ADR-0021 Phase 2) is independent of the intake gate: the
+	// files a run touched are worth recording even when the summary is too thin
+	// to flush — otherwise trivial runs (few edits, no Bash counting) drop their
+	// provenance. Record up front when the run carries an explicit session_id (the
+	// only case where the key is known before a save mints one).
+	files, _ := state.ReadFiles(ccID)
+	if staged.SessionID != "" && len(files) > 0 {
+		_ = s.RecordFiles(ctx, staged.SessionID, files)
+	}
+
 	count, err := state.ChangeCount(ccID)
 	if err != nil {
 		return flushResult{reason: "unreadable_count", err: err}
@@ -360,6 +406,11 @@ func flushSession(ctx context.Context, s *store.Store, ccID string) flushResult 
 	})
 	if err != nil {
 		return flushResult{reason: "save_failed", err: err}
+	}
+	// If the summary minted its own session_id (none was staged), attach the
+	// provenance now — best-effort, never a reason to fail the flush.
+	if staged.SessionID == "" && len(files) > 0 {
+		_ = s.RecordFiles(ctx, resp.SessionID, files)
 	}
 	return flushResult{flushed: true, id: resp.ID, sessionID: resp.SessionID}
 }

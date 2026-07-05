@@ -48,7 +48,7 @@ to verify a listener actually holds the token before reporting `already_running`
 Single binary, layered. Don't bypass layers:
 
 1. **`cmd/droids-mem/`** — cobra subcommands. One `cmd_*.go` per command; delegates to store, emits JSON via `output.go`. No business logic.
-2. **`internal/mcpserver/`** — MCP bridge (`server.go` wires HTTP + auth, `tools.go` defines 4 tools). Operator commands (`list`, `schema`, `doctor`, `prune`) intentionally not exposed here.
+2. **`internal/mcpserver/`** — MCP bridge (`server.go` wires HTTP + auth, `tools.go` defines the 4 memory tools, `graph_tools.go` the 2 code-graph tools). Operator commands (`list`, `schema`, `doctor`, `prune`) intentionally not exposed here.
 3. **`internal/store/`** — all business logic shared by CLI and MCP. Key files:
    - `save.go` — validate → scrub → fingerprint → dedupe (2 layers) → insert; owns scrub *policy* (which fields, tag + identifier strict-reject, empty-after-scrub)
    - `search.go` — FTS5 MATCH queries
@@ -59,6 +59,7 @@ Single binary, layered. Don't bypass layers:
 4. **`internal/scrub/`** — the scrub *engine* (ADR-0008): `spec.yaml` (embedded declarative detector spec, single source of truth, pinned-hash version enforcement), `scrub.go` (single-pass collect → overlap-resolve → splice, windowed scanning), `entropy.go` (deterministic gate for usage-class detectors), `corpus.go` + `testdata/` (fixture corpus, `[CUT]` defang convention). No store imports.
 5. **`internal/db/`** — `db.go` opens connection + applies pragmas; `schema.go` holds raw DDL string.
 6. **`internal/state/`** — `LoadOrCreateToken()` is the canonical bearer-token resolver. Owns all `~/.droids-mem/` file ops.
+7. **`internal/graph/`** — native code-graph subsystem (ADR-0020): per-repo Go symbol/call-edge index under `~/.droids-mem/graphs/<hash>/graph.db`, built with `go/packages` + `callgraph/cha` (interface dispatch resolved, over-approximate). Staleness-check-on-query via a `.go` count/size/max-mtime stamp; a repo that stops type-checking serves the last good graph with `stale: true`. Shares NOTHING with the Memory model — no scrub, no dedupe, no retention, never mem.db. Consumed by `cmd_graph.go` (boot-gate bypassed — annotations don't inherit, each leaf carries the bypass) and `internal/mcpserver/graph_tools.go`.
 
 ## Data model invariants
 
@@ -102,7 +103,7 @@ Session retention: on `session_summary` save, delete oldest if > 5 for that `tas
 
 ## MCP contract
 
-4 tools: `mem_save`, `mem_search`, `mem_context`, `mem_get`.
+6 tools: `mem_save`, `mem_search`, `mem_context`, `mem_get` (memory) + `graph_symbol`, `graph_package` (code graph, ADR-0020 — signatures-first, agent passes `repo` = absolute project root).
 
 - `mem_context` mints `session_id` (stateless server — agent stores and reuses it).
 - Auth: `Authorization: Bearer <token>` on every `/mcp` request.
@@ -137,4 +138,12 @@ Only Root agent writes to `droids-mem`. Sub-agents get no MCP tools — they con
 - `docs/adr/0009` — store owns error serialization.
 - `docs/adr/0010` — no automatic retention; doctor warnings + manual prune with dupe-cluster suggestions.
 - `docs/adr/0011` — user_rule overflow surfaces as browse-tier stubs + `user_rules_total`.
+- `docs/adr/0020` — native code graph (Go-only, per-repo graph.db, signatures-first tools).
 - `Future.md` — deferred / post-V1 ideas.
+
+## Engineering practices
+
+- We're a startup. You're probably used to writing enterprise code - code that tries to handle every possible edge case and has fallbacks for everything. That's not how we do things around here: our number one rule is to keep things simple. We handle ONLY the most important cases.
+- We try to only add new functionality that is small (that is, simple and few lines of code) or absolutely necessary. If a change is not small or absolutely necessary, don't make it.
+
+- Use cc-skills-golang for best go practices

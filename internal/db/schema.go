@@ -56,6 +56,18 @@ CREATE INDEX IF NOT EXISTS idx_memories_created_at        ON memories(created_at
 -- (recent-sessions: WHERE origin='auto' ORDER BY created_at DESC LIMIT N) and
 -- the origin-keyed eviction scan (ADR-0016). Never joined on FTS.
 CREATE INDEX IF NOT EXISTS idx_memories_origin_created    ON memories(origin, created_at DESC);
+
+-- memory_files is the file-provenance relation (ADR-0021 Phase 2): the files a
+-- Claude Code session read or changed, keyed by the droids-mem session_id the
+-- session's memories carry. Orthogonal to the Memory model — never joined to
+-- memories_fts, never scrubbed, deduped, or retained; it feeds the future Graph
+-- tab's file→graph-node join. Composite PK dedupes repeat touches of a file.
+CREATE TABLE IF NOT EXISTS memory_files (
+    session_id TEXT    NOT NULL,
+    file_path  TEXT    NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (session_id, file_path)
+);
 `
 
 // FTSSchema is the FTS5 virtual table + the three sync triggers (AI/AD/AU).
@@ -63,11 +75,16 @@ CREATE INDEX IF NOT EXISTS idx_memories_origin_created    ON memories(origin, cr
 // re-executes it verbatim after dropping the old index (internal/store/migrate.go),
 // so a tokenizer change here propagates to migrated DBs automatically.
 //
-// FTS5 tokenizer (locked decision #17): unicode61 with underscore + hyphen
-// promoted to token chars so identifiers like snake_case and kebab-case stay
-// atomic. Existing pre-v1.0 databases keep their trigram FTS until the
-// operator runs 'droids-mem migrate --rescrub', which drops + recreates this
-// table with the same DDL.
+// FTS5 tokenizer (decision #17, + porter ADR-0018-era retrieval pass): the
+// porter stemmer wraps unicode61, folding morphological variants (cancel /
+// cancellation, panic / panicked) to a common stem at both index and query
+// time so paraphrased lessons match. unicode61's underscore + hyphen token
+// chars are preserved underneath, keeping snake_case and kebab-case atomic.
+// porter does NOT bridge true synonyms (panic <-> nil pointer) — that gap is
+// left to write-time canonical tags, not retrieval-side machinery (embeddings
+// rejected: local-first, pure-Go, no CGO).
+// Existing databases pick up the stemmer by running 'droids-mem migrate'
+// (either mode drops + recreates this table from FTSSchema and reindexes).
 const FTSSchema = `
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     title,
@@ -76,7 +93,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     tags,
     content='memories',
     content_rowid='rowid',
-    tokenize='unicode61 tokenchars ''_-'''
+    tokenize='porter unicode61 tokenchars ''_-'''
 );
 
 -- FTS sync: INSERT

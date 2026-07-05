@@ -23,11 +23,13 @@ const (
 	stagedExt   = ".staged"
 	countExt    = ".count"
 	injectedExt = ".injected"
+	filesExt    = ".files"
 
 	// IntakeThreshold (N) — meaningful changes a Run must accumulate before its
 	// staged summary is eligible to flush (ADR-0016 pt 5). Mechanical half of
 	// the intake gate; the model-judgment half is "did a staged summary exist".
-	IntakeThreshold = 3
+	// 8 file edits ≈ substantial work; 3 tripped the Stop gate on trivial runs.
+	IntakeThreshold = 8
 
 	// RecoverIdleCutoff — a staged file untouched for longer than this is treated
 	// as belonging to a crashed Run and is eligible for the session-start
@@ -53,6 +55,11 @@ type StagedSummary struct {
 	Learned   string `json:"learned"`
 	Tags      string `json:"tags,omitempty"`
 	StagedAt  int64  `json:"staged_at"`
+	// CountAtStage is the meaningful-change tally captured when this summary was
+	// staged. The Stop-hook staleness check compares the live tally against it —
+	// an mtime comparison can't work, because the staging command itself runs
+	// through a counted tool (Bash) and would mark every fresh stage stale.
+	CountAtStage int `json:"count_at_stage"`
 }
 
 func sessionsDir() (string, error) {
@@ -118,6 +125,9 @@ func StageSummary(ccID string, s StagedSummary) error {
 	if s.StagedAt == 0 {
 		s.StagedAt = time.Now().Unix()
 	}
+	if n, err := ChangeCount(ccID); err == nil {
+		s.CountAtStage = n
+	}
 	b, err := json.Marshal(s)
 	if err != nil {
 		return fmt.Errorf("marshal staged summary: %w", err)
@@ -160,24 +170,6 @@ func StagedModTime(ccID string) (time.Time, bool, error) {
 	}
 	if err != nil {
 		return time.Time{}, false, fmt.Errorf("stat staged summary: %w", err)
-	}
-	return fi.ModTime(), true, nil
-}
-
-// CountModTime returns the change-counter file's modification time (≈ the last
-// meaningful change) and whether it exists. The Stop-hook staleness check
-// compares this against the staged file's mtime.
-func CountModTime(ccID string) (time.Time, bool, error) {
-	path, err := sessionPath(ccID, countExt)
-	if err != nil {
-		return time.Time{}, false, err
-	}
-	fi, err := os.Stat(path)
-	if os.IsNotExist(err) {
-		return time.Time{}, false, nil
-	}
-	if err != nil {
-		return time.Time{}, false, fmt.Errorf("stat change count: %w", err)
 	}
 	return fi.ModTime(), true, nil
 }
@@ -232,10 +224,68 @@ func RecordInjected(ccID string, ids []string) error {
 	return nil
 }
 
+// AppendFiles records file paths touched during a CC session (ADR-0021 Phase 2
+// provenance capture). Append-only + read-time dedup, mirroring the injected
+// set — a session may touch a file many times; the flush collapses duplicates.
+// Hot-path safe: file-only, no DB. ponytail: no per-session cap — one run's
+// file set is small and the flush PK dedupes; add a cap only if a run's .files
+// sentinel ever grows pathological.
+func AppendFiles(ccID string, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	if _, err := ensureSessionsDir(); err != nil {
+		return err
+	}
+	path, err := sessionPath(ccID, filesExt)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) // #nosec G304
+	if err != nil {
+		return fmt.Errorf("open files sentinel: %w", err)
+	}
+	if _, err := f.WriteString(strings.Join(paths, "\n") + "\n"); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write files sentinel: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close files sentinel: %w", err)
+	}
+	return nil
+}
+
+// ReadFiles returns the deduped, order-preserving set of file paths captured for
+// a CC session (empty if none).
+func ReadFiles(ccID string) ([]string, error) {
+	path, err := sessionPath(ccID, filesExt)
+	if err != nil {
+		return nil, err
+	}
+	b, err := os.ReadFile(path) // #nosec G304 -- path is sessionsDir/<safeID>.files
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read files sentinel: %w", err)
+	}
+	seen := map[string]bool{}
+	var out []string
+	for line := range strings.SplitSeq(string(b), "\n") {
+		p := strings.TrimSpace(line)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out, nil
+}
+
 // ClearSession removes all sentinel files for a CC session. Missing files are
 // not an error (idempotent — flush and recovery both call it).
 func ClearSession(ccID string) error {
-	for _, ext := range []string{stagedExt, countExt, injectedExt} {
+	for _, ext := range []string{stagedExt, countExt, injectedExt, filesExt} {
 		path, err := sessionPath(ccID, ext)
 		if err != nil {
 			return err

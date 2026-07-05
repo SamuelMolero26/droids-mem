@@ -166,6 +166,41 @@ func (s *Store) GetRow(ctx context.Context, id string) (*Memory, error) {
 	return &m, nil
 }
 
+// CountsResponse is the static corpus census the Memory inspector sidebar shows:
+// total rows per Kind plus the grand total. Read-only and non-counting (ADR-0021).
+type CountsResponse struct {
+	ByKind map[string]int `json:"by_kind"`
+	Total  int            `json:"total"`
+}
+
+// Counts returns the whole-corpus census (rows per Kind + total) in one grouped
+// query. The inspector computes it once on load and refreshes only after a
+// delete — it is deliberately not recomputed per keystroke.
+func (s *Store) Counts(ctx context.Context) (*CountsResponse, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT kind, COUNT(*) FROM memories GROUP BY kind
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("counts query: %w", err)
+	}
+	defer rows.Close()
+
+	resp := &CountsResponse{ByKind: map[string]int{}}
+	for rows.Next() {
+		var kind string
+		var n int
+		if err := rows.Scan(&kind, &n); err != nil {
+			return nil, fmt.Errorf("scan count: %w", err)
+		}
+		resp.ByKind[kind] = n
+		resp.Total += n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("counts rows: %w", err)
+	}
+	return resp, nil
+}
+
 // Get is the agent-facing fetch: GetRow plus a recorded Expand signal (ADR-0013).
 // It is the path behind CLI `get` and MCP `mem_get`. The increment is
 // best-effort telemetry — a hit returns the Memory whether or not the signal

@@ -23,20 +23,21 @@ func registerTools(s *server.MCPServer, st *store.Store) {
 // ---------- mem_save ----------
 
 type saveArgs struct {
-	Kind      string `json:"kind"`
-	Title     string `json:"title"`
-	What      string `json:"what"`
-	Learned   string `json:"learned"`
-	TaskType  string `json:"task_type"`
-	Tags      string `json:"tags,omitempty"`
-	Scope     string `json:"scope,omitempty"`
-	SessionID string `json:"session_id,omitempty"`
-	Force     bool   `json:"force,omitempty"`
+	Kind       string `json:"kind"`
+	Title      string `json:"title"`
+	What       string `json:"what"`
+	Learned    string `json:"learned"`
+	TaskType   string `json:"task_type"`
+	Tags       string `json:"tags,omitempty"`
+	Scope      string `json:"scope,omitempty"`
+	SessionID  string `json:"session_id,omitempty"`
+	Force      bool   `json:"force,omitempty"`
+	Supersedes string `json:"supersedes,omitempty"`
 }
 
 func saveToolDef() mcp.Tool {
 	return mcp.NewTool("mem_save",
-		mcp.WithDescription("Persist a memory (lesson) for future agent runs. Returns the saved or matched memory id, the session_id used, and a scrub block when any sensitive content was redacted before storage."),
+		mcp.WithDescription("Persist a memory (lesson) for future agent runs. Call this on your own whenever you learn something reusable — a fix that worked, a repeatable approach, a user correction; do not wait to be asked. Returns the saved or matched memory id, the session_id used, and a scrub block when any sensitive content was redacted before storage."),
 		mcp.WithString("kind", mcp.Required(),
 			mcp.Description("Memory kind. One of: error_resolution, task_pattern, user_rule, session_summary."),
 			mcp.Enum("error_resolution", "task_pattern", "user_rule", "session_summary"),
@@ -59,21 +60,24 @@ func saveToolDef() mcp.Tool {
 			mcp.Description("Session id from mem_context. Omit on first save in a Run to mint a new one.")),
 		mcp.WithBoolean("force",
 			mcp.Description("HITL correction: overwrite an existing memory matched by fingerprint instead of skipping.")),
+		mcp.WithString("supersedes",
+			mcp.Description("Id of a memory this save replaces. The target is hard-deleted on successful insert (same kind/task_type/scope required, else no-op). Response echoes 'superseded' with the deleted id.")),
 	)
 }
 
 func saveHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, saveArgs) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, _ mcp.CallToolRequest, a saveArgs) (*mcp.CallToolResult, error) {
 		resp, err := st.Save(ctx, store.SaveRequest{
-			SessionID: a.SessionID,
-			TaskType:  a.TaskType,
-			Kind:      a.Kind,
-			Title:     a.Title,
-			What:      a.What,
-			Learned:   a.Learned,
-			Tags:      a.Tags,
-			Scope:     a.Scope,
-			Force:     a.Force,
+			SessionID:  a.SessionID,
+			TaskType:   a.TaskType,
+			Kind:       a.Kind,
+			Title:      a.Title,
+			What:       a.What,
+			Learned:    a.Learned,
+			Tags:       a.Tags,
+			Scope:      a.Scope,
+			Force:      a.Force,
+			Supersedes: a.Supersedes,
 		})
 		if err != nil {
 			return toolErr(err), nil
@@ -93,7 +97,7 @@ type searchArgs struct {
 
 func searchToolDef() mcp.Tool {
 	return mcp.NewTool("mem_search",
-		mcp.WithDescription("Full-text search across stored memories ranked by BM25."),
+		mcp.WithDescription("Full-text search across stored memories ranked by BM25. Call this proactively at the start of a task and whenever the topic shifts — do not wait to be asked; prior fixes, decisions, and conventions live here. Ignore weak or unrelated results."),
 		mcp.WithString("query", mcp.Required(),
 			mcp.Description("Free-text search phrase.")),
 		mcp.WithString("task_type",
@@ -143,7 +147,7 @@ type contextEnvelope struct {
 
 func contextToolDef() mcp.Tool {
 	return mcp.NewTool("mem_context",
-		mcp.WithDescription("Load the two-tier orientation bundle for a task_type at the start of a Run. Returns always-tier memories (full body) + browse-tier titles/snippets, plus a session_id to thread through subsequent mem_save calls."),
+		mcp.WithDescription("Load the two-tier orientation bundle for a task_type at the start of a Run. Call this on your own at the start of work when the project has a stable task_type (derive it from the repo or directory name and reuse the exact same string every session). Returns always-tier memories (full body) + browse-tier titles/snippets, plus a session_id to thread through subsequent mem_save calls."),
 		mcp.WithString("task_type", mcp.Required(),
 			mcp.Description("Workflow tag scoping the bundle.")),
 		mcp.WithString("query",
@@ -151,7 +155,7 @@ func contextToolDef() mcp.Tool {
 		mcp.WithString("mode",
 			mcp.Description("Retrieval depth: orient (default — always tier + browse snippets), deep (always tier with all rules full + browse full bodies), refresh (always tier only, cheap mid-run re-anchor).")),
 		mcp.WithString("session_id",
-			mcp.Description("Optional pre-existing session_id to reuse. Omit to mint a fresh one for this Run.")),
+			mcp.Description("Optional pre-existing session_id to reuse. Omit ONLY on the first call of a Run (mints a fresh one); on any repeat call in the same Run (topic pivot, mode=refresh) pass your existing session_id back in, or the Run's memories fragment across two ids.")),
 	)
 }
 
@@ -181,7 +185,7 @@ type getArgs struct {
 
 func getToolDef() mcp.Tool {
 	return mcp.NewTool("mem_get",
-		mcp.WithDescription("Fetch the full body of a single memory by id (typically a browse-tier id returned by mem_context or mem_search)."),
+		mcp.WithDescription("Fetch the full body of a single memory by id (typically a browse-tier id returned by mem_context or mem_search). Use it on your own to expand a promising browse-tier title before relying on it."),
 		mcp.WithString("id", mcp.Required(),
 			mcp.Description("Memory id, e.g. 'mem_01J...'.")),
 	)

@@ -1,36 +1,20 @@
 # Session memory (droids-mem) — compose guidance
 
-Add this block to your `CLAUDE.md` (global or project). It is the model-judgment
-half of the intake gate (ADR-0016): the hooks guarantee *when* to consider
-saving; this tells you *whether* and *how* to compose.
+A block in your `CLAUDE.md` (global or project) is the model-judgment half of
+the intake gate (ADR-0016): the hooks guarantee *when* to consider saving; the
+block tells the model *whether* and *how* to compose.
 
----
+The canonical block lives at
+[`cmd/droids-mem/claude_snippet.md`](../cmd/droids-mem/claude_snippet.md)
+(embedded in the binary). Install it either way:
 
-## droids-mem session memory
+```
+# One-shot bootstrap (hooks + server + MCP registration + CLAUDE.md block)
+droids-mem install --all
 
-This environment records a memory at the end of each Claude Code session.
+# Or append just the block manually (from a repo checkout)
+cat cmd/droids-mem/claude_snippet.md >> ~/.claude/CLAUDE.md
+```
 
-- **Stage a session summary** when the run did something worth recalling next
-  time — a fix, a decision, a non-obvious discovery, an established convention.
-  When the Stop hook asks you to record progress, compose and stage:
-
-  ```
-  droids-mem session stage --session <session_id> \
-    --title "<one-line imperative summary>" \
-    --what "<what happened / what was attempted>" \
-    --learned "<the reusable insight to apply next time>"
-  ```
-
-- **Decline for low-value runs.** A quick question, a trivial edit, or a run that
-  went nowhere is not worth a summary. If nothing is worth recalling, do not
-  stage — the gate already drops sessions below the change threshold, and your
-  judgment is the second filter.
-
-- **One summary per session.** Re-stage (same command) to update it as the run
-  progresses; only the latest staged version is flushed at session end.
-
-- **No secrets.** The store scrubs on save, but keep tokens/keys out of the
-  summary text anyway.
-
-- **`task_type`** defaults to `claude_session`. Pass `--task-type <slug>` only
-  when the whole run had one clear workflow theme.
+Both are idempotent — a CLAUDE.md already containing the block is left
+untouched by `install --all`.

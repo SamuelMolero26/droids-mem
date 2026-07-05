@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/samuelmolero26/droids-mem/internal/state"
@@ -17,12 +19,44 @@ type hookInput struct {
 	SessionID     string `json:"session_id"`
 	Prompt        string `json:"prompt"`
 	ToolName      string `json:"tool_name"`
+	// ToolInput is the tool's argument object; only the file-path fields matter
+	// here (file-provenance capture, ADR-0021 Phase 2).
+	ToolInput struct {
+		FilePath     string `json:"file_path"`
+		NotebookPath string `json:"notebook_path"`
+	} `json:"tool_input"`
+	// StopHookActive is true when the turn is already continuing because a Stop
+	// hook blocked it. Blocking again while it's set loops until the host's cap
+	// force-ends the turn, so the Stop case must stand down.
+	StopHookActive bool `json:"stop_hook_active"`
 }
 
 // meaningfulTools are the PostToolUse tools that count toward the intake gate
-// (ADR-0016 pt 5) — edits and shell execs, the signals of real work.
+// (ADR-0016 pt 5) — file edits only. Bash is deliberately excluded: trivial
+// shell commands (ls, git status, go test) tripped the Stop gate on read-only
+// sessions, forcing a summary turn where nothing changed.
 var meaningfulTools = map[string]bool{
-	"Edit": true, "Write": true, "MultiEdit": true, "NotebookEdit": true, "Bash": true,
+	"Edit": true, "Write": true, "MultiEdit": true, "NotebookEdit": true,
+}
+
+// fileTools are the PostToolUse tools whose tool_input names a file the session
+// read or changed (ADR-0021 Phase 2 provenance). Includes Read — a file the
+// session read is provenance too — but not Bash (its arg is a command, not a
+// path).
+var fileTools = map[string]bool{
+	"Read": true, "Edit": true, "Write": true, "MultiEdit": true, "NotebookEdit": true,
+}
+
+// hookFilePath extracts the touched file path from a hook's tool_input, or ""
+// when the tool carries none.
+func hookFilePath(in hookInput) string {
+	if !fileTools[in.ToolName] {
+		return ""
+	}
+	if in.ToolInput.FilePath != "" {
+		return in.ToolInput.FilePath
+	}
+	return in.ToolInput.NotebookPath
 }
 
 // newSessionHookCmd is the native Claude Code hook entry point: one command,
@@ -52,8 +86,13 @@ func newSessionHookCmd(a *app) *cobra.Command {
 				if in.SessionID != "" && meaningfulTools[in.ToolName] {
 					_, _ = state.IncrementChange(in.SessionID)
 				}
+				if in.SessionID != "" {
+					if fp := hookFilePath(in); fp != "" {
+						_ = state.AppendFiles(in.SessionID, []string{fp})
+					}
+				}
 			case "stop":
-				if in.SessionID != "" && sessionNeedsStage(in.SessionID) {
+				if in.SessionID != "" && !in.StopHookActive && sessionNeedsStage(in.SessionID) {
 					emitStopBlock(in.SessionID)
 				}
 			case "sessionend":
@@ -64,6 +103,11 @@ func newSessionHookCmd(a *app) *cobra.Command {
 					}
 				}
 			case "sessionstart":
+				// Keep the MCP bridge alive for the model's own mem_* calls
+				// (ADR-0019 Layer 1): hooks talk to the store directly, but the
+				// MCP tools need `droids-mem serve` up — this is the only
+				// lifecycle event that can restart it after a reboot or crash.
+				ensureServerBestEffort()
 				if s, err := a.store(); err == nil {
 					recoverOrphans(cmd.Context(), s)
 				}
@@ -77,6 +121,19 @@ func newSessionHookCmd(a *app) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// ensureServerBestEffort re-execs `droids-mem ensure-server` so the MCP bridge
+// is up before the model's first mem_* tool call. Fail open: a spawn failure
+// must never break the session (the hook contract), and ensure-server itself
+// is idempotent, so calling it on every SessionStart is safe.
+func ensureServerBestEffort() {
+	self, err := os.Executable()
+	if err != nil {
+		return
+	}
+	// #nosec G204 -- re-exec of our own binary (os.Executable), fixed argv.
+	_ = exec.Command(self, "ensure-server").Run()
 }
 
 // normalizeEvent canonicalizes a hook event name to a lowercase, separator-free

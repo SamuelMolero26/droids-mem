@@ -266,7 +266,7 @@ func TestServeE2E_HealthzNoAuth(t *testing.T) {
 	}
 }
 
-func TestServeE2E_ToolsListExposesFourTools(t *testing.T) {
+func TestServeE2E_ToolsListExposesToolSurface(t *testing.T) {
 	s := startServer(t)
 	defer s.stop()
 	sid := s.initSession(t)
@@ -281,7 +281,7 @@ func TestServeE2E_ToolsListExposesFourTools(t *testing.T) {
 	for _, tool := range tools {
 		got[tool.(map[string]any)["name"].(string)] = true
 	}
-	for _, want := range []string{"mem_save", "mem_search", "mem_context", "mem_get"} {
+	for _, want := range []string{"mem_save", "mem_search", "mem_context", "mem_get", "graph_symbol", "graph_package"} {
 		if !got[want] {
 			t.Errorf("missing tool: %s (have %v)", want, got)
 		}
@@ -289,6 +289,35 @@ func TestServeE2E_ToolsListExposesFourTools(t *testing.T) {
 	for _, hidden := range []string{"mem_list", "mem_schema", "mem_doctor"} {
 		if got[hidden] {
 			t.Errorf("hidden tool exposed: %s", hidden)
+		}
+	}
+}
+
+// TestServeE2E_InitializeExposesInstructions guards the ADR-0019 Layer-1 lever:
+// the proactive protocol must reach the client via the initialize response, or
+// non-Claude hosts get no nudge to call the tools on their own.
+func TestServeE2E_InitializeExposesInstructions(t *testing.T) {
+	s := startServer(t)
+	defer s.stop()
+
+	_, resp, _ := s.jsonRPC(t, "", s.token, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+		"params": map[string]any{
+			"protocolVersion": "2024-11-05",
+			"capabilities":    map[string]any{},
+			"clientInfo":      map[string]any{"name": "e2e", "version": "1"},
+		},
+	})
+	result, ok := resp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("initialize: missing result; resp=%v", resp)
+	}
+	instr, _ := result["instructions"].(string)
+	for _, want := range []string{"mem_search", "mem_context", "mem_save"} {
+		if !strings.Contains(instr, want) {
+			t.Errorf("initialize instructions missing %q; got %q", want, instr)
 		}
 	}
 }
