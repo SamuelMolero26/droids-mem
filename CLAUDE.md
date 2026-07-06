@@ -37,13 +37,7 @@ Both suites isolate `DROIDS_MEM_DB` and `DROIDS_MEM_HOME` per test.
 | `DROIDS_MEM_MCP_ADDR` | `127.0.0.1:7777` | Bind address (loopback by default; non-loopback logs a plaintext warning) |
 | `DROIDS_MEM_MCP_ENDPOINT` | `/mcp` | `/healthz` + `/identity` always unauthenticated |
 
-State dir layout: `mem.db` (0600), `token` (0600), `mcp.pid`, `mcp.log`,
-`graph_last` (tool name; its **mtime** is the timestamp).
-
-`droids-mem statusline` prints `droids-mem:<tool>` when `graph_last` is under
-60 s old, nothing otherwise — a Claude Code `statusLine` segment that makes an
-agent's code-graph use visible instead of silent. Both the MCP handlers and the
-`graph` CLI leaves stamp it. Cosmetic only: write failures are swallowed.
+State dir layout: `mem.db` (0600), `token` (0600), `mcp.pid`, `mcp.log`.
 
 `/identity?nonce=<n>` answers `HMAC-SHA256(token, nonce)` — ensure-server uses it
 to verify a listener actually holds the token before reporting `already_running`
@@ -54,18 +48,18 @@ to verify a listener actually holds the token before reporting `already_running`
 Single binary, layered. Don't bypass layers:
 
 1. **`cmd/droids-mem/`** — cobra subcommands. One `cmd_*.go` per command; delegates to store, emits JSON via `output.go`. No business logic.
-2. **`internal/mcpserver/`** — MCP bridge (`server.go` wires HTTP + auth, `stdio.go` the stdio transport for host-spawned servers (`serve --stdio` — no port/token; instructions string forks one summary sentence per transport), `tools.go` defines the 5 memory tools, `graph_tools.go` the 3 code-graph tools). Operator commands (`list`, `schema`, `doctor`, `prune`) intentionally not exposed here.
+2. **`internal/mcpserver/`** — MCP bridge (`server.go` wires HTTP + auth, `stdio.go` the stdio transport for host-spawned servers (`serve --stdio`, ADR-0024 — no port/token; instructions string forks one summary sentence per transport), `tools.go` defines the 4 memory tools, `graph_tools.go` the 2 code-graph tools). Operator commands (`list`, `schema`, `doctor`, `prune`) intentionally not exposed here.
 3. **`internal/store/`** — all business logic shared by CLI and MCP. Key files:
    - `save.go` — validate → scrub → fingerprint → dedupe (2 layers) → insert; owns scrub *policy* (which fields, tag + identifier strict-reject, empty-after-scrub)
    - `search.go` — FTS5 MATCH queries
    - `context.go` — two-tier context bundle assembly (always + browse)
-   - `doctor.go` / `inspect.go` — health checks (incl. growth warnings), introspection
-   - `prune.go` — manual deletion + `--suggest-dupes` cluster discovery; never automatic
-   - `eval_engine_test.go` — recall eval engine, test-only: scores paraphrase→memory fixture pairs against `mem_search`/`mem_context`; driven by `recall_benchmark_test.go`. Store code imports `internal/scrub` directly (no alias layer).
-4. **`internal/scrub/`** — the scrub *engine*: `spec.yaml` (embedded declarative detector spec, single source of truth, pinned-hash version enforcement), `scrub.go` (single-pass collect → overlap-resolve → splice, windowed scanning), `entropy.go` (deterministic gate for usage-class detectors), `corpus.go` + `testdata/` (fixture corpus, `[CUT]` defang convention). No store imports.
+   - `doctor.go` / `inspect.go` — health checks (incl. ADR-0010 growth warnings), introspection
+   - `prune.go` — manual deletion + `--suggest-dupes` cluster discovery (ADR-0010); never automatic
+   - `scrub.go` — thin aliases re-exporting the engine from `internal/scrub`
+4. **`internal/scrub/`** — the scrub *engine* (ADR-0008): `spec.yaml` (embedded declarative detector spec, single source of truth, pinned-hash version enforcement), `scrub.go` (single-pass collect → overlap-resolve → splice, windowed scanning), `entropy.go` (deterministic gate for usage-class detectors), `corpus.go` + `testdata/` (fixture corpus, `[CUT]` defang convention). No store imports.
 5. **`internal/db/`** — `db.go` opens connection + applies pragmas; `schema.go` holds raw DDL string.
 6. **`internal/state/`** — `LoadOrCreateToken()` is the canonical bearer-token resolver. Owns all `~/.droids-mem/` file ops.
-7. **`internal/graph/`** — native code-graph subsystem: per-repo Go symbol/call-edge index under `~/.droids-mem/graphs/<hash>/graph.db`, built with `go/packages` + `callgraph/cha` (interface dispatch resolved, over-approximate). Staleness-check-on-query via a `.go` count/size/max-mtime stamp; a repo that stops type-checking serves the last good graph with `stale: true`. A stamp whose build already failed is **not** rebuilt again until the stamp moves — retrying identical broken source once per query burns a full `go/packages` load exactly when an agent queries most. The per-repo build lock is a 1-buffered channel, not a mutex: an abandoned cold build holds it until it lands, so waiting on it must be abandonable or every other caller's deadline is unenforceable — `acquireLock` takes an uncontended lock unconditionally and only a contended one respects ctx. Graph db handles are refcounted (`connEntry`): a rebuild landing mid-query retires the handle but cannot close it until the last caller releases, so `ensureFresh`'s returned `release` func must always be deferred. `<hash>` is `sha256(canonical repo path)[:6]`, and that path is **normalized to the module root** (nearest ancestor `go.mod`) — a subdirectory would otherwise key a second cache built from only that subtree while `meta.module` still named the whole module, silently under-reporting callers and `transitive_callers`. That channel lock lives on `Manager`, so it cannot see other processes; under stdio (one server process per agent session) N sessions each ran a full type-check of the same tree. Builds therefore also take a `flock` on `<dir>/.build.lock` and **re-check the on-disk stamp after acquiring it** — the re-check is what turns queueing into coalescing, and it reads the stamp straight off disk because the file was replaced by a *different* process. A successful build sweeps cache dirs nothing can reach: repo path gone (deleted worktree, temp dir), or a repo that no longer keys to that dir. The sweep never deletes what it cannot prove — an unopenable db, a missing `meta.repo`, or a `Stat` error that is not `fs.ErrNotExist` all mean keep. Shares NOTHING with the Memory model — no scrub, no dedupe, no retention, never mem.db. Consumed by `cmd_graph.go` (boot-gate bypassed — annotations don't inherit, each leaf carries the bypass) and `internal/mcpserver/graph_tools.go`. A call *into* a closure is not an edge; a call made *from* inside a closure is, attributed to the enclosing declaration.
+7. **`internal/graph/`** — native code-graph subsystem (ADR-0020): per-repo Go symbol/call-edge index under `~/.droids-mem/graphs/<hash>/graph.db`, built with `go/packages` + `callgraph/cha` (interface dispatch resolved, over-approximate). Staleness-check-on-query via a `.go` count/size/max-mtime stamp; a repo that stops type-checking serves the last good graph with `stale: true`. Shares NOTHING with the Memory model — no scrub, no dedupe, no retention, never mem.db. Consumed by `cmd_graph.go` (boot-gate bypassed — annotations don't inherit, each leaf carries the bypass) and `internal/mcpserver/graph_tools.go`.
 
 ## Data model invariants
 
@@ -73,12 +67,11 @@ Single binary, layered. Don't bypass layers:
 - FTS sync via 3 triggers (AI/AD/AU). Direct inserts to `memories_fts` are bugs.
 - `tags` — space-delimited string, NOT JSON (FTS5 tokenizes on whitespace).
 - `updated_at = created_at` set in code on insert. CHECK constraint enforces `updated_at >= created_at` at DB layer. Never `DEFAULT 0`.
-- **Index-changing migration rungs must `DROP INDEX` before `CREATE INDEX`.** `CREATE INDEX IF NOT EXISTS` is a no-op against an index that already exists under a different column definition — an upgraded DB silently keeps the old shape while a fresh DB gets the new one, same `user_version`, nothing errors. `internal/db/migrations.go` and `internal/db/schema.go` must move in lockstep, and the drift guard (`TestInit_FreshMatchesMigratedShape`) must compare index *definitions* via `pragma_index_xinfo`, not names or `sqlite_master.sql` text (which differs by whitespace and `IF NOT EXISTS` between the DDL and migration paths).
 
 ## Dedupe (save)
 
 Two layers, both must pass before insert:
-1. **Fingerprint** — SHA-256 of normalized (`title+learned` + `task_type` + `kind`). Excludes `what` by design. Exact match → skip (or overwrite if `force=true`).
+1. **Fingerprint** — SHA-256 of normalized (`title+learned` + `task_type` + `kind`). Excludes `what` by design (ADR 0001). Exact match → skip (or overwrite if `force=true`).
 2. **Near-duplicate** — BM25 top-20 candidates (on `title+what+learned+tags`, column weights `bm25(memories_fts, 3, 1, 2, 1)`) re-ranked by Jaccard token-set similarity. Threshold: `≥ 0.85` → near-duplicate → skip. `SaveResponse` includes `score` (Jaccard) and `matched_id` when skipped.
 
 Both layers run inside a `BEGIN IMMEDIATE` transaction to close the dedupe race.
@@ -92,7 +85,7 @@ Two-tier model. No `--limit` flag; tier sizes are hardcoded constants.
 - `user_rules[]` — newest 5 `user_rule` rows for `task_type` (decision #20)
 
 **Browse tier** (title + 120-rune snippet from `what`):
-- rule stubs — `user_rule` rows beyond the always-tier 5, title-only, listed first
+- rule stubs — `user_rule` rows beyond the always-tier 5, title-only, listed first (ADR-0011)
 - ≤10 `error_resolution` by BM25 rank
 - ≤10 `task_pattern` by BM25 rank
 
@@ -110,16 +103,16 @@ Session retention: on `session_summary` save, delete oldest if > 5 for that `tas
 
 ## MCP contract
 
-8 tools: `mem_save`, `mem_search`, `mem_context`, `mem_get`, `mem_corpus` (memory) + `graph_symbol`, `graph_package`, `graph_build_wait` (code graph — signatures-first, agent passes `repo` = absolute project root).
+6 tools: `mem_save`, `mem_search`, `mem_context`, `mem_get` (memory) + `graph_symbol`, `graph_package` (code graph, ADR-0020 — signatures-first, agent passes `repo` = absolute project root).
 
 - `mem_context` mints `session_id` (stateless server — agent stores and reuses it).
-- Auth: `Authorization: Bearer <token>` on every `/mcp` request. Stdio transport (`serve --stdio`) has no port/token — the pipe is private to the spawning host; same tool surface, only the instructions string's summary sentence differs (stdio hosts self-save a `session_summary`).
-- `*store.ValidationError` → MCP tool error `{error, field, message}`; other runtime errors → structured envelope `{status, error, message, retryable, suggestion}` (dominant case: transient `BEGIN IMMEDIATE` write-lock timeout).
+- Auth: `Authorization: Bearer <token>` on every `/mcp` request.
+- `*store.ValidationError` → MCP tool error `{error, field, message}`.
 - SIGTERM → `http.Server.Shutdown` (10 s grace) → `db.Close`.
 
-## Consumer pattern (convention, not enforced)
+## Consumer pattern (ADR 0004)
 
-Intended flow: only the Root agent writes to `droids-mem` — sub-agents get no MCP tools and consume the context Bundle injected by Root, which runs `mem_context` first, threads `session_id` through the run, then fans out `mem_save` calls in Rollup. This is a *convention*, not a runtime control: nothing gates writes by caller. `internal/mcpserver/tools.go` instructs every connected agent to save proactively, and `install --all` registers the bridge at `claude mcp add --scope user`. The 4-kind enum (`session_summary`, `task_pattern`, `error_resolution`, `user_rule`) is frozen — no `observation` kind.
+Only Root agent writes to `droids-mem`. Sub-agents get no MCP tools — they consume the context Bundle injected by Root. Root runs `mem_context` first, threads `session_id` through the run, then fans out `mem_save` calls in Rollup. The 4-kind enum (`session_summary`, `task_pattern`, `error_resolution`, `user_rule`) is frozen — no `observation` kind.
 
 ## Dependencies (locked)
 
@@ -130,18 +123,23 @@ Intended flow: only the Root agent writes to `droids-mem` — sub-agents get no 
 
 ## Reference docs
 
-This file is the design reference that ships with the repo — the rationale for
-every locked decision is stated inline above, not deferred to another document.
-
-Some code comments still carry `(ADR-00XX)` parentheticals. Those annotate real
-decisions, but the ADR files are **not in the repo** (`/docs/` is gitignored, so
-they exist only on a maintainer's machine). Treat such a citation as a bare
-marker that a decision was deliberate — never as something to go read, and never
-as grounds to assume the doc says more than the surrounding code and this file
-already say. Do not add new ADR citations to tracked files.
-
-The same applies to `future.todo`, `CONTEXT.md`, and `files/` — all local only,
-none tracked.
+- `files/Droids-mem-PRD.md` — full product spec, data model, response shapes.
+- `M0-decisions.md` — locked pre-impl decisions. Read before changing any design assumption.
+- `files/CLI-GUIDE.md` + `files/CHECKLIST.md` — CLI design rules.
+- `CONTEXT.md` — domain language and term aliases.
+- `docs/adr/0001` — fingerprint scope decisions.
+- `docs/adr/0002` — context bundle tier model.
+- `docs/adr/0003` — MCP transport, bearer auth, session ownership.
+- `docs/adr/0004` — parent-as-memory-broker pattern (why sub-agents don't write to droids-mem).
+- `docs/adr/0005` — three-layer workspace model.
+- `docs/adr/0006` — git JSONL sync for project workspaces.
+- `docs/adr/0007` — PII scrub pipeline.
+- `docs/adr/0008` — layered scrub detectors.
+- `docs/adr/0009` — store owns error serialization.
+- `docs/adr/0010` — no automatic retention; doctor warnings + manual prune with dupe-cluster suggestions.
+- `docs/adr/0011` — user_rule overflow surfaces as browse-tier stubs + `user_rules_total`.
+- `docs/adr/0020` — native code graph (Go-only, per-repo graph.db, signatures-first tools).
+- `Future.md` — deferred / post-V1 ideas.
 
 ## Engineering practices
 
@@ -149,18 +147,3 @@ none tracked.
 - We try to only add new functionality that is small (that is, simple and few lines of code) or absolutely necessary. If a change is not small or absolutely necessary, don't make it.
 
 - Use cc-skills-golang for best go practices
-
-- **Before calling a change done, run `golangci-lint run --timeout 5m`** — not
-  just `go test ./...` + `go vet ./...`. Linters catch what the compiler and
-  tests don't: `nilerr` (returning `nil` in a block guarded by a non-nil error
-  — note it fires even when the error isn't bound to a named var, and even on
-  the direct `if json.Unmarshal(x) != nil { return nil }` shape), `gosec`
-  (G304 file-inclusion, G301/G306 perms), etc. An intentional `return nil` on
-  an error path (e.g. skip-and-count a bad row) needs `//nolint:nilerr` with a
-  reason, never a silent suppression.
-- **Streaming a line-delimited input with a "skip bad rows, never abort"
-  contract → use `bufio.Reader.ReadBytes('\n')`, not `bufio.Scanner`.**
-  Scanner aborts the whole stream via `sc.Err()` on any line over its 64KB
-  token cap, which a crafted/oversized line can trigger to defeat exactly that
-  per-line resilience guarantee; Reader grows to any line length so a bad line
-  stays a per-line failure. (Learned building `import`.)

@@ -3,11 +3,7 @@
 // Invoked by `droids-mem serve`. logic lives in internal/store; this
 // package only wires transport + auth + tool registration.
 //
-// Two transports, same tool surface: Run (HTTP, loopback + bearer token, for
-// hosts that connect to a long-lived daemon) and RunStdio (stdin/stdout, for
-// hosts that spawn the server as a child). The HTTP half carries everything
-// the stdio half does not need — token, port, pid file, /identity proof,
-// ensure-server — so prefer stdio for any new host.
+// Architecture rationale: docs/adr/0003-mcp-bridge-for-agentspan.md.
 package mcpserver
 
 import (
@@ -23,15 +19,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/samuelmolero26/droids-mem/internal/graph"
-	"github.com/samuelmolero26/droids-mem/internal/share"
-	"github.com/samuelmolero26/droids-mem/internal/state"
 	"github.com/samuelmolero26/droids-mem/internal/store"
 )
 
@@ -69,10 +62,8 @@ const (
 // the redundant self-save harmless.
 const instructionsCore = `droids-mem is your persistent memory across sessions. Prior lessons — fixes, decisions, conventions — are stored here so you do not relearn them. Call these tools on your own; do not wait to be asked.
 
-Available tools: mem_save, mem_search, mem_context, mem_get, mem_corpus, graph_symbol, graph_package, graph_build_wait
-
 AT THE START of a task, and again whenever the topic shifts:
-- Call mem_search with a short description of what you are about to do. This surfaces relevant prior lessons by relevance and needs no task_type. Each result includes an overlap_score (0-1): higher means more literal token overlap with your query, lower means the connection is looser (synonyms, rewording). Judge relevance yourself — ignore weak results. If you are investigating a problem that may span repos, pass all_projects=true to search every project's memories.
+- Call mem_search with a short description of what you are about to do. This surfaces relevant prior lessons by relevance and needs no task_type. If the results look weak or unrelated, ignore them.
 - If you know a stable workflow tag for this work, also call mem_context with that task_type for curated continuity (prior session summary + standing user rules). Derive task_type mechanically — the git repo name or top-level directory name — and reuse the exact same string every session for that project; inventing a new slug each time silently orphans prior continuity. A miss here is harmless — the search above already covers you.
 
 AS YOU WORK, when you learn something worth reusing next time, call mem_save:
@@ -81,28 +72,23 @@ AS YOU WORK, when you learn something worth reusing next time, call mem_save:
 - user_rule — a correction or stable preference the user gave you.
 Save only a genuinely reusable lesson, not routine steps. Re-saving the same lesson is harmless (the store deduplicates), so prefer saving over forgetting. Thread the session_id returned by mem_context (or the first mem_save) through later saves in the same run. If you call mem_context again in the same run (topic pivot, mode=refresh), pass that existing session_id back in — omitting it mints a new one and fragments the run's memories.
 
-AFTER EVERY TOOL CALL, state briefly what you learned and how it affects your approach. For example: "mem_search found a prior fix for HTTP 429 retries — reusing that approach" or "graph_symbol shows Store.Save has 15 transitive callers — preserving the interface". This is the only way the user sees that your decisions come from memory and graph data, not just reasoning. A one-liner after the tool result is enough.
-
-FOR CODE QUESTIONS in a Go repo, prefer the graph tools over grep and file reading — they answer from a pre-built call graph in one call. graph_package orients you in an area (exported surface, signatures only); graph_symbol shows one symbol's source plus callers/callees as signature stubs, blast radius via direction=up depth>1, call paths via 'to'. Expand a stub by re-querying its exact qname. Pass your project root as 'repo'.
 `
 
 const summaryPolicyHTTP = `Do NOT save session summaries here — your host may record those automatically at session end; saving one yourself would duplicate it.`
 
 const summaryPolicyStdio = `AT THE END of a run — task complete or user wrapping up — save ONE session_summary (kind=session_summary: what happened, what you learned, what comes next). No hook on this host records summaries automatically; skipping this leaves no continuity for the next session. If a summary hook is wired after all, the store's dedupe makes your save harmless.`
 
-const instructionsTail = `Never put secrets, tokens, or keys in any field; the store scrubs free-text fields on save, but tags are stored verbatim (unscrubbed) — keep secrets out of every field anyway.
+const instructionsTail = ` Never put secrets, tokens, or keys in any field; the store scrubs free-text fields on save, but tags are stored verbatim (unscrubbed) — keep secrets out of every field anyway.
 
-BEFORE EDITING a function, call graph_symbol with direction=up depth=3 to check its blast radius. The transitive_callers count tells you how many symbols depend on it. Mention this count when you state what you learned — it is the single most useful signal the graph gives you.
-
-When a graph response includes freshness.stale: true, a genuine build failure means the whole previous index is being served. A single package that does not type-check degrades alone instead: carried: true on a symbol, and freshness.stale_units naming the packages riding on the previous build's edges. Verify critical findings against actual source files before acting on either.`
+FOR CODE QUESTIONS in a Go repo, prefer the graph tools over grep and file reading — they answer from a pre-built call graph in one call. graph_package orients you in an area (exported surface, signatures only); graph_symbol shows one symbol's source plus callers/callees as signature stubs, blast radius via direction=up depth>1, call paths via 'to'. Expand a stub by re-querying its exact qname. Pass your project root as 'repo'.`
 
 // instructions assembles the transport-appropriate protocol string. The HTTP
 // variant is byte-identical to the pre-split serverInstructions const.
 func instructions(stdio bool) string {
 	if stdio {
-		return instructionsCore + "\n" + summaryPolicyStdio + "\n\n" + instructionsTail
+		return instructionsCore + summaryPolicyStdio + instructionsTail
 	}
-	return instructionsCore + "\n" + summaryPolicyHTTP + "\n\n" + instructionsTail
+	return instructionsCore + summaryPolicyHTTP + instructionsTail
 }
 
 // Config controls the MCP bridge server. Zero values fall back to defaults.
@@ -177,19 +163,6 @@ func Run(ctx context.Context, cfg Config, st *store.Store) error {
 		serveErr <- nil
 	}()
 
-	// Boot auto-Fetch (ADR-0029 §5): pull a teammate's shared pool once, in its
-	// own goroutine launched after the listener is already serving, so this
-	// detached server's single DB connection is never blocked at startup.
-	// stopCtx (not ctx) so a SIGTERM cancels an in-flight fetch before the
-	// caller's deferred db.Close runs.
-	// Waited on before returning: canceling stopCtx only *asks* the fetch to
-	// stop, it does not wait for it. Returning while the goroutine is still
-	// mid-import would let the caller's deferred db.Close land under a live
-	// write — exactly the guarantee this function's doc comment makes.
-	var fetchWG sync.WaitGroup
-	startBootFetch(stopCtx, st, logger, &fetchWG)
-	defer fetchWG.Wait()
-
 	select {
 	case err := <-serveErr:
 		if err != nil {
@@ -207,45 +180,6 @@ func Run(ctx context.Context, cfg Config, st *store.Store) error {
 		logger.Printf("shutdown complete")
 		return nil
 	}
-}
-
-// bootFetchTimeout bounds the boot auto-Fetch git pull so an unreachable remote
-// can't hang and pin the single DB connection (ADR-0029 §5).
-const bootFetchTimeout = 15 * time.Second
-
-// startBootFetch runs one best-effort Fetch of the configured shared pool in its
-// own goroutine (ADR-0029 §5) so a teammate's memories reach this agent without
-// a human remembering to pull. No repo configured → no-op. Failure is logged,
-// never fatal — a stale or unreachable pool must not degrade serving. The
-// caller owns wg and must Wait on it before releasing the store.
-func startBootFetch(ctx context.Context, st *store.Store, logger *log.Logger, wg *sync.WaitGroup) {
-	repo := shareRepo()
-	if repo == "" {
-		return
-	}
-	wg.Go(func() {
-		fctx, cancel := context.WithTimeout(ctx, bootFetchTimeout)
-		defer cancel()
-		res, err := share.Fetch(fctx, repo, st)
-		if err != nil {
-			logger.Printf("boot fetch skipped: %v", err)
-			return
-		}
-		logger.Printf("boot fetch: imported %d, skipped %d, failed %d from %s",
-			res.Imported, res.Skipped, res.Failed, repo)
-	})
-}
-
-// shareRepo resolves the shared-pool repo path: DROIDS_MEM_SHARE_REPO overrides
-// (tests/one-offs), else the persisted ~/.droids-mem/share_repo. A detached
-// serve does not inherit the user's shell env, so the file is the load-bearing
-// source (ADR-0029 §6); the env var is the escape hatch.
-func shareRepo() string {
-	if v := os.Getenv("DROIDS_MEM_SHARE_REPO"); v != "" {
-		return v
-	}
-	repo, _ := state.LoadShareRepo()
-	return repo
 }
 
 // identityHandler answers a challenge–response proof of token knowledge:

@@ -11,6 +11,9 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/samuelmolero26/droids-mem/internal/mcpserver"
+	"github.com/samuelmolero26/droids-mem/internal/state"
 )
 
 // claudeSnippet is the CLAUDE.md compose-guidance block (the model-judgment
@@ -53,9 +56,8 @@ func newInstallCmd() *cobra.Command {
 			"Default target is the user settings (~/.claude/settings.json); use\n" +
 			"--project to target ./.claude/settings.json instead. Idempotent and\n" +
 			"non-destructive — existing settings and hooks are preserved.\n\n" +
-			"--all performs the full bootstrap in one shot: hooks + register the\n" +
-			"server with the Claude Code CLI (user scope, stdio transport: Claude\n" +
-			"spawns it per session, so there is no daemon and no token) + append\n" +
+			"--all performs the full bootstrap in one shot: hooks + start the MCP\n" +
+			"bridge + register it with the Claude Code CLI (user scope) + append\n" +
 			"the compose-guidance block to CLAUDE.md. Each step is idempotent.\n\n" +
 			"--host codex|opencode registers droids-mem as a stdio MCP server in\n" +
 			"that host's config instead (codex: ~/.codex/config.toml; opencode:\n" +
@@ -76,23 +78,23 @@ func newInstallCmd() *cobra.Command {
 			hookCmd := self + " session hook"
 
 			if printOnly {
-				writeJSON(buildHooksBlock(hookCmd)) // {"hooks":{...}}
+				writeJSON(buildHooksBlock(hookCmd))
 				return nil
 			}
 
-			settingsPath, err := claudeSettingsPath(project)
+			path, err := claudeSettingsPath(project)
 			if err != nil {
 				writeError("install_failed", err.Error(), false)
 				exitWith(ExitError)
 			}
-			added, err := mergeHooksInto(settingsPath, hookCmd)
+			added, err := mergeHooksInto(path, hookCmd)
 			if err != nil {
 				writeError("install_failed", err.Error(), true)
 				exitWith(ExitError)
 			}
 			result := map[string]any{
 				"status":       "installed",
-				"settings":     settingsPath,
+				"settings":     path,
 				"events_added": added,
 				"command":      hookCmd,
 			}
@@ -105,7 +107,8 @@ func newInstallCmd() *cobra.Command {
 
 			// --all: best-effort per step — report each outcome instead of
 			// aborting the whole bootstrap on the first failure.
-			result["mcp_registration"] = stepStatus(registerClaudeMCP(self))
+			result["server"] = stepStatus(runEnsureServer(self))
+			result["mcp_registration"] = stepStatus(registerClaudeMCP())
 			mdPath, appended, err := appendClaudeSnippet(project)
 			switch {
 			case err != nil:
@@ -120,8 +123,8 @@ func newInstallCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&project, "project", false, "Install into ./.claude/settings.json instead of the user settings")
-	cmd.Flags().BoolVar(&printOnly, "print", false, "Print the hooks block + MCP config instead of writing files")
-	cmd.Flags().BoolVar(&all, "all", false, "Full bootstrap: hooks + claude mcp add (stdio) + CLAUDE.md snippet")
+	cmd.Flags().BoolVar(&printOnly, "print", false, "Print the hooks block instead of writing settings.json")
+	cmd.Flags().BoolVar(&all, "all", false, "Full bootstrap: hooks + ensure-server + claude mcp add + CLAUDE.md snippet")
 	cmd.Flags().StringVar(&host, "host", "claude", "Target host: claude, codex, or opencode")
 	return cmd
 }
@@ -188,8 +191,6 @@ func installCodex(self string, printOnly bool) error {
 		}
 		out = string(existing) + sep + block
 	}
-
-	// #nosec G703 -- path is a fixed config location, not user input
 	if err := os.WriteFile(path, []byte(out), 0o600); err != nil {
 		writeError("install_failed", "write "+path+": "+err.Error(), true)
 		exitWith(ExitError)
@@ -227,13 +228,8 @@ func installOpencode(self string, printOnly bool) error {
 		writeError("install_failed", "read "+path+": "+err.Error(), true)
 		exitWith(ExitError)
 	}
-	mcp, ok := config["mcp"].(map[string]any)
-	if !ok {
-		if _, present := config["mcp"]; present {
-			// Don't clobber a non-object "mcp" — that's the user's data.
-			writeError("install_failed", `existing "mcp" key in `+path+" is not an object; refusing to overwrite", false)
-			exitWith(ExitError)
-		}
+	mcp, _ := config["mcp"].(map[string]any)
+	if mcp == nil {
 		mcp = map[string]any{}
 	}
 	if _, ok := mcp["droids-mem"]; ok {
@@ -267,27 +263,40 @@ func stepStatus(err error) string {
 	return "ok"
 }
 
-// registerClaudeMCP registers droids-mem with the Claude Code CLI at user
-// scope (available in every project) over the STDIO transport: Claude spawns
-// `<self> serve --stdio` as a child and owns its lifecycle, so there is no
-// port to find, no daemon to keep alive and no bearer token to pass.
-// Registration is the one bootstrap step MCP itself cannot do — a server
-// cannot add itself to a client's config — so we drive the client's own CLI.
-func registerClaudeMCP(self string) error {
+// runEnsureServer starts (or confirms) the MCP bridge via `<self> ensure-server`.
+func runEnsureServer(self string) error {
+	// #nosec G204 -- re-exec of our own binary (os.Executable), fixed argv.
+	if out, err := exec.Command(self, "ensure-server").CombinedOutput(); err != nil {
+		return fmt.Errorf("ensure-server: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// registerClaudeMCP registers the bridge with the Claude Code CLI at user scope
+// (available in every project) unless already registered. Registration is the
+// one bootstrap step MCP itself cannot do — a server cannot add itself to a
+// client's config — so we drive the client's own CLI.
+func registerClaudeMCP() error {
 	claude, err := exec.LookPath("claude")
 	if err != nil {
-		return errors.New("claude CLI not found in PATH — register manually: claude mcp add --scope user droids-mem -- " + self + " serve --stdio")
+		return errors.New("claude CLI not found in PATH — register manually: claude mcp add --scope user --transport http droids-mem <url> --header 'Authorization: Bearer <token>'")
 	}
-	// Remove first, unconditionally. `mcp get` succeeds for an existing HTTP
-	// registration too, so an existence check would leave anyone upgrading from
-	// the daemon pinned to the old transport for ever. A remove with nothing
-	// registered fails harmlessly, which is why its error is ignored.
 	// #nosec G204 -- claude path from exec.LookPath, fixed argv.
-	_ = exec.Command(claude, "mcp", "remove", "--scope", "user", "droids-mem").Run()
-
-	// #nosec G204 -- claude from exec.LookPath; self from os.Executable.
+	if exec.Command(claude, "mcp", "get", "droids-mem").Run() == nil {
+		return nil // already registered
+	}
+	tok, err := state.LoadOrCreateToken()
+	if err != nil {
+		return fmt.Errorf("load token: %w", err)
+	}
+	url := baseURL(envOr("DROIDS_MEM_MCP_ADDR", mcpserver.DefaultAddr)) +
+		envOr("DROIDS_MEM_MCP_ENDPOINT", mcpserver.DefaultEndpoint)
+	// #nosec G204 -- claude path from exec.LookPath, token is our own bearer.
 	out, err := exec.Command(claude, "mcp", "add",
-		"--scope", "user", "droids-mem", "--", self, "serve", "--stdio",
+		"--scope", "user",
+		"--transport", "http",
+		"droids-mem", url,
+		"--header", "Authorization: Bearer "+tok,
 	).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("claude mcp add: %w: %s", err, strings.TrimSpace(string(out)))
@@ -299,9 +308,14 @@ func registerClaudeMCP(self string) error {
 // (~/.claude/CLAUDE.md, or ./CLAUDE.md with --project). Idempotent: a file
 // already containing the snippet heading is left untouched.
 func appendClaudeSnippet(project bool) (path string, appended bool, err error) {
-	path, err = claudeMdPath(project)
-	if err != nil {
-		return "", false, err
+	if project {
+		path = "CLAUDE.md"
+	} else {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", false, fmt.Errorf("resolve home dir: %w", err)
+		}
+		path = filepath.Join(home, ".claude", "CLAUDE.md")
 	}
 	existing, err := os.ReadFile(path) // #nosec G304 -- fixed CLAUDE.md location, not user input
 	if err != nil && !os.IsNotExist(err) {
@@ -363,13 +377,9 @@ func newHookEntry(matcher, hookCmd string) map[string]any {
 	return entry
 }
 
-// mergeHooksInto reads (or creates) settings.json, canonicalizes the session-hook
-// entries, and writes it back. Returns the events touched. Idempotent: an event
-// already holding exactly one current entry is left untouched. Any other
-// session-hook registration — a stale binary path (e.g. a temp build that ran
-// install), a drifted matcher from an older release, or a duplicate — is
-// replaced, not stacked: two live registrations double-fire every hook and
-// double-count the intake gate, halving the effective Stop threshold.
+// mergeHooksInto reads (or creates) settings.json, adds any missing session-hook
+// entries, and writes it back. Returns the events newly added. Idempotent: an
+// event already pointing at hookCmd is left untouched.
 func mergeHooksInto(path, hookCmd string) ([]string, error) {
 	settings := map[string]any{}
 	if b, err := os.ReadFile(path); err == nil { // #nosec G304 -- path is the settings.json location, not user input
@@ -388,31 +398,10 @@ func mergeHooksInto(path, hookCmd string) ([]string, error) {
 	added := []string{}
 	for _, e := range claudeHookEvents {
 		entries, _ := hooks[e.name].([]any)
-		kept := make([]any, 0, len(entries)+1)
-		canonical := false
-		changed := false
-		for _, entry := range entries {
-			if !entryHasSessionHook(entry) {
-				kept = append(kept, entry)
-				continue
-			}
-			em, _ := entry.(map[string]any)
-			matcher, _ := em["matcher"].(string)
-			if !canonical && matcher == e.matcher && hookEntryExists([]any{entry}, hookCmd) {
-				canonical = true
-				kept = append(kept, entry)
-				continue
-			}
-			changed = true // stale path, drifted matcher, or duplicate — dropped
-		}
-		if !canonical {
-			kept = append(kept, newHookEntry(e.matcher, hookCmd))
-			changed = true
-		}
-		if !changed {
+		if hookEntryExists(entries, hookCmd) {
 			continue
 		}
-		hooks[e.name] = kept
+		hooks[e.name] = append(entries, newHookEntry(e.matcher, hookCmd))
 		added = append(added, e.name)
 	}
 	settings["hooks"] = hooks
