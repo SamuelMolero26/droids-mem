@@ -5,11 +5,10 @@ All notable changes to droids-mem are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.1] — 2026-07-04
 
-Targets **v1.2.0**. Headline: a native code graph so agents answer
-"what calls X" from a pre-built index instead of grep, plus a retrieval and
-TUI pass.
+Headline: a native code graph so agents answer "what calls X" from a
+pre-built index instead of grep, plus a retrieval and TUI pass.
 
 ### Added
 - **Native code graph** (ADR-0020): a per-repo Go symbol + call-edge index
@@ -177,7 +176,7 @@ normally.
 - `workspace.yml` / inline scrub config → v1.1. v1.0 pattern set + order are
   hardcoded.
 
-[Unreleased]: https://github.com/SamuelMolero26/droids-mem/compare/v1.1.0...HEAD
+[1.1.1]: https://github.com/SamuelMolero26/droids-mem/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/SamuelMolero26/droids-mem/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/SamuelMolero26/droids-mem/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/SamuelMolero26/droids-mem/releases/tag/v1.0.0

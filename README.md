@@ -161,6 +161,22 @@ claude mcp list             # droids-mem listed + reachable
 droids-mem recent-sessions  # your auto-saved session summaries
 ```
 
+### Other hosts (codex, opencode)
+
+Any MCP host that spawns stdio servers gets the same memory — one command:
+
+```
+droids-mem install --host codex      # registers in ~/.codex/config.toml
+droids-mem install --host opencode   # registers in ~/.config/opencode/opencode.json
+```
+
+Both are idempotent and preserve your existing config (`--print` shows the
+snippet instead of writing). The host launches `droids-mem serve --stdio` as a
+child process — no port, token, or background server. On stdio hosts the
+server's instructions tell the model to save its own end-of-run
+`session_summary` (there's no hook to do it automatically); the store's
+dedupe keeps that safe everywhere.
+
 ---
 
 ## MCP tools
@@ -183,7 +199,8 @@ Operator commands (`list`, `schema`, `doctor`, `migrate`, `prune`, `scrub`) are
 
 ```
 droids-mem ensure-server   # ping /healthz, spawn detached serve if down
-droids-mem serve           # foreground MCP bridge
+droids-mem serve           # foreground MCP bridge (Streamable HTTP)
+droids-mem serve --stdio   # MCP over stdin/stdout (codex, opencode — host-spawned)
 ```
 
 Auth is `Authorization: Bearer <token>`. `/identity?nonce=<n>` answers
@@ -263,7 +280,7 @@ State dir: `mem.db` (0600), `token` (0600), `mcp.pid`, `mcp.log`.
 | `graph` | Query a Go repo's code graph (`index`, `symbol`, `package`) |
 | `recent-sessions` | List recent auto-saved session summaries |
 | `session` | Session-memory plumbing (stage, check, flush, recover, hook) |
-| `install` | Wire session memory into Claude Code |
+| `install` | Wire into a host: Claude Code hooks, or `--host codex\|opencode` MCP registration |
 | `doctor` | FTS integrity/rebuild, optimize, VACUUM, `--scrub-stats` |
 | `schema` | Show parameter schema for a command |
 | `scrub` | Run the scrub engine ad-hoc (`--check`, `--test`) |

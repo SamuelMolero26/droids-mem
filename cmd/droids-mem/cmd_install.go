@@ -48,21 +48,32 @@ var claudeHookEvents = []hookEvent{
 // event at `<this binary> session hook`. No shell scripts, no jq.
 func newInstallCmd() *cobra.Command {
 	var project, printOnly, all bool
+	var host string
 	cmd := &cobra.Command{
 		Use:   "install",
-		Short: "Wire droids-mem session memory into Claude Code (settings.json hooks)",
+		Short: "Wire droids-mem into an agent host (Claude Code, codex, opencode)",
 		Long: "Merge the session-memory hooks into Claude Code's settings.json.\n" +
 			"Default target is the user settings (~/.claude/settings.json); use\n" +
 			"--project to target ./.claude/settings.json instead. Idempotent and\n" +
 			"non-destructive — existing settings and hooks are preserved.\n\n" +
 			"--all performs the full bootstrap in one shot: hooks + start the MCP\n" +
 			"bridge + register it with the Claude Code CLI (user scope) + append\n" +
-			"the compose-guidance block to CLAUDE.md. Each step is idempotent.",
+			"the compose-guidance block to CLAUDE.md. Each step is idempotent.\n\n" +
+			"--host codex|opencode registers droids-mem as a stdio MCP server in\n" +
+			"that host's config instead (codex: ~/.codex/config.toml; opencode:\n" +
+			"~/.config/opencode/opencode.json). Idempotent; --all not supported.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			self, err := os.Executable()
 			if err != nil {
 				writeError("install_failed", "cannot resolve binary path: "+err.Error(), false)
 				exitWith(ExitError)
+			}
+			if host != "claude" {
+				if all {
+					writeError("usage", "--all is Claude-only; --host "+host+" just registers the stdio MCP server", false)
+					exitWith(ExitUsage)
+				}
+				return installHost(host, self, printOnly)
 			}
 			hookCmd := self + " session hook"
 
@@ -114,7 +125,136 @@ func newInstallCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&project, "project", false, "Install into ./.claude/settings.json instead of the user settings")
 	cmd.Flags().BoolVar(&printOnly, "print", false, "Print the hooks block instead of writing settings.json")
 	cmd.Flags().BoolVar(&all, "all", false, "Full bootstrap: hooks + ensure-server + claude mcp add + CLAUDE.md snippet")
+	cmd.Flags().StringVar(&host, "host", "claude", "Target host: claude, codex, or opencode")
 	return cmd
+}
+
+// codexMCPBlock renders the config.toml table registering the stdio bridge.
+func codexMCPBlock(self string) string {
+	return fmt.Sprintf("[mcp_servers.droids-mem]\ncommand = %q\nargs = [\"serve\", \"--stdio\"]\n", self)
+}
+
+// codexMCPMarker detects a prior install (idempotency).
+const codexMCPMarker = "[mcp_servers.droids-mem]"
+
+// installHost registers droids-mem as a stdio MCP server in a non-Claude
+// host's config (ADR-0019). Per-host difference is data — a config snippet +
+// a target path — not logic; the stdio instructions string carries the
+// self-save summary protocol, so no hook wiring is required for parity.
+func installHost(host, self string, printOnly bool) error {
+	switch host {
+	case "codex":
+		return installCodex(self, printOnly)
+	case "opencode":
+		return installOpencode(self, printOnly)
+	default:
+		writeError("usage", "unknown --host "+host+" (want claude, codex, or opencode)", false)
+		exitWith(ExitUsage)
+		return nil
+	}
+}
+
+// installCodex appends the [mcp_servers.droids-mem] table to
+// ~/.codex/config.toml. Append-if-absent keeps us dependency-free: TOML
+// tables are order-independent at top level, and the marker check makes
+// re-runs no-ops. We never rewrite the user's existing config.
+func installCodex(self string, printOnly bool) error {
+	block := codexMCPBlock(self)
+	if printOnly {
+		fmt.Println(block)
+		return nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		writeError("install_failed", "resolve home dir: "+err.Error(), false)
+		exitWith(ExitError)
+	}
+	path := filepath.Join(home, ".codex", "config.toml")
+	existing, err := os.ReadFile(path) // #nosec G304 -- fixed config location, not user input
+	if err != nil && !os.IsNotExist(err) {
+		writeError("install_failed", "read "+path+": "+err.Error(), true)
+		exitWith(ExitError)
+	}
+	if strings.Contains(string(existing), codexMCPMarker) {
+		writeJSON(map[string]any{"status": "already_installed", "host": "codex", "config": path})
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		writeError("install_failed", "create dir: "+err.Error(), true)
+		exitWith(ExitError)
+	}
+	out := block
+	if n := len(existing); n > 0 {
+		sep := "\n"
+		if existing[n-1] != '\n' {
+			sep = "\n\n"
+		}
+		out = string(existing) + sep + block
+	}
+
+	// #nosec G703 -- fixed config location, not user input
+	if err := os.WriteFile(path, []byte(out), 0o600); err != nil {
+		writeError("install_failed", "write "+path+": "+err.Error(), true)
+		exitWith(ExitError)
+	}
+	writeJSON(map[string]any{"status": "installed", "host": "codex", "config": path})
+	return nil
+}
+
+// installOpencode merges the droids-mem stdio server into opencode's global
+// config (~/.config/opencode/opencode.json) under the "mcp" key. Same
+// read-merge-write pattern as the Claude settings.json merge.
+func installOpencode(self string, printOnly bool) error {
+	entry := map[string]any{
+		"type":    "local",
+		"command": []any{self, "serve", "--stdio"},
+		"enabled": true,
+	}
+	if printOnly {
+		writeJSON(map[string]any{"mcp": map[string]any{"droids-mem": entry}})
+		return nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		writeError("install_failed", "resolve home dir: "+err.Error(), false)
+		exitWith(ExitError)
+	}
+	path := filepath.Join(home, ".config", "opencode", "opencode.json")
+	config := map[string]any{}
+	if b, err := os.ReadFile(path); err == nil { // #nosec G304 -- fixed config location, not user input
+		if err := json.Unmarshal(b, &config); err != nil {
+			writeError("install_failed", "parse "+path+": "+err.Error(), false)
+			exitWith(ExitError)
+		}
+	} else if !os.IsNotExist(err) {
+		writeError("install_failed", "read "+path+": "+err.Error(), true)
+		exitWith(ExitError)
+	}
+	mcp, _ := config["mcp"].(map[string]any)
+	if mcp == nil {
+		mcp = map[string]any{}
+	}
+	if _, ok := mcp["droids-mem"]; ok {
+		writeJSON(map[string]any{"status": "already_installed", "host": "opencode", "config": path})
+		return nil
+	}
+	mcp["droids-mem"] = entry
+	config["mcp"] = mcp
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		writeError("install_failed", "create dir: "+err.Error(), true)
+		exitWith(ExitError)
+	}
+	out, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		writeError("install_failed", "marshal config: "+err.Error(), false)
+		exitWith(ExitError)
+	}
+	if err := os.WriteFile(path, append(out, '\n'), 0o600); err != nil {
+		writeError("install_failed", "write "+path+": "+err.Error(), true)
+		exitWith(ExitError)
+	}
+	writeJSON(map[string]any{"status": "installed", "host": "opencode", "config": path})
+	return nil
 }
 
 // stepStatus renders a bootstrap step outcome for the result JSON.

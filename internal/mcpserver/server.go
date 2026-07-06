@@ -47,13 +47,20 @@ const (
 	maxIdentityNonceLen = 128
 )
 
-// serverInstructions is the proactive protocol surfaced to the model via the
-// MCP initialize response (ADR-0019, Layer 1). MCP has no auto-call primitive,
-// so this — plus the per-tool descriptions — is the only cross-host lever to
-// make an agent call droids-mem on its own. It is best-effort: the floor is
-// model judgment, backstopped by the store's dedup. Hard enforcement stays a
-// per-host hook concern (ADR-0016 is the Claude Code adapter).
-const serverInstructions = `droids-mem is your persistent memory across sessions. Prior lessons — fixes, decisions, conventions — are stored here so you do not relearn them. Call these tools on your own; do not wait to be asked.
+// The instructions string is the proactive protocol surfaced to the model via
+// the MCP initialize response (ADR-0019, Layer 1). MCP has no auto-call
+// primitive, so this — plus the per-tool descriptions — is the only cross-host
+// lever to make an agent call droids-mem on its own. It is best-effort: the
+// floor is model judgment, backstopped by the store's dedup. Hard enforcement
+// stays a per-host hook concern (ADR-0016 is the Claude Code adapter).
+//
+// Only the session-summary sentence differs by transport: HTTP hosts (Claude
+// Code, ADR-0016) have hooks that record summaries automatically, so the model
+// must NOT double-save; stdio hosts (codex, opencode) have no such hook wired
+// by default, so the model must save one itself or the run leaves no
+// continuity. A host that does wire a flush hook is still safe — dedupe makes
+// the redundant self-save harmless.
+const instructionsCore = `droids-mem is your persistent memory across sessions. Prior lessons — fixes, decisions, conventions — are stored here so you do not relearn them. Call these tools on your own; do not wait to be asked.
 
 AT THE START of a task, and again whenever the topic shifts:
 - Call mem_search with a short description of what you are about to do. This surfaces relevant prior lessons by relevance and needs no task_type. If the results look weak or unrelated, ignore them.
@@ -65,9 +72,24 @@ AS YOU WORK, when you learn something worth reusing next time, call mem_save:
 - user_rule — a correction or stable preference the user gave you.
 Save only a genuinely reusable lesson, not routine steps. Re-saving the same lesson is harmless (the store deduplicates), so prefer saving over forgetting. Thread the session_id returned by mem_context (or the first mem_save) through later saves in the same run. If you call mem_context again in the same run (topic pivot, mode=refresh), pass that existing session_id back in — omitting it mints a new one and fragments the run's memories.
 
-Do NOT save session summaries here — your host may record those automatically at session end; saving one yourself would duplicate it. Never put secrets, tokens, or keys in any field; the store scrubs free-text fields on save, but tags are stored verbatim (unscrubbed) — keep secrets out of every field anyway.
+`
+
+const summaryPolicyHTTP = `Do NOT save session summaries here — your host may record those automatically at session end; saving one yourself would duplicate it.`
+
+const summaryPolicyStdio = `AT THE END of a run — task complete or user wrapping up — save ONE session_summary (kind=session_summary: what happened, what you learned, what comes next). No hook on this host records summaries automatically; skipping this leaves no continuity for the next session. If a summary hook is wired after all, the store's dedupe makes your save harmless.`
+
+const instructionsTail = ` Never put secrets, tokens, or keys in any field; the store scrubs free-text fields on save, but tags are stored verbatim (unscrubbed) — keep secrets out of every field anyway.
 
 FOR CODE QUESTIONS in a Go repo, prefer the graph tools over grep and file reading — they answer from a pre-built call graph in one call. graph_package orients you in an area (exported surface, signatures only); graph_symbol shows one symbol's source plus callers/callees as signature stubs, blast radius via direction=up depth>1, call paths via 'to'. Expand a stub by re-querying its exact qname. Pass your project root as 'repo'.`
+
+// instructions assembles the transport-appropriate protocol string. The HTTP
+// variant is byte-identical to the pre-split serverInstructions const.
+func instructions(stdio bool) string {
+	if stdio {
+		return instructionsCore + summaryPolicyStdio + instructionsTail
+	}
+	return instructionsCore + summaryPolicyHTTP + instructionsTail
+}
 
 // Config controls the MCP bridge server. Zero values fall back to defaults.
 type Config struct {
@@ -97,15 +119,7 @@ func Run(ctx context.Context, cfg Config, st *store.Store) error {
 		logger = log.Default()
 	}
 
-	s := server.NewMCPServer(ServerName, ServerVersion,
-		server.WithToolCapabilities(true),
-		server.WithLogging(),
-		server.WithInstructions(serverInstructions),
-	)
-	registerTools(s, st)
-	if cfg.Graphs != nil {
-		registerGraphTools(s, cfg.Graphs)
-	}
+	s := newMCPServer(cfg, st, false)
 
 	mcpHandler := server.NewStreamableHTTPServer(s,
 		server.WithEndpointPath(cfg.Endpoint),
