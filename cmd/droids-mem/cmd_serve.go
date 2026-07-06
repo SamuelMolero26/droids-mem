@@ -12,6 +12,7 @@ import (
 
 func newServeCmd(a *app) *cobra.Command {
 	var addr, endpoint string
+	var stdio bool
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Run the MCP bridge server (Streamable HTTP + bearer auth)",
@@ -21,21 +22,28 @@ mem_save / mem_search / mem_context / mem_get.
 
 Requires DROIDS_MEM_MCP_TOKEN. Env overrides:
   DROIDS_MEM_MCP_ADDR     (default :7777)
-  DROIDS_MEM_MCP_ENDPOINT (default /mcp)`,
+  DROIDS_MEM_MCP_ENDPOINT (default /mcp)
+
+--stdio serves MCP over stdin/stdout instead, for hosts that spawn the
+server as a child process (codex, opencode). No port, token, or
+ensure-server; the host owns the lifecycle. --addr/--endpoint are ignored.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			s, err := a.store()
 			if err != nil {
 				return err
-			}
-			tok, err := state.LoadOrCreateToken()
-			if err != nil {
-				return fmt.Errorf("load token: %w", err)
 			}
 			gm, err := graphManager()
 			if err != nil {
 				return err
 			}
 			defer gm.Close()
+			if stdio {
+				return mcpserver.RunStdio(mcpserver.Config{Graphs: gm}, s)
+			}
+			tok, err := state.LoadOrCreateToken()
+			if err != nil {
+				return fmt.Errorf("load token: %w", err)
+			}
 			cfg := mcpserver.Config{
 				Addr:     envOr("DROIDS_MEM_MCP_ADDR", addr),
 				Endpoint: envOr("DROIDS_MEM_MCP_ENDPOINT", endpoint),
@@ -47,6 +55,7 @@ Requires DROIDS_MEM_MCP_TOKEN. Env overrides:
 	}
 	cmd.Flags().StringVar(&addr, "addr", mcpserver.DefaultAddr, "bind address (env DROIDS_MEM_MCP_ADDR overrides)")
 	cmd.Flags().StringVar(&endpoint, "endpoint", mcpserver.DefaultEndpoint, "MCP endpoint path (env DROIDS_MEM_MCP_ENDPOINT overrides)")
+	cmd.Flags().BoolVar(&stdio, "stdio", false, "Serve MCP over stdin/stdout (for stdio hosts: codex, opencode)")
 	return cmd
 }
 
