@@ -252,5 +252,24 @@ func toolErr(err error) *mcp.CallToolResult {
 		b, _ := json.Marshal(payload)
 		return mcp.NewToolResultError(string(b))
 	}
-	return mcp.NewToolResultError(err.Error())
+	// Runtime errors (dominant case: BEGIN IMMEDIATE write-lock timeout under
+	// concurrent writers, ADR-0024) get the same structured envelope so the
+	// agent sees retryable/suggestion instead of a raw SQLITE_BUSY string.
+	// ponytail: retryable:true for all runtime errors here — the common one is
+	// transient (busy); the rare non-retryable ones (marshal/disk) self-limit
+	// on one retry. Sniff the sqlite code only if that becomes a real problem.
+	b, _ := json.Marshal(struct {
+		Status     string `json:"status"`
+		Error      string `json:"error"`
+		Message    string `json:"message"`
+		Retryable  bool   `json:"retryable"`
+		Suggestion string `json:"suggestion"`
+	}{
+		Status:     "error",
+		Error:      "internal_error",
+		Message:    err.Error(),
+		Retryable:  true,
+		Suggestion: "retry after a short backoff",
+	})
+	return mcp.NewToolResultError(string(b))
 }
