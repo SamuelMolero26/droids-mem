@@ -90,6 +90,38 @@ All output is JSON on stdout; errors are JSON on stderr. Exit codes: `0` ok,
 
 ---
 
+## Retrieval performance
+
+The core promise is that an agent finds a lesson later, phrased **differently**
+than it was saved. That claim is measured, not asserted: a fixed benchmark of
+**24 memories** in seven distractor clusters (so retrieval has to beat
+confusable neighbours, not just return "a" memory) is queried by **33
+hand-authored paraphrases** whose wording is independent of the target. It runs
+in CI (`internal/store/recall_benchmark_test.go`) and fails the build if recall
+regresses; full report in [`eval/RESULTS.md`](eval/RESULTS.md).
+
+| Query class | recall@1 | recall@5 |
+|---|---|---|
+| word-order / partial reword | 100% | 100% |
+| morphological (`cancel` → `cancelling`) | 100% | 100% |
+| synonym, **zero shared words** | 67% | 75% |
+| **overall** | **88%** | **91%** |
+
+Retrieval is FTS5 + porter stemming, **no embeddings** (local-first, pure-Go,
+no CGO). Reword, reorder, and morphological paraphrases retrieve at 100%. The
+honest ceiling is *pure* synonym substitution — a query sharing **no words** with
+the memory (e.g. "too many requests" → a lesson titled "HTTP 429") — where a
+lexical index can only bridge by luck. `eval/RESULTS.md` lists every synonym
+miss by name; they aren't hidden.
+
+Reproduce:
+
+```
+go test ./internal/store -run TestRecallBenchmark -v
+```
+
+---
+
 ## TUI
 
 A three-pane terminal browser over the local corpus — **KINDS** sidebar, a
