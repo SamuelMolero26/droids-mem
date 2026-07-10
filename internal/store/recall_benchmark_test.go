@@ -12,24 +12,18 @@ import (
 	"github.com/samuelmolero26/droids-mem/internal/store"
 )
 
-// Recall benchmark (ADR-0025) — the internal attestation of droids-mem's core
-// claim: an agent can retrieve a lesson later, phrased differently than it was
-// saved. It is deliberately HARSH:
+// Recall benchmark (ADR-0025): measures mem_search / mem_context retrieval on a
+// fixed corpus queried by paraphrases. Clusters share vocabulary so a query must
+// rank its target above near-neighbours. synonym_hard queries share no surface
+// tokens with their target. Deterministic; runs in CI.
 //
-//   - The corpus is packed into distractor clusters (four git memories, four
-//     concurrency memories, …) so retrieving the RIGHT memory means beating its
-//     near-neighbours, not just "a memory came back."
-//   - synonym_hard queries share ZERO surface tokens with their target (every
-//     shared word stripped), so a hit can only come from genuine bridging — the
-//     query_target_overlap column proves it wasn't an incidental word.
-//
-// Run `go test ./internal/store -run TestRecallBenchmark -v` to see the table.
-// Set EVAL_WRITE_REPORT=1 to (re)write eval/RESULTS.md for the README.
+//	go test ./internal/store -run TestRecallBenchmark -v
+//	EVAL_WRITE_REPORT=1 go test ...   # rewrites eval/RESULTS.md
 
-// benchCorpus is the fixed benchmark corpus. Clusters share vocabulary on
-// purpose — the eval is meaningless without confusable neighbours.
+// benchCorpus is the fixed benchmark corpus. Clusters share vocabulary so a
+// query must rank its target above near-neighbours.
 var benchCorpus = []store.SaveRequest{
-	// ── git ────────────────────────────────────────────────────────────────
+	// git
 	{TaskType: "git", Kind: "error_resolution", Title: "Stash pop conflicts mean a wrong branch base, not a content merge",
 		What: "git stash pop produced conflicts where every upstream side was empty", Learned: "when a popped stash conflicts and all additions are on the stashed side, the branch you popped onto is older than where the work was written; fix the base, do not hand-resolve", Tags: "git stash rebase base"},
 	{TaskType: "git", Kind: "task_pattern", Title: "Rebase onto main instead of merging to keep history linear",
@@ -97,11 +91,10 @@ type benchQuery struct {
 	query, expect, taskType, qtype string
 }
 
-// benchQueries are hand-authored so the query vocabulary is INDEPENDENT of the
-// memory (a computer generating queries from a memory's own words could never
-// test synonyms — the point of the whole eval). qtype groups the report.
+// benchQueries: query wording is independent of the target memory. qtype groups
+// the report.
 var benchQueries = []benchQuery{
-	// git — must beat 3 sibling git memories
+	// git
 	{"wrong branch base causes conflicts when popping a stash", "Stash pop conflicts mean a wrong branch base, not a content merge", "git", "reorder"},
 	{"conflicts after popping the stash because the base was old", "Stash pop conflicts mean a wrong branch base, not a content merge", "git", "reword"},
 	{"restoring shelved edits broke since the branch started too far back", "Stash pop conflicts mean a wrong branch base, not a content merge", "git", "synonym_hard"},
@@ -207,24 +200,22 @@ func assertFloor(t *testing.T, name string, got, floor float64) {
 	}
 }
 
-// renderBenchmark formats the report as README-ready markdown.
+// renderBenchmark formats the report as markdown: data only.
 func renderBenchmark(rep *store.EvalReport, corpusSize int) string {
-	// Friendly labels + fixed display order for the query classes.
 	order := []struct{ key, label string }{
-		{"keyword", "keyword (some overlap)"},
-		{"morphological", "morphological (porter)"},
+		{"keyword", "keyword"},
+		{"morphological", "morphological"},
 		{"reorder", "word-order"},
-		{"reword", "partial reword"},
+		{"reword", "reword"},
 		{"synonym_hard", "synonym (zero overlap)"},
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "# droids-mem retrieval benchmark\n\n")
-	fmt.Fprintf(&b, "Corpus: **%d memories** in 7 distractor clusters. Queries: **%d**, hand-authored so their wording is independent of the target memory. Each query must retrieve the right memory ahead of its cluster neighbours. Report-only; the harness lives in `internal/store/recall_benchmark_test.go`.\n\n",
-		corpusSize, rep.TotalPairs)
+	fmt.Fprintf(&b, "# Retrieval benchmark\n\n")
+	fmt.Fprintf(&b, "Corpus: %d memories, 7 clusters. Queries: %d.\n\n", corpusSize, rep.TotalPairs)
 
-	fmt.Fprintf(&b, "## mem_search — retrieval by paraphrased query\n\n")
-	fmt.Fprintf(&b, "| Query class | n | recall@1 | recall@5 | MRR |\n")
+	fmt.Fprintf(&b, "## mem_search\n\n")
+	fmt.Fprintf(&b, "| query class | n | recall@1 | recall@5 | MRR |\n")
 	fmt.Fprintf(&b, "|---|---|---|---|---|\n")
 	for _, o := range order {
 		tm := rep.ByType[o.key]
@@ -234,38 +225,43 @@ func renderBenchmark(rep *store.EvalReport, corpusSize int) string {
 		fmt.Fprintf(&b, "| %s | %d | %s | %s | %s |\n",
 			o.label, tm.N, pct(tm.RecallAt1), pct(tm.RecallAt5), dec(tm.MRR))
 	}
-	fmt.Fprintf(&b, "| **overall** | %d | **%s** | **%s** | **%s** |\n\n",
+	fmt.Fprintf(&b, "| overall | %d | %s | %s | %s |\n\n",
 		rep.MemSearch.Scored, pct(rep.MemSearch.RecallAt1), pct(rep.MemSearch.RecallAt5), dec(rep.MemSearch.MRR))
 
-	fmt.Fprintf(&b, "- **recall@1** — right memory returned *first*, ahead of every distractor.\n")
-	fmt.Fprintf(&b, "- **recall@5** — right memory in the top 5 (mem_search's default page).\n")
-	fmt.Fprintf(&b, "- **MRR** — mean reciprocal rank; 1.0 = always first.\n\n")
+	fmt.Fprintf(&b, "## mem_context browse tier\n\n")
+	fmt.Fprintf(&b, "browse_hit_rate: %s (%d eligible queries)\n\n", pct(rep.MemContext.BrowseHitRate), rep.MemContext.EligiblePairs)
 
-	// The honest weak spot, named explicitly.
-	misses := synonymMisses(rep)
-	fmt.Fprintf(&b, "## The honest limit: pure synonyms\n\n")
-	fmt.Fprintf(&b, "`synonym (zero overlap)` queries share **no words at all** with their target — a lexical index (FTS5 + porter, no embeddings by design) can only bridge these by luck. This is the known ceiling. ")
+	fmt.Fprintf(&b, "## misses (rank > 5)\n\n")
+	misses := searchMisses(rep)
 	if len(misses) == 0 {
-		fmt.Fprintf(&b, "On this run every synonym query still landed.\n\n")
-	} else {
-		fmt.Fprintf(&b, "Queries that missed the top 5 (proof we are not cherry-picking):\n\n")
-		for _, m := range misses {
-			fmt.Fprintf(&b, "- rank %s · overlap %.2f · %q → %q\n", rankStr(m.SearchRank), m.QueryTargetOverlap, m.Query, m.ExpectTitle)
-		}
-		fmt.Fprintf(&b, "\n")
+		fmt.Fprintf(&b, "none\n")
+		return b.String()
+	}
+	fmt.Fprintf(&b, "| rank | overlap | class | query | target |\n")
+	fmt.Fprintf(&b, "|---|---|---|---|---|\n")
+	for _, m := range misses {
+		fmt.Fprintf(&b, "| %s | %.2f | %s | %s | %s |\n",
+			rankStr(m.SearchRank), m.QueryTargetOverlap, m.Type, m.Query, m.ExpectTitle)
 	}
 	return b.String()
 }
 
-// synonymMisses returns synonym_hard pairs that missed the top 5, sorted worst-first.
-func synonymMisses(rep *store.EvalReport) []store.PairResult {
+// searchMisses returns resolved pairs whose target was not in mem_search's top 5,
+// worst rank first (0 = absent from the result set, treated as worst).
+func searchMisses(rep *store.EvalReport) []store.PairResult {
 	var out []store.PairResult
 	for _, p := range rep.Pairs {
-		if p.Type == "synonym_hard" && !p.SearchHitAt5 {
+		if p.Resolution == "ok" && !p.SearchHitAt5 {
 			out = append(out, p)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].SearchRank > out[j].SearchRank })
+	rankKey := func(r int) int {
+		if r == 0 {
+			return 1 << 30
+		}
+		return r
+	}
+	sort.Slice(out, func(i, j int) bool { return rankKey(out[i].SearchRank) > rankKey(out[j].SearchRank) })
 	return out
 }
 
