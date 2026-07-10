@@ -9,7 +9,6 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/oklog/ulid/v2"
-	"github.com/samuelmolero26/droids-mem/internal/scrub"
 
 	"github.com/samuelmolero26/droids-mem/internal/store"
 )
@@ -19,7 +18,6 @@ func registerTools(s *server.MCPServer, st *store.Store) {
 	s.AddTool(searchToolDef(), mcp.NewTypedToolHandler(searchHandler(st)))
 	s.AddTool(contextToolDef(), mcp.NewTypedToolHandler(contextHandler(st)))
 	s.AddTool(getToolDef(), mcp.NewTypedToolHandler(getHandler(st)))
-	s.AddTool(corpusToolDef(), mcp.NewTypedToolHandler(corpusHandler(st)))
 }
 
 // ---------- mem_save ----------
@@ -35,7 +33,6 @@ type saveArgs struct {
 	SessionID  string `json:"session_id,omitempty"`
 	Force      bool   `json:"force,omitempty"`
 	Supersedes string `json:"supersedes,omitempty"`
-	DryRun     bool   `json:"dry_run,omitempty"`
 }
 
 func saveToolDef() mcp.Tool {
@@ -65,8 +62,6 @@ func saveToolDef() mcp.Tool {
 			mcp.Description("HITL correction: overwrite an existing memory matched by fingerprint instead of skipping.")),
 		mcp.WithString("supersedes",
 			mcp.Description("Id of a memory this save replaces. The target is hard-deleted on successful insert (same kind/task_type/scope required, else no-op). Response echoes 'superseded' with the deleted id.")),
-		mcp.WithBoolean("dry_run",
-			mcp.Description("Preview the outcome without persisting. Runs the full validate → scrub → dedupe pipeline under the real write lock, then rolls back. Response is {status:\"dry_run\", would, matched_id, reason}.")),
 	)
 }
 
@@ -83,21 +78,9 @@ func saveHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, sav
 			Scope:      a.Scope,
 			Force:      a.Force,
 			Supersedes: a.Supersedes,
-			DryRun:     a.DryRun,
 		})
 		if err != nil {
 			return toolErr(err), nil
-		}
-		if a.DryRun {
-			// Store rolled the txn back — resp.ID is a phantom. Mirror the CLI's
-			// dry_run envelope so the agent never mistakes a preview for a write.
-			return toolJSON(map[string]any{
-				"status":     "dry_run",
-				"would":      resp.Status,
-				"matched_id": resp.MatchedID,
-				"reason":     resp.Reason,
-				"session_id": resp.SessionID,
-			})
 		}
 		return toolJSON(resp)
 	}
@@ -106,45 +89,37 @@ func saveHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, sav
 // ---------- mem_search ----------
 
 type searchArgs struct {
-	Query       string `json:"query"`
-	TaskType    string `json:"task_type,omitempty"`
-	Kind        string `json:"kind,omitempty"`
-	Limit       int    `json:"limit,omitempty"`
-	AllProjects bool   `json:"all_projects,omitempty"`
+	Query    string `json:"query"`
+	TaskType string `json:"task_type,omitempty"`
+	Kind     string `json:"kind,omitempty"`
+	Limit    int    `json:"limit,omitempty"`
 }
 
 func searchToolDef() mcp.Tool {
 	return mcp.NewTool("mem_search",
-		mcp.WithDescription(`Full-text search across stored memories ranked by BM25 with TokenOverlap re-ranking. Call this proactively at the start of a task and whenever the topic shifts — do not wait to be asked; prior fixes, decisions, and conventions live here.
-
-Each result includes an overlap_score (0-1): the fraction of query tokens that appear literally in the title+learned. Higher overlap means the memory is about the same concrete topic. Results with low overlap may still be relevant (synonyms, rewording) — use your judgment, or expand them with mem_get to read the full body.
-
-Pass all_projects=true to search across ALL task_types, not just the current project. Use this when investigating a problem that may span repos, or when you don't yet know which project owns the relevant memory. For code-structure questions in Go repos, prefer graph_symbol/graph_package over text search.`),
+		mcp.WithDescription("Full-text search across stored memories ranked by BM25. Call this proactively at the start of a task and whenever the topic shifts — do not wait to be asked; prior fixes, decisions, and conventions live here. Ignore weak or unrelated results."),
 		mcp.WithString("query", mcp.Required(),
 			mcp.Description("Free-text search phrase.")),
 		mcp.WithString("task_type",
-			mcp.Description("Optional task_type filter. Ignored when all_projects=true.")),
+			mcp.Description("Optional task_type filter.")),
 		mcp.WithString("kind",
 			mcp.Description("Optional kind filter."),
 			mcp.Enum("error_resolution", "task_pattern", "user_rule", "session_summary"),
 		),
 		mcp.WithNumber("limit",
-			mcp.Description("Max results to return (default 5, max 20). Internal fetch is 3× this for re-ranking."),
+			mcp.Description("Max results (default 5, max 20)."),
 			mcp.DefaultNumber(5), mcp.Min(1), mcp.Max(20),
 		),
-		mcp.WithBoolean("all_projects",
-			mcp.Description("Search every task_type instead of filtering by the current one (default false).")),
 	)
 }
 
 func searchHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, searchArgs) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, _ mcp.CallToolRequest, a searchArgs) (*mcp.CallToolResult, error) {
 		resp, err := st.Search(ctx, store.SearchRequest{
-			Query:       a.Query,
-			TaskType:    a.TaskType,
-			Kind:        a.Kind,
-			Limit:       a.Limit,
-			AllProjects: a.AllProjects,
+			Query:    a.Query,
+			TaskType: a.TaskType,
+			Kind:     a.Kind,
+			Limit:    a.Limit,
 		})
 		if err != nil {
 			return toolErr(err), nil
@@ -172,11 +147,11 @@ type contextEnvelope struct {
 
 func contextToolDef() mcp.Tool {
 	return mcp.NewTool("mem_context",
-		mcp.WithDescription("Load the two-tier orientation bundle for a task_type at the start of a Run. Call this on your own at the start of work when the project has a stable task_type (derive it from the repo or directory name and reuse the exact same string every session). Returns always-tier memories (full body) + browse-tier titles/snippets, plus a session_id to thread through subsequent mem_save calls. For code-structure questions in Go repos, prefer graph_symbol/graph_package over text search."),
+		mcp.WithDescription("Load the two-tier orientation bundle for a task_type at the start of a Run. Call this on your own at the start of work when the project has a stable task_type (derive it from the repo or directory name and reuse the exact same string every session). Returns always-tier memories (full body) + browse-tier titles/snippets, plus a session_id to thread through subsequent mem_save calls."),
 		mcp.WithString("task_type", mcp.Required(),
 			mcp.Description("Workflow tag scoping the bundle.")),
 		mcp.WithString("query",
-			mcp.Description("Optional focus query for browse-tier ranking. Absent or punctuation-only ranks the tier by recency instead. Invalid with mode=refresh.")),
+			mcp.Description("Optional focus query for browse-tier ranking. Falls back to task_type tokens. Invalid with mode=refresh.")),
 		mcp.WithString("mode",
 			mcp.Description("Retrieval depth: orient (default — always tier + browse snippets), deep (always tier with all rules full + browse full bodies), refresh (always tier only, cheap mid-run re-anchor).")),
 		mcp.WithString("session_id",
@@ -210,7 +185,7 @@ type getArgs struct {
 
 func getToolDef() mcp.Tool {
 	return mcp.NewTool("mem_get",
-		mcp.WithDescription("Fetch the full body of a single memory by id (typically a browse-tier id returned by mem_context or mem_search). Use it on your own to expand a promising browse-tier title before relying on it. For code-structure questions in Go repos, prefer graph_symbol/graph_package over text search."),
+		mcp.WithDescription("Fetch the full body of a single memory by id (typically a browse-tier id returned by mem_context or mem_search). Use it on your own to expand a promising browse-tier title before relying on it."),
 		mcp.WithString("id", mcp.Required(),
 			mcp.Description("Memory id, e.g. 'mem_01J...'.")),
 	)
@@ -226,77 +201,6 @@ func getHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, getA
 			return mcp.NewToolResultError(fmt.Sprintf("memory %q not found", a.ID)), nil
 		}
 		return toolJSON(m)
-	}
-}
-
-// ---------- mem_corpus ----------
-
-type corpusArgs struct {
-	Limit int `json:"limit,omitempty"`
-}
-
-// RecentSessionStub is a lightweight summary of one session_summary memory
-// for the mem_corpus response.
-type RecentSessionStub struct {
-	Title     string `json:"title"`
-	CreatedAt int64  `json:"created_at"`
-}
-
-type corpusResponse struct {
-	TaskTypes      []store.TaskTypeCount `json:"task_types"`
-	ByKind         map[string]int        `json:"by_kind"`
-	Total          int                   `json:"total"`
-	RecentSessions []RecentSessionStub   `json:"recent_sessions,omitempty"`
-}
-
-func corpusToolDef() mcp.Tool {
-	return mcp.NewTool("mem_corpus",
-		mcp.WithDescription("Return a census of the memory corpus: task_type list with counts, kind breakdown, total memory count, and recent session_summary titles. Call this at the start of a task to discover orphaned task_types or to assess corpus health."),
-		mcp.WithNumber("limit",
-			mcp.Description("Max recent_sessions to return (default 5, max 20)."),
-			mcp.DefaultNumber(5), mcp.Min(1), mcp.Max(20),
-		),
-	)
-}
-
-func corpusHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, corpusArgs) (*mcp.CallToolResult, error) {
-	return func(ctx context.Context, _ mcp.CallToolRequest, a corpusArgs) (*mcp.CallToolResult, error) {
-		limit := a.Limit
-		if limit <= 0 {
-			limit = 5
-		}
-		if limit > 20 {
-			limit = 20
-		}
-
-		// Gather corpus data from multiple store methods.
-		counts, err := st.Counts(ctx)
-		if err != nil {
-			return toolErr(err), nil
-		}
-
-		types, err := st.ListTaskTypes(ctx)
-		if err != nil {
-			return toolErr(err), nil
-		}
-
-		sessions, err := st.RecentSessions(ctx, store.RecentSessionsRequest{Limit: limit})
-		if err != nil {
-			return toolErr(err), nil
-		}
-
-		stubs := make([]RecentSessionStub, 0, len(sessions.Sessions))
-		for _, s := range sessions.Sessions {
-			stubs = append(stubs, RecentSessionStub{Title: s.Title, CreatedAt: s.CreatedAt})
-		}
-
-		resp := corpusResponse{
-			TaskTypes:      types,
-			ByKind:         counts.ByKind,
-			Total:          counts.Total,
-			RecentSessions: stubs,
-		}
-		return toolJSON(resp)
 	}
 }
 
@@ -330,7 +234,7 @@ func toolErr(err error) *mcp.CallToolResult {
 			Actual          int                `json:"actual,omitempty"`
 			OffendingTags   []string           `json:"offending_tags,omitempty"`
 			MatchedPatterns []string           `json:"matched_patterns,omitempty"`
-			Scrub           *scrub.ScrubReport `json:"scrub,omitempty"`
+			Scrub           *store.ScrubReport `json:"scrub,omitempty"`
 		}{
 			Status:          "error",
 			Error:           "validation_error",
@@ -345,12 +249,7 @@ func toolErr(err error) *mcp.CallToolResult {
 			MatchedPatterns: ve.MatchedPatterns,
 			Scrub:           ve.Scrub,
 		}
-		b, merr := json.Marshal(payload)
-		if merr != nil {
-			// Scrub carries float rates; an unencodable one must not cost the
-			// agent the reason its save was rejected.
-			return mcp.NewToolResultError(ve.Message)
-		}
+		b, _ := json.Marshal(payload)
 		return mcp.NewToolResultError(string(b))
 	}
 	// Runtime errors (dominant case: BEGIN IMMEDIATE write-lock timeout under
@@ -359,7 +258,7 @@ func toolErr(err error) *mcp.CallToolResult {
 	// ponytail: retryable:true for all runtime errors here — the common one is
 	// transient (busy); the rare non-retryable ones (marshal/disk) self-limit
 	// on one retry. Sniff the sqlite code only if that becomes a real problem.
-	b, merr := json.Marshal(struct {
+	b, _ := json.Marshal(struct {
 		Status     string `json:"status"`
 		Error      string `json:"error"`
 		Message    string `json:"message"`
@@ -372,8 +271,5 @@ func toolErr(err error) *mcp.CallToolResult {
 		Retryable:  true,
 		Suggestion: "retry after a short backoff",
 	})
-	if merr != nil {
-		return mcp.NewToolResultError(err.Error())
-	}
 	return mcp.NewToolResultError(string(b))
 }
