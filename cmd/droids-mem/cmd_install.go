@@ -192,7 +192,7 @@ func installCodex(self string, printOnly bool) error {
 		out = string(existing) + sep + block
 	}
 
-	// #nosec G703 -- fixed config location, not user input
+	// #nosec G703 -- path is a fixed config location, not user input
 	if err := os.WriteFile(path, []byte(out), 0o600); err != nil {
 		writeError("install_failed", "write "+path+": "+err.Error(), true)
 		exitWith(ExitError)
@@ -230,8 +230,13 @@ func installOpencode(self string, printOnly bool) error {
 		writeError("install_failed", "read "+path+": "+err.Error(), true)
 		exitWith(ExitError)
 	}
-	mcp, _ := config["mcp"].(map[string]any)
-	if mcp == nil {
+	mcp, ok := config["mcp"].(map[string]any)
+	if !ok {
+		if _, present := config["mcp"]; present {
+			// Don't clobber a non-object "mcp" — that's the user's data.
+			writeError("install_failed", `existing "mcp" key in `+path+" is not an object; refusing to overwrite", false)
+			exitWith(ExitError)
+		}
 		mcp = map[string]any{}
 	}
 	if _, ok := mcp["droids-mem"]; ok {
