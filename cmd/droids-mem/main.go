@@ -1,14 +1,12 @@
 package main
 
 import (
-	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log"
 	"os"
-	"os/signal"
 	"sync"
-	"syscall"
 
 	"github.com/samuelmolero26/droids-mem/internal/db"
 	"github.com/samuelmolero26/droids-mem/internal/store"
@@ -21,8 +19,7 @@ var version = "dev"
 
 // bootGateBypass marks a command as exempt from db.AssertBootReady. Used by
 // the migrate subcommand, which exists precisely to satisfy the gate, and by
-// `schema`, which prints the CLI parameter schemas for MCP tooling — it never
-// touches the DB or DDL.
+// `schema` which only prints DDL without touching live data.
 const bootGateBypass = "bypass_boot_gate"
 
 // app lazily opens the database on first use so commands that never touch
@@ -86,8 +83,7 @@ start of each run — all via a local binary with zero external dependencies.`,
 				return err
 			}
 			err = db.AssertBootReady(a.db)
-			var bgErr *db.BootGateError
-			if err == nil || !errors.As(err, &bgErr) {
+			if err == nil || !db.IsBootGateError(err) {
 				return err // ready, or a failure migrating can't fix — surface as-is
 			}
 			// Auto-remediate rather than take down all memory tools until a
@@ -96,41 +92,21 @@ start of each run — all via a local binary with zero external dependencies.`,
 			// more-scrubbed. --no-rescrub encodes the human judgment "no row
 			// holds plaintext" and must never be auto-chosen.
 			// Runs for every non-bypassed command, so the first read (list,
-			// search, doctor) after an upgrade triggers this one-time rescrub
-			// row rewrite; on a large corpus it can outlast ensure-server's 5s
-			// /healthz poll, so the spawned serve may briefly report "not
-			// healthy" mid-migration. (The tokenizer flip already happened at
-			// open — boot ladder rung 7→8, before the gate.)
+			// search, doctor) after an upgrade triggers this one-time write;
+			// on a large corpus it can outlast ensure-server's 5s /healthz poll,
+			// so the spawned serve may briefly report "not healthy" mid-migration.
 			// ponytail: concurrent cold-start (hook → ensure-server → serve) can
 			// race here; Migrate's BEGIN IMMEDIATE serializes them and losers
 			// re-rescrub idempotently. Add coordination only if that waste bites.
-			summary, merr := store.Migrate(cmd.Context(), s, store.MigrateOptions{Rescrub: true})
+			summary, merr := store.Migrate(s, store.MigrateOptions{Rescrub: true})
 			if merr != nil {
 				// Fail closed: return the gate error so the manual remediation
 				// string still shows; log merr since the gate error omits it.
 				log.Printf("boot gate: auto-migration failed: %v", merr)
 				return err
 			}
-			log.Printf("boot gate: auto-rescrubbed stale DB — %d rows rewritten, %d redactions",
+			log.Printf("boot gate: auto-rescrubbed stale DB — %d rows, %d redactions",
 				summary.RowsRewritten, summary.TotalRedactions)
-			return nil
-		},
-		// Content-first (AXI §8): a bare `droids-mem` shows live corpus state and
-		// next steps, not the usage banner. Subcommands take over as usual.
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			s, err := a.store()
-			if err != nil {
-				// Runtime failure, not a usage error — don't let it fall through
-				// to the cobra usage_error branch (wrong exit code + --help hint).
-				writeError("home_failed", err.Error(), true)
-				exitWith(ExitError)
-			}
-			view, err := homeView(cmd.Context(), s)
-			if err != nil {
-				writeError("home_failed", err.Error(), true)
-				exitWith(ExitError)
-			}
-			writeJSON(view)
 			return nil
 		},
 	}
@@ -143,7 +119,6 @@ start of each run — all via a local binary with zero external dependencies.`,
 		newRecentSessionsCmd(a),
 		newSessionCmd(a),
 		newInstallCmd(),
-		newUninstallCmd(),
 		newGetCmd(a),
 		newDoctorCmd(a),
 		newPruneCmd(a),
@@ -151,20 +126,12 @@ start of each run — all via a local binary with zero external dependencies.`,
 		newScrubCmd(),
 		newTUICmd(a),
 		newGraphCmd(),
-		newStatuslineCmd(),
 		newServeCmd(a),
 		newEnsureServerCmd(),
 		newMigrateCmd(a),
 	)
 
-	// Signal-aware root context so Ctrl-C reaches cmd.Context() — without it a
-	// long `migrate --rescrub` (or the boot gate's auto-rescrub) would run the
-	// whole corpus out with no way to stop it. serve derives its own
-	// NotifyContext from this one, so its shutdown path is unaffected.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	if err := root.ExecuteContext(ctx); err != nil {
+	if err := root.Execute(); err != nil {
 		var initErr *dbInitError
 		if errors.As(err, &initErr) {
 			writeError("db_init_failed", initErr.Error(), false,
@@ -179,12 +146,7 @@ start of each run — all via a local binary with zero external dependencies.`,
 			)
 			os.Exit(ExitError)
 		}
-		// Everything reaching here is a cobra usage error (unknown flag, unknown
-		// command, missing required flag). Emit the structured envelope instead
-		// of raw text so an agent can read the failure (AXI §6).
-		writeError("usage_error", err.Error(), false,
-			withSuggestion("run `droids-mem <command> --help` for the command's valid flags and arguments"),
-		)
+		fmt.Fprintln(os.Stderr, err.Error())
 		os.Exit(ExitUsage)
 	}
 }
