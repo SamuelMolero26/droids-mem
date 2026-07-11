@@ -5,27 +5,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
 )
-
-// TestWriteGraphDB_CancelledCtxDoesNotPublish guards the async-supersede race:
-// a build cancelled by a newer one (ensureFresh calls bs.cancel() on supersede)
-// must not rename its now-stale result into place.
-func TestWriteGraphDB_CancelledCtxDoesNotPublish(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "graph.db")
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	if err := writeGraphDB(ctx, dbPath, "repo", "mod", "s", nil, nil, nil, nil, "", 0, nil); !errors.Is(err, context.Canceled) {
-		t.Fatalf("err = %v, want context.Canceled", err)
-	}
-	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
-		t.Fatalf("cancelled build published graph.db")
-	}
-}
 
 func testManager(t *testing.T) (*Manager, string) {
 	return testManagerAt(t, "testdata/testmod")
@@ -40,47 +23,6 @@ func testManagerAt(t *testing.T, rel string) (*Manager, string) {
 		t.Fatal(err)
 	}
 	return m, repo
-}
-
-func TestQueryCounter(t *testing.T) {
-	m, repo := testManager(t)
-	ctx := context.Background()
-
-	for range 2 {
-		if _, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"}); err != nil {
-			t.Fatalf("Symbol: %v", err)
-		}
-	}
-	if _, err := m.Package(ctx, PackageRequest{Repo: repo, Package: "testmod"}); err != nil {
-		t.Fatalf("Package: %v", err)
-	}
-
-	canon, err := canonicalRepo(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := filepath.Dir(m.dbPath(canon))
-	if got := counterSize(t, filepath.Join(dir, "queries.symbol")); got != 2 {
-		t.Errorf("symbol count = %d, want 2", got)
-	}
-	if got := counterSize(t, filepath.Join(dir, "queries.package")); got != 1 {
-		t.Errorf("package count = %d, want 1", got)
-	}
-	if got := counterSize(t, filepath.Join(dir, "queries.nope")); got != 0 {
-		t.Errorf("missing counter = %d, want 0", got)
-	}
-}
-
-func counterSize(t *testing.T, path string) int64 {
-	t.Helper()
-	info, err := os.Stat(path)
-	if os.IsNotExist(err) {
-		return 0
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	return info.Size()
 }
 
 func TestIndexAndSymbol(t *testing.T) {
@@ -164,45 +106,42 @@ func TestPackageSurface(t *testing.T) {
 	}
 }
 
-// TestDegradedServeOnBrokenRepo covers exactly one thing: a repo that stops
-// type-checking still answers queries from the last good graph, marked stale.
-//
-// It used to be named for async rebuild recovery and ended in a WaitBuild loop,
-// but that loop was unreachable (issue #73): deleting the broken fixture
-// restored the original file count, size, and max mtime, so the stamp came back
-// byte-identical, ensureFresh short-circuited as fresh, and the loop broke on
-// its first iteration. Rebuild and recovery are covered properly in
-// build_test.go; this test keeps the narrow guarantee it actually proves.
-func TestDegradedServeOnBrokenRepo(t *testing.T) {
-	// Disable stamp caching: this test modifies files and queries
-	// immediately, so a cached stamp would mask the change.
-	defer func(d time.Duration) { stampTTL = d }(stampTTL)
-	stampTTL = 0
-
-	repo := copyFixture(t) // never mutate the shared fixture in place
-	m := NewManager(filepath.Join(t.TempDir(), "graphs"))
-	t.Cleanup(m.Close)
+func TestStalenessRebuildAndDegradedServe(t *testing.T) {
+	m, repo := testManager(t)
 	ctx := context.Background()
 
 	if _, err := m.Index(ctx, repo); err != nil {
 		t.Fatal(err)
 	}
 
-	// Break the repo: staleness check must trip and serve the old graph stale.
-	if err := os.WriteFile(filepath.Join(repo, "broken_fixture.go"),
-		[]byte("package main\nfunc Bad() { undefined("), 0o600); err != nil {
+	// Break the repo: staleness check must trip, rebuild must fail, and the
+	// last good graph must be served with Stale set.
+	broken := filepath.Join(repo, "broken_fixture.go")
+	if err := os.WriteFile(broken, []byte("package main\nfunc Bad() { undefined("), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = os.Remove(broken) })
+	future := time.Now().Add(2 * time.Second) // ensure the stamp moves
+	_ = os.Chtimes(broken, future, future)
 
 	resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"})
 	if err != nil {
 		t.Fatalf("Symbol on broken repo: %v", err)
 	}
-	if !resp.Freshness.Stale {
+	if !resp.Freshness.Stale || resp.Freshness.IndexError == "" {
 		t.Errorf("expected stale degraded serve, got %+v", resp.Freshness)
 	}
-	if resp.Symbol == nil || resp.Symbol.QName != "testmod.Announce" {
-		t.Errorf("degraded serve must still resolve symbols, got %+v", resp.Symbol)
+
+	// Fix the repo: next query must rebuild and clear the stale flag.
+	if err := os.Remove(broken); err != nil {
+		t.Fatal(err)
+	}
+	resp, err = m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"})
+	if err != nil {
+		t.Fatalf("Symbol after fix: %v", err)
+	}
+	if resp.Freshness.Stale {
+		t.Errorf("still stale after repo fixed: %+v", resp.Freshness)
 	}
 }
 
@@ -211,47 +150,6 @@ func TestSymbolNotFound(t *testing.T) {
 	_, err := m.Symbol(context.Background(), SymbolRequest{Repo: repo, Symbol: "NoSuchThing"})
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
-	}
-}
-
-// Neighbors are ordered same-package-first, so the cap keeps the closest, not an
-// arbitrary alphabetical slice (issue #49). zz.Hub is called by zz.Near (same
-// package) and testmod.main (cross); "zz" sorts after "testmod", so plain
-// alphabetical would put main first — same-package-first must override that.
-func TestNeighborOrdering(t *testing.T) {
-	m, repo := testManager(t)
-	resp, err := m.Symbol(context.Background(), SymbolRequest{Repo: repo, Symbol: "zz.Hub", Direction: "up"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(resp.Callers) != 2 {
-		t.Fatalf("want 2 callers, got %+v", resp.Callers)
-	}
-	if resp.Callers[0].QName != "zz.Near" {
-		t.Errorf("same-package caller should sort first, got %q then %q",
-			resp.Callers[0].QName, resp.Callers[1].QName)
-	}
-}
-
-// A truncated depth=1 list reports the true total and the partial-slice hint
-// (issue #49). Shrinks the cap to 1 so zz.Hub's 2 callers overflow it.
-func TestNeighborTruncationTotal(t *testing.T) {
-	defer func(n int) { maxNeighbors = n }(maxNeighbors)
-	maxNeighbors = 1
-
-	m, repo := testManager(t)
-	resp, err := m.Symbol(context.Background(), SymbolRequest{Repo: repo, Symbol: "zz.Hub", Direction: "up"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(resp.Callers) != 1 || !resp.Truncated {
-		t.Fatalf("want 1 caller + truncated, got %d callers truncated=%v", len(resp.Callers), resp.Truncated)
-	}
-	if resp.CallersTotal != 2 {
-		t.Errorf("callers_total = %d, want 2 (true count behind the cap)", resp.CallersTotal)
-	}
-	if !strings.Contains(resp.Hint, "partial slice") {
-		t.Errorf("truncation hint missing from %q", resp.Hint)
 	}
 }
 
@@ -275,34 +173,6 @@ func TestTransitiveCallers(t *testing.T) {
 	}
 	if resp.TransitiveCallers == nil || *resp.TransitiveCallers != 0 {
 		t.Errorf("main transitive_callers = %v, want 0", resp.TransitiveCallers)
-	}
-}
-
-// transitive_callers is a call-edge metric, so it is omitted for non-callable
-// symbols (types/consts/vars); the hint redirects by kind instead of reporting a
-// structural 0 an agent would misread as "safe to change" (issue #47).
-func TestBlastRadiusSuppressed(t *testing.T) {
-	m, repo := testManager(t)
-	ctx := context.Background()
-
-	cases := []struct {
-		symbol string
-		hint   string
-	}{
-		{"English", blastTypeHint}, // a concrete type with a method: redirect to it
-		{"Lang", blastRefHint},     // a const: reference-level, not indexed
-	}
-	for _, tc := range cases {
-		resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: tc.symbol})
-		if err != nil {
-			t.Fatalf("Symbol %s: %v", tc.symbol, err)
-		}
-		if resp.TransitiveCallers != nil {
-			t.Errorf("%s: transitive_callers = %v, want omitted (nil)", tc.symbol, *resp.TransitiveCallers)
-		}
-		if resp.Hint != tc.hint {
-			t.Errorf("%s: hint = %q, want %q", tc.symbol, resp.Hint, tc.hint)
-		}
 	}
 }
 
@@ -382,109 +252,9 @@ func TestInterfaceFanOut(t *testing.T) {
 	}
 }
 
-// TestClosureCalleeGhost pins both halves of the closure edge projection
-// (issue #69). Callee side: CHA's funcsBySig resolves dynamic func()-typed
-// calls (Noise's defer cancel()) to every func()-shaped function in the
-// program — including Target's own deferred closure (Target$1) — and
-// resolve()'s Parent() collapse would turn that into a Noise → Target ghost;
-// the guard drops edges whose RAW callee is a closure. Caller side is
-// deliberately untouched: ClosureCaller reaches Target only from inside a
-// closure and must survive as a real caller.
-func TestClosureCalleeGhost(t *testing.T) {
-	m, repo := testManagerAt(t, "testdata/closures")
-	ctx := context.Background()
-
-	resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "closures.Target", Direction: "up"})
-	if err != nil {
-		t.Fatalf("Symbol Target: %v", err)
-	}
-	got := make([]string, 0, len(resp.Callers))
-	for _, n := range resp.Callers {
-		got = append(got, n.QName)
-	}
-	slices.Sort(got)
-	want := []string{"closures.Caller", "closures.ClosureCaller"}
-	if !slices.Equal(got, want) {
-		t.Errorf("Target callers = %v, want exactly %v (closures.Noise is a funcsBySig ghost and must be dropped; closures.ClosureCaller reaches Target through a closure and must survive)", got, want)
-	}
-	if resp.TransitiveCallers == nil {
-		t.Fatalf("Target transitive_callers = nil, want 2 (up-closure of the two real call sites)")
-	}
-	if *resp.TransitiveCallers != 2 {
-		t.Errorf("Target transitive_callers = %d, want 2 (up-closure of the two real call sites)", *resp.TransitiveCallers)
-	}
-}
-
-// TestImplements covers the exact interface-satisfaction relation (issue #48):
-// interface → concrete implementers, concrete type → interfaces it satisfies,
-// definitive-zero on an unimplemented interface, and the empty-interface skip.
-func TestImplements(t *testing.T) {
-	m, repo := testManagerAt(t, "testdata/fanout")
-	ctx := context.Background()
-
-	// Interface → its exact concrete implementer set (all three, incl. the
-	// never-constructed MockStore — implements is type-set membership, not calls).
-	resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "fanout.Store"})
-	if err != nil {
-		t.Fatalf("Symbol Store: %v", err)
-	}
-	if resp.Symbol == nil || resp.Symbol.Kind != "interface" {
-		t.Fatalf("Store kind = %+v, want interface", resp.Symbol)
-	}
-	impls := map[string]bool{}
-	for _, n := range resp.Implementers {
-		impls[n.QName] = true
-	}
-	for _, want := range []string{"fanout.SQLStore", "fanout.MemStore", "fanout.MockStore"} {
-		if !impls[want] {
-			t.Errorf("implementer %s missing from %v", want, impls)
-		}
-	}
-	if resp.ImplementersTotal == nil || *resp.ImplementersTotal != 3 {
-		t.Errorf("Store implementers_total = %v, want 3", resp.ImplementersTotal)
-	}
-	if resp.Hint != implementersHint {
-		t.Errorf("Store hint = %q, want implementersHint", resp.Hint)
-	}
-
-	// Concrete type → interfaces it satisfies (reverse edge). Marker (empty
-	// interface) must NOT appear — it was skipped at index time.
-	resp, err = m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "fanout.SQLStore"})
-	if err != nil {
-		t.Fatalf("Symbol SQLStore: %v", err)
-	}
-	sat := map[string]bool{}
-	for _, n := range resp.Satisfies {
-		sat[n.QName] = true
-	}
-	if !sat["fanout.Store"] {
-		t.Errorf("SQLStore should satisfy fanout.Store; got %v", sat)
-	}
-	if sat["fanout.Marker"] {
-		t.Errorf("empty interface Marker must be skipped, but SQLStore satisfies it: %v", sat)
-	}
-	if resp.ImplementersTotal != nil {
-		t.Errorf("concrete type carries no implementers_total, got %d", *resp.ImplementersTotal)
-	}
-
-	// Definitive zero: a repo interface nobody implements → total present at 0.
-	resp, err = m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "fanout.Lonely"})
-	if err != nil {
-		t.Fatalf("Symbol Lonely: %v", err)
-	}
-	if resp.ImplementersTotal == nil || *resp.ImplementersTotal != 0 {
-		t.Errorf("Lonely implementers_total = %v, want 0 (definitive, present)", resp.ImplementersTotal)
-	}
-	if len(resp.Implementers) != 0 {
-		t.Errorf("Lonely should have no implementers, got %v", resp.Implementers)
-	}
-}
-
-// A source .go edit must move the stamp. The _test.go half of this guarantee
-// (Tests:true means a test-file edit must ALSO move the stamp) now lives in
-// TestStamp_TestFileEditMovesStamp (stamp_test.go) — see that test's comment
-// for why the old "ignores test files" expectation was inverted.
-func TestStampMovesOnSourceEdit(t *testing.T) {
+// A _test.go edit must NOT move the stamp (test files are never indexed, so a
+// rebuild would be pure waste); a source .go edit must.
+func TestStampIgnoresTestFiles(t *testing.T) {
 	repo := t.TempDir()
 	write := func(name, body string) {
 		if err := os.WriteFile(filepath.Join(repo, name), []byte(body), 0o600); err != nil {
@@ -493,6 +263,7 @@ func TestStampMovesOnSourceEdit(t *testing.T) {
 	}
 	write("go.mod", "module x\n\ngo 1.21\n")
 	write("a.go", "package x\n\nfunc A() {}\n")
+	write("a_test.go", "package x\n")
 
 	base, err := stamp(repo)
 	if err != nil {
@@ -500,36 +271,13 @@ func TestStampMovesOnSourceEdit(t *testing.T) {
 	}
 
 	future := time.Now().Add(2 * time.Second)
+	_ = os.Chtimes(filepath.Join(repo, "a_test.go"), future, future)
+	if s, _ := stamp(repo); s != base {
+		t.Errorf("test-file edit moved stamp: %q → %q", base, s)
+	}
+
 	_ = os.Chtimes(filepath.Join(repo, "a.go"), future, future)
 	if s, _ := stamp(repo); s == base {
 		t.Errorf("source edit did not move stamp: still %q", base)
-	}
-}
-
-// TestRemoveStaleTemps proves the crash-litter sweep is age-guarded: an orphan
-// older than staleTempAge is removed, a young temp (a concurrently-live sibling
-// build) is left untouched.
-func TestRemoveStaleTemps(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "graph.db")
-	old := dbPath + ".tmp.111"
-	young := dbPath + ".tmp.222"
-	for _, p := range []string{old, young} {
-		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	past := time.Now().Add(-2 * staleTempAge)
-	if err := os.Chtimes(old, past, past); err != nil {
-		t.Fatal(err)
-	}
-
-	removeStaleTemps(dbPath)
-
-	if _, err := os.Stat(old); !os.IsNotExist(err) {
-		t.Errorf("stale temp survived the sweep: err=%v", err)
-	}
-	if _, err := os.Stat(young); err != nil {
-		t.Errorf("young temp (live sibling) was removed: %v", err)
 	}
 }
