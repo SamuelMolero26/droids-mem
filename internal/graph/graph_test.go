@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -194,6 +195,54 @@ func TestSearchFallback(t *testing.T) {
 	}
 }
 
+<<<<<<< Updated upstream
+=======
+// TestInterfaceFanOut measures CHA over-approximation on a multi-implementation
+// interface: two call sites dispatching through Store, three implementations.
+// CHA links each call site to every implementation, including MockStore, which
+// is never constructed, so fan-out = call_sites × implementations = 6, and
+// every MockStore.Save edge is unreachable at runtime.
+func TestInterfaceFanOut(t *testing.T) {
+	m, repo := testManagerAt(t, "testdata/fanout")
+	ctx := context.Background()
+
+	want := map[string]bool{
+		"fanout.SQLStore.Save":  true,
+		"fanout.MemStore.Save":  true,
+		"fanout.MockStore.Save": true,
+	}
+	calleeSet := func(sym string) map[string]bool {
+		resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: sym, Direction: "down"})
+		if err != nil {
+			t.Fatalf("Symbol %s: %v", sym, err)
+		}
+		got := map[string]bool{}
+		for _, n := range resp.Callees {
+			got[n.QName] = true
+		}
+		return got
+	}
+
+	// Two sites × three implementations = 6 dispatch edges; each site's callee
+	// set is exactly the three Save methods.
+	for _, site := range []string{"Broadcast", "Echo"} {
+		if got := calleeSet(site); !reflect.DeepEqual(got, want) {
+			t.Errorf("%s callees = %v, want %v", site, got, want)
+		}
+	}
+
+	// MockStore is never constructed, yet its blast radius equals the constructed
+	// implementations': {Broadcast, Echo, Run} transitively reach MockStore.Save.
+	resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "fanout.MockStore.Save"})
+	if err != nil {
+		t.Fatalf("Symbol MockStore.Save: %v", err)
+	}
+	if resp.TransitiveCallers == nil || *resp.TransitiveCallers != 3 {
+		t.Errorf("MockStore.Save transitive_callers = %v, want 3", resp.TransitiveCallers)
+	}
+}
+
+>>>>>>> Stashed changes
 // A _test.go edit must NOT move the stamp (test files are never indexed, so a
 // rebuild would be pure waste); a source .go edit must.
 func TestStampIgnoresTestFiles(t *testing.T) {
