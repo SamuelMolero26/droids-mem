@@ -192,6 +192,7 @@ func installCodex(self string, printOnly bool) error {
 		out = string(existing) + sep + block
 	}
 
+	// #nosec G703 -- path is a fixed config location, not user input
 	if err := os.WriteFile(path, []byte(out), 0o600); err != nil {
 		writeError("install_failed", "write "+path+": "+err.Error(), true)
 		exitWith(ExitError)
