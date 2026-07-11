@@ -11,10 +11,14 @@ import (
 )
 
 func testManager(t *testing.T) (*Manager, string) {
+	return testManagerAt(t, "testdata/testmod")
+}
+
+func testManagerAt(t *testing.T, rel string) (*Manager, string) {
 	t.Helper()
 	m := NewManager(filepath.Join(t.TempDir(), "graphs"))
 	t.Cleanup(m.Close)
-	repo, err := filepath.Abs("testdata/testmod")
+	repo, err := filepath.Abs(rel)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,6 +195,60 @@ func TestSearchFallback(t *testing.T) {
 	}
 	if resp.Hint != searchHint {
 		t.Errorf("hint = %q, want searchHint", resp.Hint)
+	}
+}
+
+// TestInterfaceFanOut measures CHA over-approximation on a multi-implementation
+// interface: two call sites dispatching through Store, three implementations.
+// CHA links each call site to every implementation, including MockStore, which
+// is never constructed, so fan-out = call_sites × implementations = 6, and
+// every MockStore.Save edge is unreachable at runtime.
+func TestInterfaceFanOut(t *testing.T) {
+	m, repo := testManagerAt(t, "testdata/fanout")
+	ctx := context.Background()
+
+	want := map[string]bool{
+		"fanout.SQLStore.Save":  true,
+		"fanout.MemStore.Save":  true,
+		"fanout.MockStore.Save": true,
+	}
+	calleeSet := func(sym string) map[string]bool {
+		resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: sym, Direction: "down"})
+		if err != nil {
+			t.Fatalf("Symbol %s: %v", sym, err)
+		}
+		got := map[string]bool{}
+		for _, n := range resp.Callees {
+			got[n.QName] = true
+		}
+		return got
+	}
+
+	fanout := 0
+	for _, site := range []string{"Broadcast", "Echo"} {
+		got := calleeSet(site)
+		for qn := range want {
+			if !got[qn] {
+				t.Errorf("%s missing callee %s; got %v", site, qn, got)
+			}
+		}
+		if len(got) != len(want) {
+			t.Errorf("%s callees = %v, want exactly %v", site, got, want)
+		}
+		fanout += len(got)
+	}
+	if fanout != 6 {
+		t.Errorf("interface-dispatch fan-out = %d, want 6 (2 sites × 3 impls)", fanout)
+	}
+
+	// MockStore is never constructed, yet its blast radius equals the constructed
+	// implementations': {Broadcast, Echo, Run} transitively reach MockStore.Save.
+	resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "fanout.MockStore.Save"})
+	if err != nil {
+		t.Fatalf("Symbol MockStore.Save: %v", err)
+	}
+	if resp.TransitiveCallers == nil || *resp.TransitiveCallers != 3 {
+		t.Errorf("MockStore.Save transitive_callers = %v, want 3", resp.TransitiveCallers)
 	}
 }
 
