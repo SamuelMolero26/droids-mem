@@ -315,14 +315,9 @@ func registerClaudeMCP() error {
 // (~/.claude/CLAUDE.md, or ./CLAUDE.md with --project). Idempotent: a file
 // already containing the snippet heading is left untouched.
 func appendClaudeSnippet(project bool) (path string, appended bool, err error) {
-	if project {
-		path = "CLAUDE.md"
-	} else {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", false, fmt.Errorf("resolve home dir: %w", err)
-		}
-		path = filepath.Join(home, ".claude", "CLAUDE.md")
+	path, err = claudeMdPath(project)
+	if err != nil {
+		return "", false, err
 	}
 	existing, err := os.ReadFile(path) // #nosec G304 -- fixed CLAUDE.md location, not user input
 	if err != nil && !os.IsNotExist(err) {
