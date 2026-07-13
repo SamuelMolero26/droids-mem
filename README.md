@@ -326,8 +326,12 @@ Every command supports `--help`.
 ## Troubleshooting
 
 **`boot_gate` on start.** The DB hasn't been baselined through the scrub
-pipeline. Run `droids-mem migrate --rescrub` (or `--no-rescrub` if the data is
-already trusted).
+pipeline. The first non-bypassed command now self-heals this by auto-running
+`migrate --rescrub` (re-scrubbing can only make data safer); on a large corpus
+that one-time write can briefly outlast `ensure-server`'s health poll. The
+error only surfaces if that auto-migration itself fails — then run
+`droids-mem migrate --rescrub` (or `--no-rescrub` if the data is already
+trusted) by hand.
 
 **`db_init_failed`.** Check `DROIDS_MEM_DB` and that `~/.droids-mem/` is
 writable.
