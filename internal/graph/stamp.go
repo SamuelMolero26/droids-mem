@@ -17,6 +17,15 @@ import (
 // so test files are never indexed (verified: 0 test symbols). Rebuilding on a
 // test edit would burn a full ~2.5s type-check for a graph that can't change.
 // If test indexing is ever enabled, drop the _test.go filter here in lockstep.
+//
+// Known blind spot (accepted): the count+size+maxMtime triple cannot see a
+// content swap between two files that preserves the aggregate — file A takes
+// B's bytes and B takes A's, keeping total count, total size, and the latest
+// mtime unchanged. Since a normal edit bumps mtime to "now", this only fires
+// when mtimes are also preserved (touch -r, tar/rsync --times) alongside a
+// size-preserving swap: astronomically rare. Closing it would require reading
+// content bytes from every .go file on every query (stamp runs per graph call,
+// not just on rebuild), so we accept the gap rather than pay that hot-path IO.
 func stamp(repo string) (string, error) {
 	var count int
 	var size, maxMtime int64
