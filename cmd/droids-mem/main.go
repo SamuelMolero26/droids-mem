@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"sync"
 
@@ -77,10 +78,36 @@ start of each run — all via a local binary with zero external dependencies.`,
 			if cmd.Annotations[bootGateBypass] == "true" {
 				return nil
 			}
-			if _, err := a.store(); err != nil {
+			s, err := a.store()
+			if err != nil {
 				return err
 			}
-			return db.AssertBootReady(a.db)
+			err = db.AssertBootReady(a.db)
+			if err == nil || !db.IsBootGateError(err) {
+				return err // ready, or a failure migrating can't fix — surface as-is
+			}
+			// Auto-remediate rather than take down all memory tools until a
+			// manual migrate (issue #29). --rescrub is the only safe unattended
+			// mode: it re-runs the scrub patterns, so it can only make data
+			// more-scrubbed. --no-rescrub encodes the human judgment "no row
+			// holds plaintext" and must never be auto-chosen.
+			// Runs for every non-bypassed command, so the first read (list,
+			// search, doctor) after an upgrade triggers this one-time write;
+			// on a large corpus it can outlast ensure-server's 5s /healthz poll,
+			// so the spawned serve may briefly report "not healthy" mid-migration.
+			// ponytail: concurrent cold-start (hook → ensure-server → serve) can
+			// race here; Migrate's BEGIN IMMEDIATE serializes them and losers
+			// re-rescrub idempotently. Add coordination only if that waste bites.
+			summary, merr := store.Migrate(s, store.MigrateOptions{Rescrub: true})
+			if merr != nil {
+				// Fail closed: return the gate error so the manual remediation
+				// string still shows; log merr since the gate error omits it.
+				log.Printf("boot gate: auto-migration failed: %v", merr)
+				return err
+			}
+			log.Printf("boot gate: auto-rescrubbed stale DB — %d rows, %d redactions",
+				summary.RowsRewritten, summary.TotalRedactions)
+			return nil
 		},
 	}
 

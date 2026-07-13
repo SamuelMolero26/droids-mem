@@ -7,9 +7,37 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Targets **v1.2.0**. Headline: a native code graph so agents answer
-"what calls X" from a pre-built index instead of grep, plus a retrieval and
-TUI pass.
+### Added
+- **Multi-host install** (ADR-0019): `droids-mem install --host codex|opencode`
+  registers droids-mem as a stdio MCP server in that host's config
+  (`~/.codex/config.toml` / `~/.config/opencode/opencode.json`). Idempotent and
+  non-destructive; `--print` shows the snippet without writing. `--all` stays
+  Claude-only.
+- **Stdio transport**: `droids-mem serve --stdio` serves MCP over stdin/stdout
+  for hosts that spawn the server as a child process — no port, token, or
+  `ensure-server`; the host owns the lifecycle. `--addr`/`--endpoint` are
+  ignored. On stdio hosts the server instructions tell the model to save its
+  own end-of-run `session_summary` (no summary hook is wired); dedupe keeps
+  that safe if a hook is added later.
+- **Recall benchmark** (ADR-0025): a fixed 24-memory / 33-paraphrase corpus in
+  `internal/store/recall_benchmark_test.go` that scores retrieval across the
+  vocabulary gap and fails the build on regression; report in
+  [`eval/RESULTS.md`](eval/RESULTS.md), summary in the README.
+
+### Changed
+- **Boot gate auto-remediates** (issue #29): a stale scrub baseline now
+  auto-runs `migrate --rescrub` on the first non-bypassed command instead of
+  taking down all memory tools until a manual migrate. The `boot_gate` error
+  only surfaces if the auto-migration itself fails.
+- **MCP runtime errors return a structured envelope** (`status`, `error`,
+  `message`, `retryable`, `suggestion`) — the dominant case is a transient
+  `BEGIN IMMEDIATE` write-lock timeout under concurrent writers, so the agent
+  sees `retryable` instead of a raw `SQLITE_BUSY` string.
+
+## [1.1.1] — 2026-07-04
+
+Headline: a native code graph so agents answer "what calls X" from a
+pre-built index instead of grep, plus a retrieval and TUI pass.
 
 ### Added
 - **Native code graph** (ADR-0020): a per-repo Go symbol + call-edge index
@@ -177,7 +205,8 @@ normally.
 - `workspace.yml` / inline scrub config → v1.1. v1.0 pattern set + order are
   hardcoded.
 
-[Unreleased]: https://github.com/SamuelMolero26/droids-mem/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/SamuelMolero26/droids-mem/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/SamuelMolero26/droids-mem/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/SamuelMolero26/droids-mem/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/SamuelMolero26/droids-mem/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/SamuelMolero26/droids-mem/releases/tag/v1.0.0

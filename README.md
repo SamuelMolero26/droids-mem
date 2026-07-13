@@ -90,6 +90,38 @@ All output is JSON on stdout; errors are JSON on stderr. Exit codes: `0` ok,
 
 ---
 
+## Retrieval performance
+
+The core promise is that an agent finds a lesson later, phrased **differently**
+than it was saved. That claim is measured, not asserted: a fixed benchmark of
+**24 memories** in seven distractor clusters (so retrieval has to beat
+confusable neighbours, not just return "a" memory) is queried by **33
+hand-authored paraphrases** whose wording is independent of the target. It runs
+in CI (`internal/store/recall_benchmark_test.go`) and fails the build if recall
+regresses; full report in [`eval/RESULTS.md`](eval/RESULTS.md).
+
+| Query class | recall@1 | recall@5 |
+|---|---|---|
+| word-order / partial reword | 100% | 100% |
+| morphological (`cancel` → `cancelling`) | 100% | 100% |
+| synonym, **zero shared words** | 67% | 75% |
+| **overall** | **88%** | **91%** |
+
+Retrieval is FTS5 + porter stemming, **no embeddings** (local-first, pure-Go,
+no CGO). Reword, reorder, and morphological paraphrases retrieve at 100%. The
+honest ceiling is *pure* synonym substitution — a query sharing **no words** with
+the memory (e.g. "too many requests" → a lesson titled "HTTP 429") — where a
+lexical index can only bridge by luck. `eval/RESULTS.md` lists every synonym
+miss by name; they aren't hidden.
+
+Reproduce:
+
+```
+go test ./internal/store -run TestRecallBenchmark -v
+```
+
+---
+
 ## TUI
 
 A three-pane terminal browser over the local corpus — **KINDS** sidebar, a
@@ -161,6 +193,22 @@ claude mcp list             # droids-mem listed + reachable
 droids-mem recent-sessions  # your auto-saved session summaries
 ```
 
+### Other hosts (codex, opencode)
+
+Any MCP host that spawns stdio servers gets the same memory — one command:
+
+```
+droids-mem install --host codex      # registers in ~/.codex/config.toml
+droids-mem install --host opencode   # registers in ~/.config/opencode/opencode.json
+```
+
+Both are idempotent and preserve your existing config (`--print` shows the
+snippet instead of writing). The host launches `droids-mem serve --stdio` as a
+child process — no port, token, or background server. On stdio hosts the
+server's instructions tell the model to save its own end-of-run
+`session_summary` (there's no hook to do it automatically); the store's
+dedupe keeps that safe everywhere.
+
 ---
 
 ## MCP tools
@@ -183,7 +231,8 @@ Operator commands (`list`, `schema`, `doctor`, `migrate`, `prune`, `scrub`) are
 
 ```
 droids-mem ensure-server   # ping /healthz, spawn detached serve if down
-droids-mem serve           # foreground MCP bridge
+droids-mem serve           # foreground MCP bridge (Streamable HTTP)
+droids-mem serve --stdio   # MCP over stdin/stdout (codex, opencode — host-spawned)
 ```
 
 Auth is `Authorization: Bearer <token>`. `/identity?nonce=<n>` answers
@@ -263,7 +312,7 @@ State dir: `mem.db` (0600), `token` (0600), `mcp.pid`, `mcp.log`.
 | `graph` | Query a Go repo's code graph (`index`, `symbol`, `package`) |
 | `recent-sessions` | List recent auto-saved session summaries |
 | `session` | Session-memory plumbing (stage, check, flush, recover, hook) |
-| `install` | Wire session memory into Claude Code |
+| `install` | Wire into a host: Claude Code hooks, or `--host codex\|opencode` MCP registration |
 | `doctor` | FTS integrity/rebuild, optimize, VACUUM, `--scrub-stats` |
 | `schema` | Show parameter schema for a command |
 | `scrub` | Run the scrub engine ad-hoc (`--check`, `--test`) |
@@ -277,8 +326,12 @@ Every command supports `--help`.
 ## Troubleshooting
 
 **`boot_gate` on start.** The DB hasn't been baselined through the scrub
-pipeline. Run `droids-mem migrate --rescrub` (or `--no-rescrub` if the data is
-already trusted).
+pipeline. The first non-bypassed command now self-heals this by auto-running
+`migrate --rescrub` (re-scrubbing can only make data safer); on a large corpus
+that one-time write can briefly outlast `ensure-server`'s health poll. The
+error only surfaces if that auto-migration itself fails — then run
+`droids-mem migrate --rescrub` (or `--no-rescrub` if the data is already
+trusted) by hand.
 
 **`db_init_failed`.** Check `DROIDS_MEM_DB` and that `~/.droids-mem/` is
 writable.

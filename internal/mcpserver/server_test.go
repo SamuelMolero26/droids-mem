@@ -177,3 +177,30 @@ func TestLimitBody(t *testing.T) {
 		}
 	})
 }
+
+func TestInstructions_TransportFork(t *testing.T) {
+	httpVar, stdioVar := instructions(false), instructions(true)
+
+	// Both variants share the core protocol and the graph/secrets tail.
+	for _, s := range []string{httpVar, stdioVar} {
+		for _, want := range []string{"AT THE START of a task", "mem_save", "Never put secrets", "graph_symbol"} {
+			if !strings.Contains(s, want) {
+				t.Errorf("instructions missing %q", want)
+			}
+		}
+	}
+
+	// Only the session-summary sentence forks.
+	if !strings.Contains(httpVar, "Do NOT save session summaries") {
+		t.Errorf("HTTP variant lost the no-self-save policy")
+	}
+	if strings.Contains(httpVar, "AT THE END of a run") {
+		t.Errorf("HTTP variant carries the stdio self-save policy")
+	}
+	if !strings.Contains(stdioVar, "AT THE END of a run") {
+		t.Errorf("stdio variant missing the self-save policy")
+	}
+	if strings.Contains(stdioVar, "Do NOT save session summaries") {
+		t.Errorf("stdio variant carries the HTTP no-self-save policy")
+	}
+}

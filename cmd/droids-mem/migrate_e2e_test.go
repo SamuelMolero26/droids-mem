@@ -133,13 +133,10 @@ func TestE2E_MigrateRescrub(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "mem.db")
 	seedPreV1DB(t, dbPath)
 
-	// Boot gate refuses the pre-v1 DB.
-	_, _, code := runBinary(t, dbPath, "list")
-	if code == 0 {
-		t.Fatal("expected non-zero exit before migration, got 0")
-	}
-
-	// Run migration.
+	// migrate bypasses the boot gate, so it is exercised directly on the
+	// pre-v1 DB here. (A normal command would auto-run this same rescrub via
+	// the gate — see TestE2E_BootGateAutoRescrub — but that would leave nothing
+	// for the explicit migrate to redact, so we don't trigger it first.)
 	stdout, _, code := runBinary(t, dbPath, "migrate", "--rescrub")
 	if code != 0 {
 		t.Fatalf("migrate --rescrub failed (exit %d): %s", code, stdout)
@@ -301,6 +298,47 @@ func TestE2E_MigrateNoRescrub(t *testing.T) {
 	_, stderr, code := runBinary(t, dbPath, "list")
 	if code != 0 {
 		t.Fatalf("post --no-rescrub boot failed (exit %d): %s", code, stderr)
+	}
+}
+
+// TestE2E_BootGateAutoRescrub covers issue #29: a normal command against a
+// stale (pre-baseline) DB must not die on the boot gate. The gate auto-runs
+// `migrate --rescrub`, logs a loud line, and lets the command proceed — so the
+// memory tools never go dark waiting on a manual migration.
+func TestE2E_BootGateAutoRescrub(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "mem.db")
+	seedPreV1DB(t, dbPath)
+
+	// A gated command now succeeds instead of exiting non-zero.
+	_, stderr, code := runBinary(t, dbPath, "list")
+	if code != 0 {
+		t.Fatalf("expected auto-remediated boot to succeed, got exit %d: %s", code, stderr)
+	}
+	if !strings.Contains(stderr, "auto-rescrubbed") {
+		t.Errorf("expected loud auto-migration log on stderr, got: %q", stderr)
+	}
+
+	// Secrets in the seeded row were scrubbed by the auto-migration.
+	conn := openMigratedDB(t, dbPath)
+	var what, learned string
+	if err := conn.QueryRow(
+		`SELECT what, learned FROM memories WHERE id = 'mem_legacy_secret'`,
+	).Scan(&what, &learned); err != nil {
+		t.Fatalf("read migrated row: %v", err)
+	}
+	for _, raw := range []string{"alice@example.com", "10.0.0.5"} {
+		if strings.Contains(what, raw) || strings.Contains(learned, raw) {
+			t.Errorf("raw secret %q still present after auto-rescrub", raw)
+		}
+	}
+
+	// Baseline sentinel is set, so a second command does NOT re-trigger.
+	_, stderr2, code := runBinary(t, dbPath, "list")
+	if code != 0 {
+		t.Fatalf("second boot failed (exit %d): %s", code, stderr2)
+	}
+	if strings.Contains(stderr2, "rescrub") {
+		t.Errorf("auto-migration re-fired on an already-migrated DB: %q", stderr2)
 	}
 }
 
