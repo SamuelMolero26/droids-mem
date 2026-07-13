@@ -48,7 +48,7 @@ to verify a listener actually holds the token before reporting `already_running`
 Single binary, layered. Don't bypass layers:
 
 1. **`cmd/droids-mem/`** — cobra subcommands. One `cmd_*.go` per command; delegates to store, emits JSON via `output.go`. No business logic.
-2. **`internal/mcpserver/`** — MCP bridge (`server.go` wires HTTP + auth, `stdio.go` the stdio transport for host-spawned servers (`serve --stdio`, ADR-0024 — no port/token; instructions string forks one summary sentence per transport), `tools.go` defines the 4 memory tools, `graph_tools.go` the 2 code-graph tools). Operator commands (`list`, `schema`, `doctor`, `prune`) intentionally not exposed here.
+2. **`internal/mcpserver/`** — MCP bridge (`server.go` wires HTTP + auth, `stdio.go` the stdio transport for host-spawned servers (`serve --stdio`, ADR-0019 — no port/token; instructions string forks one summary sentence per transport), `tools.go` defines the 4 memory tools, `graph_tools.go` the 2 code-graph tools). Operator commands (`list`, `schema`, `doctor`, `prune`) intentionally not exposed here.
 3. **`internal/store/`** — all business logic shared by CLI and MCP. Key files:
    - `save.go` — validate → scrub → fingerprint → dedupe (2 layers) → insert; owns scrub *policy* (which fields, tag + identifier strict-reject, empty-after-scrub)
    - `search.go` — FTS5 MATCH queries
@@ -139,7 +139,10 @@ Only Root agent writes to `droids-mem`. Sub-agents get no MCP tools — they con
 - `docs/adr/0009` — store owns error serialization.
 - `docs/adr/0010` — no automatic retention; doctor warnings + manual prune with dupe-cluster suggestions.
 - `docs/adr/0011` — user_rule overflow surfaces as browse-tier stubs + `user_rules_total`.
+- `docs/adr/0019` — MCP server instructions + stdio transport for cross-host proactive integration (multi-host install).
 - `docs/adr/0020` — native code graph (Go-only, per-repo graph.db, signatures-first tools).
+- `docs/adr/0024` — MCP runtime errors return a structured `{status, error, message, retryable, suggestion}` envelope.
+- `docs/adr/0025` — recall eval engine (paraphrase→memory benchmark, no CI threshold).
 - `Future.md` — deferred / post-V1 ideas.
 
 ## Engineering practices
