@@ -101,9 +101,9 @@ func (s *Store) ImportShared(ctx context.Context, r io.Reader) (ImportResult, er
 // Save-rejected row is counted in res.Failed and returns nil.
 func (s *Store) importLine(ctx context.Context, line []byte, res *ImportResult) error {
 	var m SharedMemory
-	if err := json.Unmarshal(line, &m); err != nil {
-		res.Failed++
-		return nil
+	if json.Unmarshal(line, &m) != nil {
+		res.Failed++ // malformed row — tallied, not batch-fatal
+		return nil   //nolint:nilerr // intentional: malformed row tallied in Failed
 	}
 	resp, err := s.Save(ctx, SaveRequest{
 		TaskType: m.TaskType,
@@ -117,6 +117,8 @@ func (s *Store) importLine(ctx context.Context, line []byte, res *ImportResult) 
 	if err != nil {
 		var ve *ValidationError
 		if errors.As(err, &ve) {
+			// A validation/scrub rejection is a bad row, not a batch failure:
+			// count it and keep going so one poisoned line can't halt the pool.
 			res.Failed++
 			return nil
 		}
