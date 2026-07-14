@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/oklog/ulid/v2"
+
+	"github.com/samuelmolero26/droids-mem/internal/state"
 )
 
 var validKinds = map[string]bool{
@@ -205,6 +207,7 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 			return nil, fmt.Errorf("commit skip: %w", err)
 		}
 		committed = true
+		logSaveOutcome(req, "skipped_fingerprint", 0, existing.ID)
 		return &SaveResponse{
 			Status:         "skipped",
 			Reason:         "duplicate",
@@ -221,7 +224,7 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 	if err != nil {
 		return nil, fmt.Errorf("near-duplicate check: %w", err)
 	}
-	if matched != nil {
+	if matched != nil && similarity >= jaccardDupeThreshold {
 		if req.Force {
 			resp, err := forceUpdateConn(ctx, conn, matched.ID, sessionID, req, fp, now, scrubCountsJSON)
 			if err != nil {
@@ -239,6 +242,7 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 			return nil, fmt.Errorf("commit skip: %w", err)
 		}
 		committed = true
+		logSaveOutcome(req, "skipped_jaccard", similarity, matched.ID)
 		return &SaveResponse{
 			Status:         "skipped",
 			Reason:         "near_duplicate",
@@ -320,6 +324,12 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 	}
 	committed = true
 
+	nearMissID := ""
+	if matched != nil {
+		nearMissID = matched.ID
+	}
+	logSaveOutcome(req, "inserted", similarity, nearMissID)
+
 	return &SaveResponse{
 		Status:     "saved",
 		ID:         id,
@@ -327,6 +337,37 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 		Scrub:      responseScrub,
 		Superseded: supersededID,
 	}, nil
+}
+
+// saveTuningRecord is one line of the threshold-tuning dataset (ADR-0026). ids
+// and scalars only — no memory body — so the trust boundary matches mem.db and
+// no scrub is needed. jaccard is omitted on the fingerprint path; the outcome
+// field disambiguates a genuine zero-similarity insert from that omission.
+type saveTuningRecord struct {
+	Ev       string  `json:"ev"`
+	Ts       int64   `json:"ts"`
+	Kind     string  `json:"kind"`
+	TaskType string  `json:"task_type"`
+	Outcome  string  `json:"outcome"` // inserted | skipped_fingerprint | skipped_jaccard
+	Jaccard  float64 `json:"jaccard,omitempty"`
+	Matched  string  `json:"matched,omitempty"`
+}
+
+// logSaveOutcome records the dedupe decision for one save. Dry runs are skipped
+// — they roll back and never persist, so they are predictions, not events.
+func logSaveOutcome(req SaveRequest, outcome string, jaccard float64, matched string) {
+	if req.DryRun {
+		return
+	}
+	state.AppendTuningLog(saveTuningRecord{
+		Ev:       "save",
+		Ts:       time.Now().Unix(),
+		Kind:     req.Kind,
+		TaskType: req.TaskType,
+		Outcome:  outcome,
+		Jaccard:  jaccard,
+		Matched:  matched,
+	})
 }
 
 // endTxn finishes the save transaction: COMMIT normally, ROLLBACK when the
@@ -439,8 +480,11 @@ type matchedRow struct {
 const bm25QueryTermCap = 100
 
 // nearDuplicateConn pulls top-K BM25 candidates and re-ranks via Jaccard
-// similarity over normalized token sets of (title+what+learned+tags).
-// Returns the best match if similarity >= jaccardDupeThreshold.
+// similarity over normalized token sets of (title+what+learned+tags). Returns
+// the single best candidate and its similarity, or (nil, 0) when no BM25
+// candidate matched. The caller applies jaccardDupeThreshold — the best
+// similarity is surfaced even on the insert path so near-misses can be logged
+// for threshold tuning (ADR-0026).
 func nearDuplicateConn(ctx context.Context, conn *sql.Conn, req SaveRequest) (*matchedRow, float64, error) {
 	body := req.Title + " " + req.What + " " + req.Learned + " " + req.Tags
 	terms, reqTokens := dedupeTokens(body)
@@ -502,10 +546,11 @@ func nearDuplicateConn(ctx context.Context, conn *sql.Conn, req SaveRequest) (*m
 	if err := rows.Err(); err != nil {
 		return nil, 0, err
 	}
-	if bestSim >= jaccardDupeThreshold {
-		return &best, bestSim, nil
+	if best.ID == "" {
+		// No BM25 candidate matched — no near neighbour to report.
+		return nil, 0, nil
 	}
-	return nil, 0, nil
+	return &best, bestSim, nil
 }
 
 func findByFingerprintConn(ctx context.Context, conn *sql.Conn, fp string) (*matchedRow, error) {

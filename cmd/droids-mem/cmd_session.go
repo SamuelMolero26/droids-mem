@@ -114,6 +114,31 @@ func newSessionPullCmd(a *app) *cobra.Command {
 // filtering trims to relevancePullLimit.
 const maxRelevanceCandidates = 10
 
+// pullTuningRecord is one line of the threshold-tuning dataset (ADR-0026) for
+// the relevance floor. kept means the hit passed the floor (overlap >= floor) —
+// the floor decision alone, independent of the per-session injected-once dedupe.
+// One record per candidate evaluated, rejected ones included: their overlaps
+// are half the distribution the floor is tuned against.
+type pullTuningRecord struct {
+	Ev      string  `json:"ev"`
+	Ts      int64   `json:"ts"`
+	Floor   float64 `json:"floor"`
+	Hit     string  `json:"hit"`
+	Overlap float64 `json:"overlap"`
+	Kept    bool    `json:"kept"`
+}
+
+func logPullOutcome(floor float64, hit string, overlap float64, kept bool) {
+	state.AppendTuningLog(pullTuningRecord{
+		Ev:      "pull",
+		Ts:      time.Now().Unix(),
+		Floor:   floor,
+		Hit:     hit,
+		Overlap: overlap,
+		Kept:    kept,
+	})
+}
+
 // relevancePull runs the relevance-gated recall (ADR-0016 pt 8): search the
 // prompt, keep hits whose prompt-token overlap meets the floor, drop ones
 // already injected this session, cap to relevancePullLimit, and record the
@@ -131,7 +156,10 @@ func relevancePull(ctx context.Context, s *store.Store, ccID, query string, floo
 		if len(picked) >= relevancePullLimit {
 			break
 		}
-		if store.TokenOverlap(query, r.Title+" "+r.Learned) < floor || injected[r.ID] { // weaker than floor, or already shown
+		overlap := store.TokenOverlap(query, r.Title+" "+r.Learned)
+		passed := overlap >= floor
+		logPullOutcome(floor, r.ID, overlap, passed)
+		if !passed || injected[r.ID] { // weaker than floor, or already shown
 			continue
 		}
 		picked = append(picked, r)
