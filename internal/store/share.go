@@ -23,32 +23,36 @@ type SharedMemory struct {
 	Tags     string `json:"tags"`
 }
 
-// ExportShared returns every scope='shared' memory as a SharedMemory. Rows are
-// already scrubbed in-db (scrub runs on save), so export moves no secrets.
-// Personal rows never appear here — that is the whole point of the scope column.
-func (s *Store) ExportShared(ctx context.Context) ([]SharedMemory, error) {
+// ExportShared streams every scope='shared' memory to w as JSONL, one compact
+// object per line. Rows are already scrubbed in-db (scrub runs on save), so
+// export moves no secrets. Personal rows never appear — the point of the scope
+// column. The `, id` tiebreak makes the output byte-stable across re-exports of
+// an unchanged corpus, so the git-tracked pool file diffs cleanly.
+func (s *Store) ExportShared(ctx context.Context, w io.Writer) error {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT kind, task_type, title, what, learned, tags
 		FROM memories
 		WHERE scope = 'shared'
-		ORDER BY created_at`)
+		ORDER BY created_at, id`)
 	if err != nil {
-		return nil, fmt.Errorf("export query: %w", err)
+		return fmt.Errorf("export query: %w", err)
 	}
 	defer rows.Close()
 
-	out := []SharedMemory{}
+	enc := json.NewEncoder(w) // Encode writes one line + '\n' = JSONL
 	for rows.Next() {
 		var m SharedMemory
 		if err := rows.Scan(&m.Kind, &m.TaskType, &m.Title, &m.What, &m.Learned, &m.Tags); err != nil {
-			return nil, fmt.Errorf("scan shared memory: %w", err)
+			return fmt.Errorf("scan shared memory: %w", err)
 		}
-		out = append(out, m)
+		if err := enc.Encode(&m); err != nil {
+			return fmt.Errorf("export write: %w", err)
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("export rows: %w", err)
+		return fmt.Errorf("export rows: %w", err)
 	}
-	return out, nil
+	return nil
 }
 
 // ImportResult reports how an import batch landed.
@@ -68,47 +72,62 @@ type ImportResult struct {
 // A pool crosses a trust boundary, so a single bad row (malformed JSON, or a
 // row Save rejects — e.g. a secret in a tag) is skipped and counted in Failed,
 // never aborting the batch: one poisoned line can't block a teammate's good
-// lessons. Only a genuine store failure (write-lock, disk) aborts.
+// lessons. bufio.Reader (not Scanner) is deliberate — Scanner aborts the whole
+// stream on a line over its 64KB token cap, which a crafted pool line could
+// trigger to defeat exactly that guarantee; Reader grows to any line length, so
+// an oversized row just fails its own Unmarshal. Only a genuine store failure
+// (write-lock, disk) aborts.
 func (s *Store) ImportShared(ctx context.Context, r io.Reader) (ImportResult, error) {
 	var res ImportResult
-	sc := bufio.NewScanner(r)
-	for sc.Scan() {
-		line := bytes.TrimSpace(sc.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-		var m SharedMemory
-		if err := json.Unmarshal(line, &m); err != nil {
-			res.Failed++
-			continue
-		}
-		resp, err := s.Save(ctx, SaveRequest{
-			TaskType: m.TaskType,
-			Kind:     m.Kind,
-			Title:    m.Title,
-			What:     m.What,
-			Learned:  m.Learned,
-			Tags:     m.Tags,
-			Scope:    "shared",
-		})
-		if err != nil {
-			var ve *ValidationError
-			if errors.As(err, &ve) {
-				res.Failed++
-				continue
+	br := bufio.NewReader(r)
+	for {
+		raw, readErr := br.ReadBytes('\n')
+		if line := bytes.TrimSpace(raw); len(line) > 0 {
+			if err := s.importLine(ctx, line, &res); err != nil {
+				return res, err
 			}
-			return res, fmt.Errorf("import: %w", err)
 		}
-		if resp.Status == "skipped" {
-			res.Skipped++
-		} else {
-			res.Imported++
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return res, nil
+			}
+			return res, fmt.Errorf("import read: %w", readErr)
 		}
 	}
-	if err := sc.Err(); err != nil {
-		return res, fmt.Errorf("import scan: %w", err)
+}
+
+// importLine saves one JSONL row, tallying into res. Returns a non-nil error
+// only for a genuine store failure that should abort the batch; a malformed or
+// Save-rejected row is counted in res.Failed and returns nil.
+func (s *Store) importLine(ctx context.Context, line []byte, res *ImportResult) error {
+	var m SharedMemory
+	if err := json.Unmarshal(line, &m); err != nil {
+		res.Failed++
+		return nil
 	}
-	return res, nil
+	resp, err := s.Save(ctx, SaveRequest{
+		TaskType: m.TaskType,
+		Kind:     m.Kind,
+		Title:    m.Title,
+		What:     m.What,
+		Learned:  m.Learned,
+		Tags:     m.Tags,
+		Scope:    "shared",
+	})
+	if err != nil {
+		var ve *ValidationError
+		if errors.As(err, &ve) {
+			res.Failed++
+			return nil
+		}
+		return fmt.Errorf("import: %w", err)
+	}
+	if resp.Status == "skipped" {
+		res.Skipped++
+	} else {
+		res.Imported++
+	}
+	return nil
 }
 
 // SetScope flips one memory's scope by id (the `share`/`unshare` grant,

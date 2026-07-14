@@ -61,13 +61,9 @@ func newExportCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			mems, err := s.ExportShared(cmd.Context())
-			if err != nil {
+			if err := s.ExportShared(cmd.Context(), cmd.OutOrStdout()); err != nil {
 				writeError("export_failed", err.Error(), true)
 				exitWith(ExitError)
-			}
-			for _, m := range mems {
-				writeJSON(m) // one compact JSON object per line
 			}
 			return nil
 		},
