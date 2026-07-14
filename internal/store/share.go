@@ -12,11 +12,8 @@ import (
 
 // SharedMemory is the wire shape of one exported memory (ADR-0028). It carries
 // only the content needed to reconstruct a save on another machine — no id, no
-// author, no source. The pool is anonymous by design: identity is exactly what
-// the Scrub pipeline removes, so attribution would fight it. The one exception
-// is AuthoredAt: a coarse origin date, not an identity, spent so an imported
-// lesson's age stays observable instead of being erased by re-stamping
-// created_at to the import time.
+// timestamps, no author. The pool is anonymous by design: identity is exactly
+// what the Scrub pipeline removes, so attribution would fight it.
 type SharedMemory struct {
 	Kind     string `json:"kind"`
 	TaskType string `json:"task_type"`
@@ -24,66 +21,34 @@ type SharedMemory struct {
 	What     string `json:"what"`
 	Learned  string `json:"learned"`
 	Tags     string `json:"tags"`
-	// AuthoredAt is when the lesson was originally written, floored to the UTC
-	// day by ExportShared. Truncation is idempotent, so it survives a re-export
-	// unchanged and a re-exported pool stays byte-identical across peers. Still
-	// no id, no author, no source.
-	AuthoredAt int64 `json:"authored_at,omitempty"`
 }
 
-// ExportShared streams every scope='shared' memory to w as JSONL, one compact
-// object per line. Rows are already scrubbed in-db (scrub runs on save), so
-// export moves no secrets. Personal rows never appear — the point of the scope
-// column. ORDER BY fingerprint makes the output byte-identical for the same
-// logical corpus on ANY machine: fingerprint is content-derived, not clock- or
-// insert-order-derived, so two teammates re-exporting the same imported pool
-// produce the same bytes and the git-tracked file diffs cleanly (created_at,
-// stamped per-machine at save time, would have churned the diff across peers).
-func (s *Store) ExportShared(ctx context.Context, w io.Writer) error {
+// ExportShared returns every scope='shared' memory as a SharedMemory. Rows are
+// already scrubbed in-db (scrub runs on save), so export moves no secrets.
+// Personal rows never appear here — that is the whole point of the scope column.
+func (s *Store) ExportShared(ctx context.Context) ([]SharedMemory, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT kind, task_type, title, what, learned, tags, authored_at
+		SELECT kind, task_type, title, what, learned, tags
 		FROM memories
 		WHERE scope = 'shared'
-		ORDER BY fingerprint`)
+		ORDER BY created_at`)
 	if err != nil {
-		return fmt.Errorf("export query: %w", err)
+		return nil, fmt.Errorf("export query: %w", err)
 	}
 	defer rows.Close()
 
-	enc := json.NewEncoder(w) // Encode writes one line + '\n' = JSONL
+	out := []SharedMemory{}
 	for rows.Next() {
 		var m SharedMemory
-		if err := rows.Scan(&m.Kind, &m.TaskType, &m.Title, &m.What, &m.Learned, &m.Tags, &m.AuthoredAt); err != nil {
-			return fmt.Errorf("scan shared memory: %w", err)
+		if err := rows.Scan(&m.Kind, &m.TaskType, &m.Title, &m.What, &m.Learned, &m.Tags); err != nil {
+			return nil, fmt.Errorf("scan shared memory: %w", err)
 		}
-		// Floor to the UTC day before the stamp leaves the machine. A
-		// locally-authored row's authored_at IS its created_at — the exact
-		// second of the save — and second-resolution stamps re-cluster one
-		// contributor's rows by timestamp adjacency (session rollups land
-		// several summaries inside one second), leaking working hours and
-		// undoing the attribution removal Scrub exists to enforce. Idempotent,
-		// so a re-exported pool stays byte-identical.
-		m.AuthoredAt -= m.AuthoredAt % 86400
-		if err := enc.Encode(&m); err != nil {
-			return fmt.Errorf("export write: %w", err)
-		}
+		out = append(out, m)
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("export rows: %w", err)
+		return nil, fmt.Errorf("export rows: %w", err)
 	}
-	return nil
-}
-
-// CountShared returns how many scope='shared' memories exist. Drives the TUI
-// sharing surface (model.go); no CLI caller after the transport was dropped.
-func (s *Store) CountShared(ctx context.Context) (int, error) {
-	var n int
-	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM memories WHERE scope = 'shared'`).Scan(&n)
-	if err != nil {
-		return 0, fmt.Errorf("count shared: %w", err)
-	}
-	return n, nil
+	return out, nil
 }
 
 // ImportResult reports how an import batch landed.
@@ -103,68 +68,47 @@ type ImportResult struct {
 // A pool crosses a trust boundary, so a single bad row (malformed JSON, or a
 // row Save rejects — e.g. a secret in a tag) is skipped and counted in Failed,
 // never aborting the batch: one poisoned line can't block a teammate's good
-// lessons. bufio.Reader (not Scanner) is deliberate — Scanner aborts the whole
-// stream on a line over its 64KB token cap, which a crafted pool line could
-// trigger to defeat exactly that guarantee; Reader grows to any line length, so
-// an oversized row just fails its own Unmarshal. Only a genuine store failure
-// (write-lock, disk) aborts.
+// lessons. Only a genuine store failure (write-lock, disk) aborts.
 func (s *Store) ImportShared(ctx context.Context, r io.Reader) (ImportResult, error) {
 	var res ImportResult
-	br := bufio.NewReader(r)
-	for {
-		raw, readErr := br.ReadBytes('\n')
-		if line := bytes.TrimSpace(raw); len(line) > 0 {
-			if err := s.importLine(ctx, line, &res); err != nil {
-				return res, err
-			}
+	sc := bufio.NewScanner(r)
+	for sc.Scan() {
+		line := bytes.TrimSpace(sc.Bytes())
+		if len(line) == 0 {
+			continue
 		}
-		if readErr != nil {
-			if errors.Is(readErr, io.EOF) {
-				return res, nil
-			}
-			return res, fmt.Errorf("import read: %w", readErr)
-		}
-	}
-}
-
-// importLine saves one JSONL row, tallying into res. Returns a non-nil error
-// only for a genuine store failure that should abort the batch; a malformed or
-// Save-rejected row is counted in res.Failed and returns nil.
-func (s *Store) importLine(ctx context.Context, line []byte, res *ImportResult) error {
-	var m SharedMemory
-	if json.Unmarshal(line, &m) != nil {
-		res.Failed++ // malformed row — tallied, not batch-fatal
-		return nil   //nolint:nilerr // intentional: malformed row tallied in Failed
-	}
-	resp, err := s.Save(ctx, SaveRequest{
-		TaskType: m.TaskType,
-		Kind:     m.Kind,
-		Title:    m.Title,
-		What:     m.What,
-		Learned:  m.Learned,
-		Tags:     m.Tags,
-		Scope:    "shared",
-		// Carry the peer's origin date so it stays observable across the
-		// import boundary. Save clamps it (the pool is a trust boundary) —
-		// see resolveAuthoredAt.
-		AuthoredAt: m.AuthoredAt,
-	})
-	if err != nil {
-		var ve *ValidationError
-		if errors.As(err, &ve) {
-			// A validation/scrub rejection is a bad row, not a batch failure:
-			// count it and keep going so one poisoned line can't halt the pool.
+		var m SharedMemory
+		if err := json.Unmarshal(line, &m); err != nil {
 			res.Failed++
-			return nil
+			continue
 		}
-		return fmt.Errorf("import: %w", err)
+		resp, err := s.Save(ctx, SaveRequest{
+			TaskType: m.TaskType,
+			Kind:     m.Kind,
+			Title:    m.Title,
+			What:     m.What,
+			Learned:  m.Learned,
+			Tags:     m.Tags,
+			Scope:    "shared",
+		})
+		if err != nil {
+			var ve *ValidationError
+			if errors.As(err, &ve) {
+				res.Failed++
+				continue
+			}
+			return res, fmt.Errorf("import: %w", err)
+		}
+		if resp.Status == "skipped" {
+			res.Skipped++
+		} else {
+			res.Imported++
+		}
 	}
-	if resp.Status == "skipped" {
-		res.Skipped++
-	} else {
-		res.Imported++
+	if err := sc.Err(); err != nil {
+		return res, fmt.Errorf("import scan: %w", err)
 	}
-	return nil
+	return res, nil
 }
 
 // SetScope flips one memory's scope by id (the `share`/`unshare` grant,

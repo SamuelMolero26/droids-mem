@@ -7,7 +7,7 @@ import (
 
 // CurrentSchemaVersion is the user_version that a fully-initialized
 // database reports. Bump when adding a new entry to the migrations ladder.
-const CurrentSchemaVersion = 9
+const CurrentSchemaVersion = 5
 
 // migration is one rung in the PRAGMA user_version ladder. Each rung runs
 // inside its own transaction; partial failure rolls back atomically.
@@ -24,37 +24,21 @@ type migration struct {
 // (no scope, scrub_pattern_version, scrub_counts, or meta). v1 = v1.0 schema
 // matching schema.go ddl for a fresh DB.
 //
-// The FTS5 tokenizer flip (decision #17 in the v1.0 plan) lives in rung 7→8:
-// the auto-applied ladder drops the trigram FTS + sync triggers, recreates
-// them with the porter stemmer, and reindexes from memories — all inside the
-// rung transaction. store.Migrate no longer owns any FTS work; it performs
-// only the optional rescrub row rewrite and the scrub-baseline sentinel stamp.
-//
-// Every rung's SQL is frozen at the shape it shipped with and never composed
-// from the live schema.go consts — see ftsSchemaV8 for why, and
-// TestMigrations_RungsDoNotEmbedLiveSchema for the guard.
+// v0→v1 only widens the row shape and adds the meta table. The FTS5 tokenizer
+// flip (decision #17 in v1.0 plan) lives in `migrate --rescrub` so it can run
+// in the same transaction as the row rewrite; the auto-applied ladder leaves
+// FTS untouched and lets the boot gate block startup until the operator opts
+// in via --rescrub or --no-rescrub.
 var migrations = []migration{
 	{from: 0, to: 1, sql: migrationV0ToV1},
 	{from: 1, to: 2, sql: migrationV1ToV2},
 	{from: 2, to: 3, sql: migrationV2ToV3},
 	{from: 3, to: 4, sql: migrationV3ToV4},
 	{from: 4, to: 5, sql: migrationV4ToV5},
-	{from: 5, to: 6, sql: migrationV5ToV6},
-	{from: 6, to: 7, sql: migrationV6ToV7},
-	{from: 7, to: 8, sql: migrationV7ToV8},
-	{from: 8, to: 9, sql: migrationV8ToV9},
 }
 
-// migrationV0ToV1 widens the row shape and adds the meta table.
-//
-// The scope column DEFAULT is 'personal' — matching schema.go ddl — so a
-// migrated v0 DB's stored CREATE text is byte-identical to fresh (SM-R6
-// parity). The change is data-identical: save.go always writes scope
-// explicitly, the v4→v5 backfill still runs (a no-op), and only newly-migrated
-// v0 DBs see the text difference. Pre-existing migrated DBs keep their
-// historical stored text (version gate), and that DEFAULT never fires.
 const migrationV0ToV1 = `
-ALTER TABLE memories ADD COLUMN scope TEXT NOT NULL DEFAULT 'personal'
+ALTER TABLE memories ADD COLUMN scope TEXT NOT NULL DEFAULT 'shared'
     CHECK(scope IN ('personal','shared'));
 ALTER TABLE memories ADD COLUMN scrub_pattern_version INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE memories ADD COLUMN scrub_counts TEXT;
@@ -124,132 +108,6 @@ const migrationV4ToV5 = `
 UPDATE memories SET scope = 'personal';
 `
 
-// migrationV5ToV6 adds the memory lifecycle layer (ADR-0031/ADR-0030):
-// decay/review (`review_after`), task_type-scoped pinning (`pinned`), and a
-// soft-delete archive table (`archived_memories`) for supersede.
-//
-// review_after is deliberately NOT backfilled (D1) — every pre-v6 row lands
-// on NULL, not `created_at + horizon[kind]`. Backfilling would mass-flag the
-// entire legacy corpus `needs_review` on day one, which is pure noise; rows
-// pick up a horizon the next time they are written (force-save, supersede)
-// or explicitly reviewed (`mark_reviewed`). pinned defaults to 0 — no
-// pre-migration row was ever pinned.
-//
-// archived_memories (D3) is an explicit 1:1 column mirror of memories plus
-// archived_at — no FTS, no triggers. `SELECT *` was rejected because it
-// silently drops any future ALTER'd column from the archive copy; the
-// explicit list is checked at test time via a PRAGMA table_info parity test
-// (D5) so schema drift between the two tables fails loud in CI, not silently
-// at archive time.
-const migrationV5ToV6 = `
-ALTER TABLE memories ADD COLUMN review_after INTEGER;
-ALTER TABLE memories ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
-
-CREATE TABLE IF NOT EXISTS archived_memories (
-    id                    TEXT    PRIMARY KEY,
-    session_id            TEXT    NOT NULL,
-    task_type             TEXT    NOT NULL,
-    kind                  TEXT    NOT NULL,
-    title                 TEXT    NOT NULL,
-    what                  TEXT    NOT NULL,
-    learned               TEXT    NOT NULL,
-    tags                  TEXT    NOT NULL DEFAULT '',
-    fingerprint           TEXT    NOT NULL,
-    created_at            INTEGER NOT NULL,
-    updated_at            INTEGER NOT NULL,
-    scope                 TEXT    NOT NULL DEFAULT 'personal',
-    scrub_pattern_version INTEGER NOT NULL DEFAULT 1,
-    scrub_counts          TEXT,
-    expand_count          INTEGER NOT NULL DEFAULT 0,
-    last_expanded_at      INTEGER,
-    origin                TEXT    NOT NULL DEFAULT 'manual',
-    review_after          INTEGER,
-    pinned                INTEGER NOT NULL DEFAULT 0,
-    archived_at           INTEGER NOT NULL
-);
-`
-
-// migrationV7ToV8 flips the FTS5 tokenizer from trigram to porter
-// (decision #17): drop the trigram index + its sync triggers, recreate both
-// at the v8 shape, and reindex from memories. Pure SQL, idempotent (IF
-// EXISTS/IF NOT EXISTS + version gate skips at v8), and row-preserving
-// (explicit rowid in the SELECT — no INSERT OR REPLACE on memories). SQLite
-// DDL is transactional, so the rung either fully lands with its user_version
-// bump or rolls back whole.
-//
-// The tokenizer flip moved here from store.Migrate so the boot ladder owns
-// the flip once per DB at upgrade; `migrate` no longer touches FTS.
-const migrationV7ToV8 = dropFTSTriggersAndTable + ftsSchemaV8 + reindexFromMemories
-
-// ftsSchemaV8 is the FTS5 virtual table + sync triggers FROZEN at the shape
-// rung 7→8 shipped with. It is a deliberate byte-copy of schema.go's FTSSchema
-// as of v8 and must never be edited: a rung is history, so the SQL a given
-// user_version transition executes has to stay fixed for every database that
-// has not run it yet. Referencing the live FTSSchema instead would mean the
-// next tokenizer or column change silently rewrites this rung — and if that
-// change also ships as rung 8→9, a v7 database applies it twice while a v8
-// database applies it once.
-//
-// A future FTS change belongs in a new rung plus schema.go, not here.
-// TestMigrations_RungsDoNotEmbedLiveSchema enforces the split;
-// TestInit_FreshMatchesMigratedShape then catches a schema.go change that
-// forgot its rung.
-const ftsSchemaV8 = `
-CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-    title,
-    what,
-    learned,
-    tags,
-    content='memories',
-    content_rowid='rowid',
-    tokenize='porter unicode61 tokenchars ''_-'''
-);
-
--- FTS sync: INSERT
-CREATE TRIGGER IF NOT EXISTS memories_ai
-AFTER INSERT ON memories BEGIN
-    INSERT INTO memories_fts(rowid, title, what, learned, tags)
-    VALUES (NEW.rowid, NEW.title, NEW.what, NEW.learned, NEW.tags);
-END;
-
--- FTS sync: DELETE
-CREATE TRIGGER IF NOT EXISTS memories_ad
-AFTER DELETE ON memories BEGIN
-    INSERT INTO memories_fts(memories_fts, rowid, title, what, learned, tags)
-    VALUES ('delete', OLD.rowid, OLD.title, OLD.what, OLD.learned, OLD.tags);
-END;
-
--- FTS sync: UPDATE (delete old entry, insert new). Deliberately scoped to the
--- indexed text columns so metadata-only updates — the Expand signal increment
--- in particular — do NOT trigger a full FTS delete+reinsert. An UPDATE that
--- touches none of title/what/learned/tags has no business re-indexing FTS.
-CREATE TRIGGER IF NOT EXISTS memories_au
-AFTER UPDATE OF title, what, learned, tags ON memories BEGIN
-    INSERT INTO memories_fts(memories_fts, rowid, title, what, learned, tags)
-    VALUES ('delete', OLD.rowid, OLD.title, OLD.what, OLD.learned, OLD.tags);
-    INSERT INTO memories_fts(rowid, title, what, learned, tags)
-    VALUES (NEW.rowid, NEW.title, NEW.what, NEW.learned, NEW.tags);
-END;
-`
-
-// dropFTSTriggersAndTable tears down the pre-v8 trigram FTS index and its
-// sync triggers before FTSSchema recreates them with the porter tokenizer.
-// Concatenated FIRST inside migrationV7ToV8 (drops before CREATEs).
-const dropFTSTriggersAndTable = `
-DROP TRIGGER IF EXISTS memories_ai;
-DROP TRIGGER IF EXISTS memories_ad;
-DROP TRIGGER IF EXISTS memories_au;
-DROP TABLE IF EXISTS memories_fts;
-`
-
-// reindexFromMemories backfills the recreated memories_fts from the memories
-// table. The explicit rowid keeps the FTS5 external-content key aligned with
-// the INTEGER rowid that the sync triggers write (no row reassignment).
-const reindexFromMemories = `
-INSERT INTO memories_fts(rowid, title, what, learned, tags)
-SELECT rowid, title, what, learned, tags FROM memories;
-`
-
 // Migrate advances db's schema from its current user_version up to
 // CurrentSchemaVersion by running each pending rung in order. Already-current
 // databases return nil without touching anything. Each rung is wrapped in
@@ -316,58 +174,3 @@ func setUserVersion(db *sql.DB, v int) error {
 	}
 	return nil
 }
-
-// migrationV6ToV7 carries the ADR-0033 newest-first ordering tiebreak: the
-// three recency-serving indexes widen from 3 to 4 columns, ending in
-// `created_at DESC, id DESC`.
-//
-// The three index redefinitions must DROP first. CREATE INDEX IF NOT EXISTS is
-// a NO-OP against an index that already exists under the old definition, so an
-// IF NOT EXISTS-only rung would leave upgraded databases on the 3-column shape
-// while fresh ones got the 4-column shape — same user_version, different
-// schema, nothing erroring. TestInit_FreshMatchesMigratedShape compares index
-// DEFINITIONS (not just names) to keep that drift impossible to ship.
-//
-// The rung also drops idx_memories_task_type, which was redundant: task_type is
-// the leftmost column of idx_memories_task_kind_created, so the composite
-// already serves every task_type-only lookup on the same access path. The
-// planner preferred the standalone index only because it is narrower, never
-// because it was needed, and it cost a second B-tree maintained on every write.
-// idx_memories_kind is NOT redundant and stays — kind is the composite's second
-// column, so no prefix covers a kind-only lookup.
-const migrationV6ToV7 = `
-DROP INDEX IF EXISTS idx_memories_task_kind_created;
-CREATE INDEX idx_memories_task_kind_created ON memories(task_type, kind, created_at DESC, id DESC);
-
-DROP INDEX IF EXISTS idx_memories_created_at;
-CREATE INDEX idx_memories_created_at ON memories(created_at DESC, id DESC);
-
-DROP INDEX IF EXISTS idx_memories_origin_created;
-CREATE INDEX idx_memories_origin_created ON memories(origin, created_at DESC, id DESC);
-
-DROP INDEX IF EXISTS idx_memories_task_type;
-`
-
-// migrationV8ToV9 adds authored_at: pure provenance, distinct from
-// created_at, for a memory's original authoring date. The two agree for a
-// locally-authored row and diverge on import, where ImportShared re-stamps
-// created_at to the local import time but carries the peer's authored_at
-// forward. authored_at is never an ORDER BY key and never drives review_after
-// — there is no decay clock in this change.
-//
-// Backfilled to created_at rather than left at the DEFAULT 0: SQLite has no
-// ADD COLUMN ... DEFAULT (<other column>), so two statements per table. A
-// bare 0 would misreport every pre-existing row as authored in 1970 once
-// GetRow/List start projecting the column — created_at is the closest honest
-// value for a row whose real authoring date was never recorded.
-//
-// archived_memories gets the same column + backfill for column-parity with
-// memories (TestArchivedMemories_ColumnParityWithMemories); the UPDATE is a
-// no-op today since nothing writes to that table yet.
-const migrationV8ToV9 = `
-ALTER TABLE memories ADD COLUMN authored_at INTEGER NOT NULL DEFAULT 0;
-UPDATE memories SET authored_at = created_at;
-
-ALTER TABLE archived_memories ADD COLUMN authored_at INTEGER NOT NULL DEFAULT 0;
-UPDATE archived_memories SET authored_at = created_at;
-`

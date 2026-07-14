@@ -1,38 +1,10 @@
 package store_test
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	"encoding/json"
 	"strings"
 	"testing"
-
-	"github.com/samuelmolero26/droids-mem/internal/store"
 )
-
-// exportLines runs ExportShared into a buffer and decodes the JSONL back into
-// SharedMemory rows, so tests assert on the actual wire output.
-func exportLines(t *testing.T, s *store.Store) []store.SharedMemory {
-	t.Helper()
-	var buf bytes.Buffer
-	if err := s.ExportShared(context.Background(), &buf); err != nil {
-		t.Fatalf("export: %v", err)
-	}
-	var out []store.SharedMemory
-	sc := bufio.NewScanner(&buf)
-	for sc.Scan() {
-		if len(bytes.TrimSpace(sc.Bytes())) == 0 {
-			continue
-		}
-		var m store.SharedMemory
-		if err := json.Unmarshal(sc.Bytes(), &m); err != nil {
-			t.Fatalf("decode export line: %v", err)
-		}
-		out = append(out, m)
-	}
-	return out
-}
 
 // TestShare_ExportOnlyShared proves the trust boundary: a personal-by-default
 // save never leaks; only a memory promoted via SetScope('shared') exports.
@@ -44,7 +16,11 @@ func TestShare_ExportOnlyShared(t *testing.T) {
 	if _, err := s.Save(ctx, validReq()); err != nil {
 		t.Fatalf("save personal: %v", err)
 	}
-	if got := exportLines(t, s); len(got) != 0 {
+	got, err := s.ExportShared(ctx)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if len(got) != 0 {
 		t.Fatalf("personal row leaked into export: %d rows", len(got))
 	}
 
@@ -60,7 +36,11 @@ func TestShare_ExportOnlyShared(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("SetScope shared: found=%v err=%v", found, err)
 	}
-	if got := exportLines(t, s); len(got) != 1 || got[0].Title != "Shared lesson" {
+	got, err = s.ExportShared(ctx)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if len(got) != 1 || got[0].Title != "Shared lesson" {
 		t.Fatalf("export = %+v, want the one shared row", got)
 	}
 }
@@ -95,43 +75,12 @@ not json
 	}
 
 	// Imported rows land shared, so they round-trip back out.
-	if out := exportLines(t, s); len(out) != 1 {
+	out, err := s.ExportShared(ctx)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if len(out) != 1 {
 		t.Fatalf("exported %d rows, want 1", len(out))
-	}
-}
-
-// TestShare_ExportOrderIsContentStable proves export bytes depend only on
-// content, not insert order or a per-machine clock — the property that keeps a
-// git-tracked pool file diff-clean across teammates. Two stores get the same two
-// shared memories in opposite insert order; their exports must be byte-identical.
-func TestShare_ExportOrderIsContentStable(t *testing.T) {
-	mk := func(order ...int) []byte {
-		s := newTestStore(t)
-		ctx := context.Background()
-		// Fully distinct content so neither trips the near-duplicate gate — the
-		// test is about ordering, so both rows must persist.
-		a := validReq()
-		a.Title, a.What, a.Learned, a.Tags = "alpha lesson", "redis cache eviction context", "prefer lru eviction", "redis caching"
-		b := validReq()
-		b.Title, b.What, b.Learned, b.Tags = "beta lesson", "postgres index tuning context", "add covering index", "postgres indexing"
-		reqs := []store.SaveRequest{a, b}
-		for _, i := range order {
-			resp, err := s.Save(ctx, reqs[i])
-			if err != nil {
-				t.Fatalf("save: %v", err)
-			}
-			if _, err := s.SetScope(ctx, resp.ID, "shared"); err != nil {
-				t.Fatalf("scope: %v", err)
-			}
-		}
-		var buf bytes.Buffer
-		if err := s.ExportShared(ctx, &buf); err != nil {
-			t.Fatalf("export: %v", err)
-		}
-		return buf.Bytes()
-	}
-	if !bytes.Equal(mk(0, 1), mk(1, 0)) {
-		t.Fatal("export bytes differ by insert order — ordering is not content-stable")
 	}
 }
 

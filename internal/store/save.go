@@ -37,8 +37,10 @@ var validOrigins = map[string]bool{
 
 // DefaultScope is what the save path stamps when the caller omits the scope
 // field. Matches the column default in schema.go so behavior is consistent
-// whether the row arrives through the API or a direct INSERT.
-const DefaultScope = "shared"
+// whether the row arrives through the API or a direct INSERT. 'personal' by
+// default (ADR-0028): a memory never leaves the local store unless explicitly
+// shared via `share` or --scope shared.
+const DefaultScope = "personal"
 
 // DefaultOrigin is stamped when the caller omits origin. 'auto' is reserved for
 // the session-end enforcement path (ADR-0016); every explicit save is 'manual'.
@@ -94,7 +96,7 @@ type SaveRequest struct {
 	What      string `json:"what"`
 	Learned   string `json:"learned"`
 	Tags      string `json:"tags"`             // space-delimited tokens
-	Scope     string `json:"scope,omitempty"`  // "personal" | "shared", defaults to "shared"
+	Scope     string `json:"scope,omitempty"`  // "personal" | "shared", defaults to "personal" (ADR-0028)
 	Origin    string `json:"origin,omitempty"` // "manual" | "auto", defaults to "manual" (ADR-0016)
 	Force     bool   `json:"force"`            // HITL correction: overwrite matched fingerprint
 	DryRun    bool   `json:"dry_run"`          // run full pipeline (validate → scrub → dedupe) then ROLLBACK
