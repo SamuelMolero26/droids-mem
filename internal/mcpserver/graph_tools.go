@@ -2,16 +2,13 @@ package mcpserver
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/samuelmolero26/droids-mem/internal/graph"
-	"github.com/samuelmolero26/droids-mem/internal/state"
 )
 
 // registerGraphTools exposes the native code-graph subsystem (ADR-0020) as
@@ -21,7 +18,6 @@ import (
 func registerGraphTools(s *server.MCPServer, gm *graph.Manager) {
 	s.AddTool(graphSymbolToolDef(), mcp.NewTypedToolHandler(graphSymbolHandler(gm)))
 	s.AddTool(graphPackageToolDef(), mcp.NewTypedToolHandler(graphPackageHandler(gm)))
-	s.AddTool(graphBuildWaitToolDef(), mcp.NewTypedToolHandler(graphBuildWaitHandler(gm)))
 }
 
 // ---------- graph_symbol ----------
@@ -36,14 +32,7 @@ type graphSymbolArgs struct {
 
 func graphSymbolToolDef() mcp.Tool {
 	return mcp.NewTool("graph_symbol",
-		mcp.WithDescription(`Query the code graph of a Go repo anchored on one symbol — use this INSTEAD of grep/file-reading to understand code. Returns the symbol's full source plus its callers/callees as one-line signature stubs (interface dispatch resolved) and 'transitive_callers': the blast size (how many symbols transitively call it) so you know if a change is risky before walking it (set on funcs/methods only — a type/const/var omits it and the hint says how to gauge its dependents instead). depth>1 with direction=up lists that blast radius; 'to' gives the call path between two symbols. If the symbol is an INTERFACE, 'implementers' lists the concrete types that satisfy it (the exact set a method-signature change must update) with 'implementers_total'; if it is a concrete TYPE, 'satisfies' lists the interfaces it implements — use these instead of grepping for method sets. To read a stub's body, call again with its exact qname. SEARCH FALLBACK: if 'symbol' does not resolve to a name, it is treated as a task phrase and you get a relevance-ranked 'matches' menu of signatures — re-query with one of their qnames for full context. The graph auto-rebuilds when the repo changed. A package that does not type-check no longer blanks the graph: every other package is indexed fresh, and the broken one's outgoing edges are carried forward from the previous build — 'carried': true on the symbol and 'stale_units' on freshness name what rode along. A 'stale' freshness flag now means only a genuine build failure (I/O, corrupt cache), where the whole last good graph is served. A call *into* a closure is not an edge, so a callback is never reported as a caller of the function it was passed to; a call made *from* inside a closure IS an edge, attributed to the enclosing declaration.
-
-USAGE PATTERNS:
-- Before EDITING a function: call with direction=up depth=3 first. The transitive_callers count tells you how many symbols break if you change the interface. A high number (>10) means proceed carefully — add a layer or preserve backward compat.
-- Before READING unfamiliar code: use direction=down depth=1 to see what a function depends on, then drill callees that look relevant.
-- Call path (--to): to understand how data flows between two points, e.g. graph_symbol "Store.Save" --to "Store.Search" shows the shortest call chain.
-
-DEGRADED ANSWERS: freshness.stale is true only on a genuine build failure (I/O, corrupt cache, or more than half the packages broken), where the whole last good index is served — verify critical findings against source. A single package that does not type-check degrades alone instead: 'carried': true means the queried symbol's package rode on the previous build's edges, and freshness.stale_units names those packages (capped, see stale_units_total). freshness.index_error says why a rebuild failed.`),
+		mcp.WithDescription("Query the code graph of a Go repo anchored on one symbol — use this INSTEAD of grep/file-reading to understand code. Returns the symbol's full source plus its callers/callees as one-line signature stubs (interface dispatch resolved) and 'transitive_callers': the blast size (how many symbols transitively call it) so you know if a change is risky before walking it. depth>1 with direction=up lists that blast radius; 'to' gives the call path between two symbols. To read a stub's body, call again with its exact qname. SEARCH FALLBACK: if 'symbol' does not resolve to a name, it is treated as a task phrase and you get a relevance-ranked 'matches' menu of signatures — re-query with one of their qnames for full context. The graph auto-rebuilds when the repo changed; a 'stale' freshness flag means the repo currently does not compile and the last good graph is being served."),
 		mcp.WithString("repo", mcp.Required(),
 			mcp.Description("Absolute path to the repo root (your project working directory).")),
 		mcp.WithString("symbol", mcp.Required(),
@@ -63,7 +52,6 @@ DEGRADED ANSWERS: freshness.stale is true only on a genuine build failure (I/O, 
 
 func graphSymbolHandler(gm *graph.Manager) func(context.Context, mcp.CallToolRequest, graphSymbolArgs) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, _ mcp.CallToolRequest, a graphSymbolArgs) (*mcp.CallToolResult, error) {
-		state.RecordGraphUse("graph_symbol")
 		resp, err := gm.Symbol(ctx, graph.SymbolRequest{
 			Repo:      a.Repo,
 			Symbol:    a.Symbol,
@@ -87,11 +75,7 @@ type graphPackageArgs struct {
 
 func graphPackageToolDef() mcp.Tool {
 	return mcp.NewTool("graph_package",
-		mcp.WithDescription(`Get the public surface of one Go package — exported symbols as one-line signatures with first doc lines, never bodies. Use this to orient in an area of a repo before drilling into symbols with graph_symbol.
-
-USAGE PATTERN: start with graph_package to see the lay of the land, then call graph_symbol on the symbol you need to understand. unexported_count tells you how many internal symbols exist (they are queryable by name via graph_symbol).
-
-DEGRADED ANSWERS: same semantics as graph_symbol — freshness.stale means a whole-graph fallback, while stale_units names individual packages riding on carried-forward edges. Cross-check against source when either fires.`),
+		mcp.WithDescription("Get the public surface of one Go package — exported symbols as one-line signatures with first doc lines, never bodies. Use this to orient in an area of a repo before drilling into symbols with graph_symbol. Same auto-rebuild and staleness semantics as graph_symbol."),
 		mcp.WithString("repo", mcp.Required(),
 			mcp.Description("Absolute path to the repo root (your project working directory).")),
 		mcp.WithString("package", mcp.Required(),
@@ -101,61 +85,11 @@ DEGRADED ANSWERS: same semantics as graph_symbol — freshness.stale means a who
 
 func graphPackageHandler(gm *graph.Manager) func(context.Context, mcp.CallToolRequest, graphPackageArgs) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, _ mcp.CallToolRequest, a graphPackageArgs) (*mcp.CallToolResult, error) {
-		state.RecordGraphUse("graph_package")
 		resp, err := gm.Package(ctx, graph.PackageRequest{Repo: a.Repo, Package: a.Package})
 		if err != nil {
 			return graphToolErr(err), nil
 		}
 		return mcp.NewToolResultText(graph.RenderPackage(resp)), nil
-	}
-}
-
-// ---------- graph_build_wait ----------
-
-// Bounds for graph_build_wait, mirrored in the tool schema below.
-const (
-	defaultBuildWait = 10 * time.Second
-	maxBuildWait     = 60 * time.Second
-)
-
-type graphBuildWaitArgs struct {
-	Repo    string `json:"repo"`
-	Timeout int    `json:"timeout,omitempty"` // seconds, default 10
-}
-
-func graphBuildWaitToolDef() mcp.Tool {
-	return mcp.NewTool("graph_build_wait",
-		mcp.WithDescription("Bring the repo's graph up to date and block until that finishes, or until timeout. Attaches to a rebuild already in flight, and triggers one if the graph is stale but no build has started. Returns the final freshness state; completed: false means the timeout expired first, not that anything failed. Use after graph_symbol returns rebuilding: true."),
-		mcp.WithString("repo", mcp.Required(),
-			mcp.Description("Absolute path to the repo root (your project working directory).")),
-		mcp.WithNumber("timeout",
-			mcp.Description("Max seconds to wait (default 10, max 60)."),
-			mcp.DefaultNumber(10), mcp.Min(1), mcp.Max(60),
-		),
-	)
-}
-
-func graphBuildWaitHandler(gm *graph.Manager) func(context.Context, mcp.CallToolRequest, graphBuildWaitArgs) (*mcp.CallToolResult, error) {
-	return func(ctx context.Context, _ mcp.CallToolRequest, a graphBuildWaitArgs) (*mcp.CallToolResult, error) {
-		state.RecordGraphUse("graph_build_wait")
-		// Clamp server-side: mcp.Min/Max above is schema advice to the client,
-		// not a guarantee, so a client that ignores it must not pin a build slot
-		// for an unbounded wait. Depth on graph_symbol is clamped the same way.
-		timeout := time.Duration(a.Timeout) * time.Second
-		if a.Timeout <= 0 {
-			timeout = defaultBuildWait
-		}
-		timeout = min(timeout, maxBuildWait)
-		resp, err := gm.WaitBuild(ctx, a.Repo, timeout)
-		if err != nil {
-			return graphToolErr(err), nil
-		}
-		// JSON for structured consumption — small payload, not a TOON table
-		b, err := json.Marshal(resp)
-		if err != nil {
-			return mcp.NewToolResultError("marshal: " + err.Error()), nil //nolint:nilerr // MCP convention: error in result text, not Go return
-		}
-		return mcp.NewToolResultText(string(b)), nil
 	}
 }
 
