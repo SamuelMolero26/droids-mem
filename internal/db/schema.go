@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS memories (
     fingerprint           TEXT    NOT NULL,
     created_at            INTEGER NOT NULL,
     updated_at            INTEGER NOT NULL,
-    scope                 TEXT    NOT NULL DEFAULT 'shared' CHECK(scope IN ('personal','shared')),
+    scope                 TEXT    NOT NULL DEFAULT 'personal' CHECK(scope IN ('personal','shared')),
     scrub_pattern_version INTEGER NOT NULL DEFAULT 1,
     scrub_counts          TEXT,
     expand_count          INTEGER NOT NULL DEFAULT 0,

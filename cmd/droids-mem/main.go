@@ -130,6 +130,10 @@ start of each run — all via a local binary with zero external dependencies.`,
 		newServeCmd(a),
 		newEnsureServerCmd(),
 		newMigrateCmd(a),
+		newShareCmd(a),
+		newUnshareCmd(a),
+		newExportCmd(a),
+		newImportCmd(a),
 	)
 
 	if err := root.Execute(); err != nil {

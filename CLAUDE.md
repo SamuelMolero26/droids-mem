@@ -151,3 +151,18 @@ Only Root agent writes to `droids-mem`. Sub-agents get no MCP tools — they con
 - We try to only add new functionality that is small (that is, simple and few lines of code) or absolutely necessary. If a change is not small or absolutely necessary, don't make it.
 
 - Use cc-skills-golang for best go practices
+
+- **Before calling a change done, run `golangci-lint run --timeout 5m`** — not
+  just `go test ./...` + `go vet ./...`. Linters catch what the compiler and
+  tests don't: `nilerr` (returning `nil` in a block guarded by a non-nil error
+  — note it fires even when the error isn't bound to a named var, and even on
+  the direct `if json.Unmarshal(x) != nil { return nil }` shape), `gosec`
+  (G304 file-inclusion, G301/G306 perms), etc. An intentional `return nil` on
+  an error path (e.g. skip-and-count a bad row) needs `//nolint:nilerr` with a
+  reason, never a silent suppression.
+- **Streaming a line-delimited input with a "skip bad rows, never abort"
+  contract → use `bufio.Reader.ReadBytes('\n')`, not `bufio.Scanner`.**
+  Scanner aborts the whole stream via `sc.Err()` on any line over its 64KB
+  token cap, which a crafted/oversized line can trigger to defeat exactly that
+  per-line resilience guarantee; Reader grows to any line length so a bad line
+  stays a per-line failure. (Learned building `import`, ADR-0028.)
