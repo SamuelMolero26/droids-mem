@@ -90,7 +90,7 @@ automatically when the repo changes. See docs/adr/0020-native-code-graph.md.`,
 				writeGraphErr(err)
 				return nil
 			}
-			writeJSON(resp)
+			writeString(graph.RenderSymbol(resp))
 			return nil
 		},
 	}
@@ -117,7 +117,7 @@ automatically when the repo changes. See docs/adr/0020-native-code-graph.md.`,
 				writeGraphErr(err)
 				return nil
 			}
-			writeJSON(resp)
+			writeString(graph.RenderPackage(resp))
 			return nil
 		},
 	}

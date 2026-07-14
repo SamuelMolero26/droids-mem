@@ -62,7 +62,7 @@ func graphSymbolHandler(gm *graph.Manager) func(context.Context, mcp.CallToolReq
 		if err != nil {
 			return graphToolErr(err), nil
 		}
-		return toolJSON(resp)
+		return mcp.NewToolResultText(graph.RenderSymbol(resp)), nil
 	}
 }
 
@@ -89,7 +89,7 @@ func graphPackageHandler(gm *graph.Manager) func(context.Context, mcp.CallToolRe
 		if err != nil {
 			return graphToolErr(err), nil
 		}
-		return toolJSON(resp)
+		return mcp.NewToolResultText(graph.RenderPackage(resp)), nil
 	}
 }
 

@@ -10,18 +10,22 @@ import (
 )
 
 const (
-	maxDepth        = 5
-	maxPathDepth    = 10
-	maxNeighbors    = 50 // per direction, across all depths
-	maxMatches      = 20
-	maxPkgSymbols   = 200
-	expandHint      = "neighbors are signatures only; call graph_symbol with a neighbor's exact qname to see its body"
+	maxDepth      = 5
+	maxPathDepth  = 10
+	maxNeighbors  = 50 // per direction, across all depths
+	maxMatches    = 20
+	maxPkgSymbols = 200
+	// Hints are surface-neutral (ADR-0027): they name the action + the qname to
+	// re-query with, never a specific invocation ("graph_symbol" vs
+	// "droids-mem graph symbol"). The agent already holds the surface it just
+	// called; the qname is the only missing payload and it is in the rows.
+	expandHint      = "neighbors are signatures only; re-query a neighbor's exact qname to see its body"
 	ambiguousHint   = "multiple symbols share that name; re-query with one of the qnames in matches"
-	searchHint      = "no exact symbol match; these are the closest by relevance — re-query graph_symbol with one qname from matches for its full body, callers, and callees"
+	searchHint      = "no exact symbol match; these are the closest by relevance — re-query with one qname from matches for its full body, callers, and callees"
 	maxSeeds        = 10  // search-fallback menu size
 	blastCap        = 500 // transitive-caller count sentinel (compute + number guard)
 	staleGraphHint  = "graph is stale: the repo changed but no longer type-checks, serving the last good index"
-	pkgSymbolsLimit = "exported symbols only; query an unexported symbol by name via graph_symbol"
+	pkgSymbolsLimit = "exported symbols only; re-query an unexported symbol by its name"
 )
 
 // SymbolRequest is a symbol-anchored query (ADR-0020 tool 1): point lookup,
