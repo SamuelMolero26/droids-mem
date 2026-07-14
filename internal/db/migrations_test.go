@@ -326,8 +326,11 @@ func TestMigrate_PreservesRows(t *testing.T) {
 	).Scan(&scope, &version, &scrubCounts); err != nil {
 		t.Fatalf("read migrated row: %v", err)
 	}
-	if scope != "shared" {
-		t.Errorf("scope default = %q, want 'shared'", scope)
+	// The v4→v5 backfill (ADR-0028) reinterprets every pre-v5 row as personal,
+	// so a fully-migrated legacy row lands on 'personal' regardless of the
+	// v0→v1 column default it first received.
+	if scope != "personal" {
+		t.Errorf("migrated scope = %q, want 'personal' (ADR-0028 backfill)", scope)
 	}
 	if version != 1 {
 		t.Errorf("scrub_pattern_version default = %d, want 1", version)

@@ -14,15 +14,15 @@ import (
 
 // ---------- scope ----------
 
-func TestSave_DefaultsScopeToShared(t *testing.T) {
+func TestSave_DefaultsScopeToPersonal(t *testing.T) {
 	s := newTestStore(t)
 	resp, err := s.Save(context.Background(), validReq())
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	scope := readScope(t, s, resp.ID)
-	if scope != "shared" {
-		t.Errorf("default scope = %q, want 'shared'", scope)
+	if scope != "personal" {
+		t.Errorf("default scope = %q, want 'personal' (ADR-0028)", scope)
 	}
 }
 
