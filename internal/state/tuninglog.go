@@ -40,10 +40,6 @@ func AppendTuningLog(rec any) {
 	if err != nil {
 		return
 	}
-	// Explicit Close, not deferred: a deferred Close on a writable handle
-	// discards a flush failure (CodeQL go/unhandled-writable-file-close).
-	// Both errors are dropped on purpose — a diagnostic log must never break
-	// a save or a prompt.
+	defer f.Close()
 	_, _ = f.Write(append(b, '\n'))
-	_ = f.Close()
 }

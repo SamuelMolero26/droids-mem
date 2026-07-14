@@ -15,7 +15,6 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
-	"github.com/samuelmolero26/droids-mem/internal/scrub"
 	"github.com/samuelmolero26/droids-mem/internal/state"
 )
 
@@ -38,10 +37,8 @@ var validOrigins = map[string]bool{
 
 // DefaultScope is what the save path stamps when the caller omits the scope
 // field. Matches the column default in schema.go so behavior is consistent
-// whether the row arrives through the API or a direct INSERT. 'personal' by
-// default (ADR-0028): a memory never leaves the local store unless explicitly
-// shared via `share` or --scope shared.
-const DefaultScope = "personal"
+// whether the row arrives through the API or a direct INSERT.
+const DefaultScope = "shared"
 
 // DefaultOrigin is stamped when the caller omits origin. 'auto' is reserved for
 // the session-end enforcement path (ADR-0016); every explicit save is 'manual'.
@@ -77,11 +74,6 @@ var (
 	// inserts. Used by isEmptyAfterScrub to decide whether the post-scrub
 	// `learned` field is structurally empty.
 	reRedactionToken = regexp.MustCompile(`\[[A-Z_]+\]`)
-	// reTaskType gates task_type to a filesystem-safe slug (ADR-0029 SEC-1).
-	// task_type becomes a path segment in the shared-pool transport, so `/` and
-	// `..` are a path-traversal vector; this runs in validate() at the trust
-	// boundary so it protects both save and import. Lowercased first, so no A-Z.
-	reTaskType = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
 )
 
 // jaccardDupeThreshold: token-set Jaccard similarity above this value
@@ -102,7 +94,7 @@ type SaveRequest struct {
 	What      string `json:"what"`
 	Learned   string `json:"learned"`
 	Tags      string `json:"tags"`             // space-delimited tokens
-	Scope     string `json:"scope,omitempty"`  // "personal" | "shared", defaults to "personal" (ADR-0028)
+	Scope     string `json:"scope,omitempty"`  // "personal" | "shared", defaults to "shared"
 	Origin    string `json:"origin,omitempty"` // "manual" | "auto", defaults to "manual" (ADR-0016)
 	Force     bool   `json:"force"`            // HITL correction: overwrite matched fingerprint
 	DryRun    bool   `json:"dry_run"`          // run full pipeline (validate → scrub → dedupe) then ROLLBACK
@@ -110,44 +102,19 @@ type SaveRequest struct {
 	// in the same txn on successful insert, scope-bound so a mismatched/missing
 	// target is a benign no-op. Empty = no supersession.
 	Supersedes string `json:"supersedes,omitempty"`
-	// AuthoredAt is when the lesson was originally WRITTEN, in unix seconds.
-	// Zero (the normal case) means "authored here, now". Only ImportShared sets
-	// it, carrying the peer's stamp across the pool so the origin date survives
-	// independent of created_at (which always means "entered this store").
-	// Pure provenance: it is never an ordering key and never derives
-	// review_after — there is no decay clock in this change.
-	AuthoredAt int64 `json:"authored_at,omitempty"`
-}
-
-// resolveAuthoredAt clamps an out-of-range stamp to now: authored_at crosses
-// the pool trust boundary on import, and a skewed or hostile peer clock could
-// otherwise claim any past or future date. Clamp-only, never reject — a
-// non-positive or future stamp becomes "authored now" rather than failing the
-// save. Losing an entire lesson to clock skew is worse than importing it with
-// a conservative stamp (spec: "authored_at is clamp-only, never rejected").
-func resolveAuthoredAt(reqAuthoredAt, now int64) int64 {
-	if reqAuthoredAt <= 0 || reqAuthoredAt > now {
-		return now
-	}
-	return reqAuthoredAt
 }
 
 type SaveResponse struct {
-	Status         string             `json:"status"` // saved | skipped | updated
-	ID             string             `json:"id,omitempty"`
-	SessionID      string             `json:"session_id,omitempty"`
-	MatchedID      string             `json:"matched_id,omitempty"`      // present when skipped
-	MatchedTitle   string             `json:"matched_title,omitempty"`   // echo norm-setting wording on skip
-	MatchedLearned string             `json:"matched_learned,omitempty"` // echo norm-setting wording on skip
-	Reason         string             `json:"reason,omitempty"`          // duplicate | near_duplicate
-	Score          float64            `json:"score,omitempty"`           // Jaccard similarity for near_duplicate
-	Scrub          *scrub.ScrubReport `json:"scrub,omitempty"`           // present only when redactions occurred
-	Superseded     string             `json:"superseded,omitempty"`      // id deleted via supersedes (ADR-0018); absent when target didn't match
-	// TaskTypeHint names an existing task_type that differs from this save's only
-	// by separator/case (e.g. saved "droids_mem" while "droids-mem" exists). It
-	// flags silent slug fragmentation so the agent can re-anchor. Empty when the
-	// slug is already canonical or the project is genuinely new.
-	TaskTypeHint string `json:"task_type_hint,omitempty"`
+	Status         string       `json:"status"` // saved | skipped | updated
+	ID             string       `json:"id,omitempty"`
+	SessionID      string       `json:"session_id,omitempty"`
+	MatchedID      string       `json:"matched_id,omitempty"`      // present when skipped
+	MatchedTitle   string       `json:"matched_title,omitempty"`   // echo norm-setting wording on skip
+	MatchedLearned string       `json:"matched_learned,omitempty"` // echo norm-setting wording on skip
+	Reason         string       `json:"reason,omitempty"`          // duplicate | near_duplicate
+	Score          float64      `json:"score,omitempty"`           // Jaccard similarity for near_duplicate
+	Scrub          *ScrubReport `json:"scrub,omitempty"`           // present only when redactions occurred
+	Superseded     string       `json:"superseded,omitempty"`      // id deleted via supersedes (ADR-0018); absent when target didn't match
 }
 
 // ValidationError is the structured error envelope returned for any save-path
@@ -161,11 +128,11 @@ type ValidationError struct {
 	Retryable  bool   `json:"retryable"`
 	Suggestion string `json:"suggestion,omitempty"`
 	// Limit/Actual are set only on field_too_large, both in bytes.
-	Limit           int                `json:"limit,omitempty"`
-	Actual          int                `json:"actual,omitempty"`
-	OffendingTags   []string           `json:"offending_tags,omitempty"`
-	MatchedPatterns []string           `json:"matched_patterns,omitempty"`
-	Scrub           *scrub.ScrubReport `json:"scrub,omitempty"`
+	Limit           int          `json:"limit,omitempty"`
+	Actual          int          `json:"actual,omitempty"`
+	OffendingTags   []string     `json:"offending_tags,omitempty"`
+	MatchedPatterns []string     `json:"matched_patterns,omitempty"`
+	Scrub           *ScrubReport `json:"scrub,omitempty"`
 }
 
 func (e *ValidationError) Error() string {
@@ -218,15 +185,17 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 		}
 	}()
 
-	// Both dedupe layers end the same way: force overwrites the matched row,
-	// otherwise the save is skipped and reports what it matched.
-	hitDupe := func(m *matchedRow, reason, outcome string, sim float64) (*SaveResponse, error) {
+	// layer 1: exact fingerprint match
+	existing, err := findByFingerprintConn(ctx, conn, fp)
+	if err != nil {
+		return nil, fmt.Errorf("fingerprint check: %w", err)
+	}
+	if existing != nil {
 		if req.Force {
-			resp, err := forceUpdateConn(ctx, conn, m.ID, sessionID, req, fp, now, scrubCountsJSON)
+			resp, err := forceUpdateConn(ctx, conn, existing.ID, sessionID, req, fp, now, scrubCountsJSON)
 			if err != nil {
 				return nil, err
 			}
-			resp.Score = sim
 			resp.Scrub = responseScrub
 			if err := endTxn(ctx, conn, req.DryRun); err != nil {
 				return nil, fmt.Errorf("commit force update: %w", err)
@@ -238,26 +207,16 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 			return nil, fmt.Errorf("commit skip: %w", err)
 		}
 		committed = true
-		logSaveOutcome(req, outcome, sim, m.ID)
+		logSaveOutcome(req, "skipped_fingerprint", 0, existing.ID)
 		return &SaveResponse{
 			Status:         "skipped",
-			Reason:         reason,
-			MatchedID:      m.ID,
-			MatchedTitle:   m.Title,
-			MatchedLearned: m.Learned,
-			Score:          sim,
+			Reason:         "duplicate",
+			MatchedID:      existing.ID,
+			MatchedTitle:   existing.Title,
+			MatchedLearned: existing.Learned,
 			SessionID:      sessionID,
 			Scrub:          responseScrub,
 		}, nil
-	}
-
-	// layer 1: exact fingerprint match
-	existing, err := findByFingerprintConn(ctx, conn, fp)
-	if err != nil {
-		return nil, fmt.Errorf("fingerprint check: %w", err)
-	}
-	if existing != nil {
-		return hitDupe(existing, "duplicate", "skipped_fingerprint", 0)
 	}
 
 	// layer 2: near-duplicate via BM25 top-K + Jaccard
@@ -266,7 +225,34 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 		return nil, fmt.Errorf("near-duplicate check: %w", err)
 	}
 	if matched != nil && similarity >= jaccardDupeThreshold {
-		return hitDupe(matched, "near_duplicate", "skipped_jaccard", similarity)
+		if req.Force {
+			resp, err := forceUpdateConn(ctx, conn, matched.ID, sessionID, req, fp, now, scrubCountsJSON)
+			if err != nil {
+				return nil, err
+			}
+			resp.Score = similarity
+			resp.Scrub = responseScrub
+			if err := endTxn(ctx, conn, req.DryRun); err != nil {
+				return nil, fmt.Errorf("commit force update: %w", err)
+			}
+			committed = true
+			return resp, nil
+		}
+		if err := endTxn(ctx, conn, req.DryRun); err != nil {
+			return nil, fmt.Errorf("commit skip: %w", err)
+		}
+		committed = true
+		logSaveOutcome(req, "skipped_jaccard", similarity, matched.ID)
+		return &SaveResponse{
+			Status:         "skipped",
+			Reason:         "near_duplicate",
+			MatchedID:      matched.ID,
+			MatchedTitle:   matched.Title,
+			MatchedLearned: matched.Learned,
+			Score:          similarity,
+			SessionID:      sessionID,
+			Scrub:          responseScrub,
+		}, nil
 	}
 
 	id := "mem_" + ulid.Make().String()
@@ -278,17 +264,12 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 	// scrub provenance always matches the most recent body.
 	// origin is intentionally NOT in the ON CONFLICT SET: a fingerprint
 	// collision overwrites the body/provenance-of-scrub but preserves how the
-	// existing row was originally authored. authored_at IS in the SET clause —
-	// this path is defensive-only (layer-1 fingerprint dedupe already returns
-	// "skipped" inside this same BEGIN IMMEDIATE), and the conflict clause
-	// overwrites the body, so overwriting the body's authorship stamp along
-	// with it is consistent, not contradictory.
-	authoredAt := resolveAuthoredAt(req.AuthoredAt, now)
+	// existing row was originally authored.
 	_, err = conn.ExecContext(ctx, `
 		INSERT INTO memories
 			(id, session_id, task_type, kind, title, what, learned, tags, fingerprint,
-			 created_at, updated_at, scope, scrub_pattern_version, scrub_counts, origin, authored_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 created_at, updated_at, scope, scrub_pattern_version, scrub_counts, origin)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(fingerprint) DO UPDATE SET
 			title                 = excluded.title,
 			what                  = excluded.what,
@@ -298,10 +279,9 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 			updated_at            = excluded.updated_at,
 			scope                 = excluded.scope,
 			scrub_pattern_version = excluded.scrub_pattern_version,
-			scrub_counts          = excluded.scrub_counts,
-			authored_at           = excluded.authored_at
+			scrub_counts          = excluded.scrub_counts
 	`, id, sessionID, req.TaskType, req.Kind, req.Title, req.What, req.Learned, req.Tags, fp,
-		now, now, req.Scope, scrub.Version, scrubCountsJSON, req.Origin, authoredAt)
+		now, now, req.Scope, ScrubPatternVersion, scrubCountsJSON, req.Origin)
 	if err != nil {
 		return nil, fmt.Errorf("insert memory: %w", err)
 	}
@@ -350,55 +330,13 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 	}
 	logSaveOutcome(req, "inserted", similarity, nearMissID)
 
-	// Flag slug fragmentation: a task_type that collides with an existing one
-	// under separator/case normalization. Insert path only — a dedupe skip
-	// returns earlier, and this is orientation, not a gate. Best-effort: the
-	// save is already committed above, so a hint-query failure (e.g. ctx
-	// canceled post-commit) must not turn a durable save into a returned error.
-	hint, _ := nearMissTaskType(ctx, conn, req.TaskType)
-
 	return &SaveResponse{
-		Status:       "saved",
-		ID:           id,
-		SessionID:    sessionID,
-		Scrub:        responseScrub,
-		Superseded:   supersededID,
-		TaskTypeHint: hint,
+		Status:     "saved",
+		ID:         id,
+		SessionID:  sessionID,
+		Scrub:      responseScrub,
+		Superseded: supersededID,
 	}, nil
-}
-
-// nearMissTaskType returns an existing task_type that differs from want only by
-// separator or case (droids_mem vs droids-mem) — the silent fragmentation that
-// splits one project's memories across slugs. Empty when want is already
-// canonical or genuinely new. When several existing slugs collide, it points at
-// the one with the most memories (the established spelling).
-// ponytail: full GROUP BY scan per insert; memories is small, so cheap. Add an
-// index or cache only if a large corpus makes it measurably slow.
-func nearMissTaskType(ctx context.Context, conn *sql.Conn, want string) (string, error) {
-	rows, err := conn.QueryContext(ctx,
-		`SELECT task_type, COUNT(*) c FROM memories GROUP BY task_type ORDER BY c DESC`)
-	if err != nil {
-		return "", err
-	}
-	defer rows.Close()
-	wantNorm := normalizeSlug(want)
-	match := ""
-	for rows.Next() {
-		var tt string
-		var c int
-		if err := rows.Scan(&tt, &c); err != nil {
-			return "", err
-		}
-		if tt != want && normalizeSlug(tt) == wantNorm {
-			match = tt
-			break
-		}
-	}
-	return match, rows.Err()
-}
-
-func normalizeSlug(s string) string {
-	return strings.ReplaceAll(strings.ToLower(s), "_", "-")
 }
 
 // saveTuningRecord is one line of the threshold-tuning dataset (ADR-0026). ids
@@ -457,25 +395,15 @@ const (
 
 // pruneSessionSummariesConn enforces the per-task_type newest-5 cap for MANUAL
 // session summaries. Scoped to origin='manual' so it never evicts an auto
-// summary that happens to share a task_type bucket, and to scope='personal' so
-// bulk-imported pool content is never counted against, or evicted by, the
-// user's own retention window: importLine stamps rows scope='shared' but
-// leaves origin='manual' and re-stamps created_at to now, so an unfenced
-// import lands a whole tie group of foreign rows newer than every local
-// summary and would beat the user's own history out of its own cap.
-//
-// `id DESC` is the same-second tiebreak. created_at is 1-second resolution and
-// session-end rollups save several summaries inside one second, so without it
-// SQLite walks the tie group in index order — oldest-first — and LIMIT keeps
-// the OLDEST five, deleting newer rows (issue #58).
+// summary that happens to share a task_type bucket.
 func pruneSessionSummariesConn(ctx context.Context, conn *sql.Conn, taskType string) error {
 	_, err := conn.ExecContext(ctx, `
 		DELETE FROM memories
-		WHERE task_type = ? AND kind = 'session_summary' AND origin = 'manual' AND scope = 'personal'
+		WHERE task_type = ? AND kind = 'session_summary' AND origin = 'manual'
 		AND id NOT IN (
 			SELECT id FROM memories
-			WHERE task_type = ? AND kind = 'session_summary' AND origin = 'manual' AND scope = 'personal'
-			ORDER BY created_at DESC, id DESC
+			WHERE task_type = ? AND kind = 'session_summary' AND origin = 'manual'
+			ORDER BY created_at DESC
 			LIMIT ?
 		)
 	`, taskType, taskType, maxSessionSummaries)
@@ -505,13 +433,12 @@ func pruneAutoSummariesConn(ctx context.Context, conn *sql.Conn) error {
 				(CASE WHEN id IN (
 					SELECT id FROM memories
 					WHERE kind = 'session_summary' AND origin = 'auto'
-					ORDER BY created_at DESC, id DESC
+					ORDER BY created_at DESC
 					LIMIT ?
 				) THEN 1 ELSE 0 END) DESC,
 				(CASE WHEN expand_count > 0 THEN 1 ELSE 0 END) DESC,
 				last_expanded_at DESC,
-				created_at DESC,
-				id DESC
+				created_at DESC
 			LIMIT ?
 		)
 	`, autoSummaryGrace, maxAutoSummaries)
@@ -519,25 +446,13 @@ func pruneAutoSummariesConn(ctx context.Context, conn *sql.Conn) error {
 }
 
 func forceUpdateConn(ctx context.Context, conn *sql.Conn, existingID, sessionID string, req SaveRequest, fp string, now int64, scrubCountsJSON sql.NullString) (*SaveResponse, error) {
-	// A force-update is a body correction (HITL), not a re-authoring: the row
-	// keeps its authored_at unless the caller supplies one. Every real force
-	// caller leaves it zero, so resolving it like a fresh insert would erase an
-	// imported row's peer origin date, and on a local row would push authored_at
-	// past created_at — the exact divergence the TUI reads as "came from the
-	// pool". NULLIF(?, 0) is the "keep" sentinel; a supplied stamp is clamped
-	// like any other.
-	var authoredAt int64
-	if req.AuthoredAt > 0 {
-		authoredAt = resolveAuthoredAt(req.AuthoredAt, now)
-	}
 	_, err := conn.ExecContext(ctx, `
 		UPDATE memories
 		SET title=?, what=?, learned=?, tags=?, fingerprint=?, updated_at=?,
-		    scope=?, scrub_pattern_version=?, scrub_counts=?,
-		    authored_at=COALESCE(NULLIF(?, 0), authored_at)
+		    scope=?, scrub_pattern_version=?, scrub_counts=?
 		WHERE id=?
 	`, req.Title, req.What, req.Learned, req.Tags, fp, now,
-		req.Scope, scrub.Version, scrubCountsJSON, authoredAt, existingID)
+		req.Scope, ScrubPatternVersion, scrubCountsJSON, existingID)
 	if err != nil {
 		return nil, fmt.Errorf("force update: %w", err)
 	}
@@ -661,21 +576,13 @@ func findByFingerprintConn(ctx context.Context, conn *sql.Conn, fp string) (*mat
 //  6. Scrub title/what/learned.
 //  7. Empty-after-scrub check on `learned`.
 //
-// Returns the aggregated scrub.ScrubReport across all three text fields. nil when
+// Returns the aggregated ScrubReport across all three text fields. nil when
 // nothing was redacted; callers may still receive a non-nil report with
 // RedactionCount == 0 (no fields fired) for code-path uniformity.
-func validate(req *SaveRequest) (*scrub.ScrubReport, error) {
+func validate(req *SaveRequest) (*ScrubReport, error) {
 	req.TaskType = strings.ToLower(strings.TrimSpace(req.TaskType))
 	if req.TaskType == "" {
 		return nil, &ValidationError{Field: "task_type", Message: "required", Retryable: true}
-	}
-	if !reTaskType.MatchString(req.TaskType) {
-		return nil, &ValidationError{
-			Field:      "task_type",
-			Message:    "must be a lowercase slug ^[a-z0-9][a-z0-9._-]*$ — no spaces, slashes, or '..'",
-			Retryable:  true,
-			Suggestion: "use the git repo or top-level dir name, e.g. 'droids-mem'",
-		}
 	}
 	if !validKinds[req.Kind] {
 		return nil, &ValidationError{
@@ -755,9 +662,9 @@ func validate(req *SaveRequest) (*scrub.ScrubReport, error) {
 	req.Learned = strings.TrimSpace(req.Learned)
 	req.Tags = strings.TrimSpace(req.Tags)
 
-	titleOut, titleRep := scrub.Scrub(req.Title)
-	whatOut, whatRep := scrub.Scrub(req.What)
-	learnedOut, learnedRep := scrub.Scrub(req.Learned)
+	titleOut, titleRep := Scrub(req.Title)
+	whatOut, whatRep := Scrub(req.What)
+	learnedOut, learnedRep := Scrub(req.Learned)
 	req.Title = titleOut
 	req.What = whatOut
 	req.Learned = learnedOut
@@ -810,7 +717,7 @@ func checkTagsForSecrets(tags string) error {
 	// joined string can only detect a superset of the per-token hits — more
 	// surrounding context never suppresses a match — so a zero here guarantees
 	// every individual tag is clean.
-	if _, whole := scrub.Scrub(tags); whole.RedactionCount == 0 {
+	if _, whole := Scrub(tags); whole.RedactionCount == 0 {
 		return nil
 	}
 	// A redaction fired. Re-scrub per token to name the offenders for the
@@ -819,7 +726,7 @@ func checkTagsForSecrets(tags string) error {
 	var offending []string
 	matched := map[string]struct{}{}
 	for _, tok := range tokens {
-		_, rep := scrub.Scrub(tok)
+		_, rep := Scrub(tok)
 		if rep.RedactionCount == 0 {
 			continue
 		}
@@ -832,7 +739,7 @@ func checkTagsForSecrets(tags string) error {
 	// localized. Report the whole-string patterns so the save is still rejected
 	// rather than silently passing.
 	if len(matched) == 0 {
-		_, whole := scrub.Scrub(tags)
+		_, whole := Scrub(tags)
 		for name := range whole.PerPatternCounts {
 			matched[name] = struct{}{}
 		}
@@ -861,7 +768,7 @@ func checkIdentifierForSecrets(field, value string) error {
 	if value == "" {
 		return nil
 	}
-	_, rep := scrub.Scrub(value)
+	_, rep := Scrub(value)
 	if rep.RedactionCount == 0 {
 		return nil
 	}
@@ -883,12 +790,12 @@ func checkIdentifierForSecrets(field, value string) error {
 // aggregateScrubReports folds the per-field reports into one row-level
 // summary. FieldsRedacted lists fields with at least one redaction in stable
 // (title, what, learned) order so callers see deterministic output.
-func aggregateScrubReports(title, what, learned scrub.ScrubReport) scrub.ScrubReport {
-	agg := scrub.ScrubReport{
+func aggregateScrubReports(title, what, learned ScrubReport) ScrubReport {
+	agg := ScrubReport{
 		PerPatternCounts: map[string]int{},
-		PatternVersion:   scrub.Version,
+		PatternVersion:   ScrubPatternVersion,
 	}
-	fold := func(field string, r scrub.ScrubReport) {
+	fold := func(field string, r ScrubReport) {
 		if r.RedactionCount == 0 {
 			return
 		}
@@ -914,7 +821,7 @@ func isEmptyAfterScrub(s string) bool {
 
 // scrubReportForResponse returns a pointer suitable for the response envelope
 // per decision #7: only emitted when at least one redaction fired.
-func scrubReportForResponse(agg *scrub.ScrubReport) *scrub.ScrubReport {
+func scrubReportForResponse(agg *ScrubReport) *ScrubReport {
 	if agg == nil || agg.RedactionCount == 0 {
 		return nil
 	}
@@ -925,7 +832,7 @@ func scrubReportForResponse(agg *scrub.ScrubReport) *scrub.ScrubReport {
 // scrubCountsForStorage marshals the per-row scrub_counts JSON column. NULL
 // when no redactions fired so the column stays sparse and `doctor
 // --scrub-stats` can filter via json_extract IS NOT NULL.
-func scrubCountsForStorage(agg *scrub.ScrubReport) (sql.NullString, error) {
+func scrubCountsForStorage(agg *ScrubReport) (sql.NullString, error) {
 	if agg == nil || agg.RedactionCount == 0 {
 		return sql.NullString{}, nil
 	}
@@ -997,23 +904,35 @@ func dedupeTokens(body string) ([]string, map[string]struct{}) {
 }
 
 // searchTerms extracts unique lowercase words (len > 2) for BM25 queries.
-//
-// It kept its own normalization sweep until it was folded into dedupeTokens,
-// which also fixed a real divergence: this stripped punctuation to "" while
-// dedupeTokens and tokenSet replace it with " ". So "mem_save.Error" became
-// one token "mem_saveerror" here and two tokens there — and FTS5's unicode61
-// tokenizer, which the query has to match, splits it. dupeQuery documents
-// itself as building "the same query the save-time near-duplicate check
-// uses"; before the fold it demonstrably did not.
 func searchTerms(s string) []string {
-	terms, _ := dedupeTokens(s)
-	return terms
+	s = strings.ToLower(s)
+	s = rePunct.ReplaceAllString(s, "")
+	s = reWhitespace.ReplaceAllString(s, " ")
+	words := strings.Fields(strings.TrimSpace(s))
+	seen := make(map[string]bool, len(words))
+	result := make([]string, 0, len(words))
+	for _, w := range words {
+		if len(w) > 2 && !seen[w] {
+			seen[w] = true
+			result = append(result, w)
+		}
+	}
+	return result
 }
 
 // tokenSet builds the deduplicated set of meaningful tokens used for
 // Jaccard similarity. Excludes 1-2 char tokens (noise).
 func tokenSet(s string) map[string]struct{} {
-	_, set := dedupeTokens(s)
+	s = strings.ToLower(s)
+	s = rePunct.ReplaceAllString(s, " ")
+	s = reWhitespace.ReplaceAllString(s, " ")
+	words := strings.Fields(strings.TrimSpace(s))
+	set := make(map[string]struct{}, len(words))
+	for _, w := range words {
+		if len(w) > 2 {
+			set[w] = struct{}{}
+		}
+	}
 	return set
 }
 
