@@ -100,6 +100,41 @@ not json
 	}
 }
 
+// TestShare_ExportOrderIsContentStable proves export bytes depend only on
+// content, not insert order or a per-machine clock — the property that keeps a
+// git-tracked pool file diff-clean across teammates. Two stores get the same two
+// shared memories in opposite insert order; their exports must be byte-identical.
+func TestShare_ExportOrderIsContentStable(t *testing.T) {
+	mk := func(order ...int) []byte {
+		s := newTestStore(t)
+		ctx := context.Background()
+		// Fully distinct content so neither trips the near-duplicate gate — the
+		// test is about ordering, so both rows must persist.
+		a := validReq()
+		a.Title, a.What, a.Learned, a.Tags = "alpha lesson", "redis cache eviction context", "prefer lru eviction", "redis caching"
+		b := validReq()
+		b.Title, b.What, b.Learned, b.Tags = "beta lesson", "postgres index tuning context", "add covering index", "postgres indexing"
+		reqs := []store.SaveRequest{a, b}
+		for _, i := range order {
+			resp, err := s.Save(ctx, reqs[i])
+			if err != nil {
+				t.Fatalf("save: %v", err)
+			}
+			if _, err := s.SetScope(ctx, resp.ID, "shared"); err != nil {
+				t.Fatalf("scope: %v", err)
+			}
+		}
+		var buf bytes.Buffer
+		if err := s.ExportShared(ctx, &buf); err != nil {
+			t.Fatalf("export: %v", err)
+		}
+		return buf.Bytes()
+	}
+	if !bytes.Equal(mk(0, 1), mk(1, 0)) {
+		t.Fatal("export bytes differ by insert order — ordering is not content-stable")
+	}
+}
+
 // TestSetScope_NotFound reports false for an unknown id so the CLI can exit 3.
 func TestSetScope_NotFound(t *testing.T) {
 	s := newTestStore(t)
