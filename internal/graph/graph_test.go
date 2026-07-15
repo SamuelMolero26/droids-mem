@@ -281,3 +281,31 @@ func TestStampIgnoresTestFiles(t *testing.T) {
 		t.Errorf("source edit did not move stamp: still %q", base)
 	}
 }
+
+// TestRemoveStaleTemps proves the crash-litter sweep is age-guarded: an orphan
+// older than staleTempAge is removed, a young temp (a concurrently-live sibling
+// build) is left untouched.
+func TestRemoveStaleTemps(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "graph.db")
+	old := dbPath + ".tmp.111"
+	young := dbPath + ".tmp.222"
+	for _, p := range []string{old, young} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	past := time.Now().Add(-2 * staleTempAge)
+	if err := os.Chtimes(old, past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	removeStaleTemps(dbPath)
+
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Errorf("stale temp survived the sweep: err=%v", err)
+	}
+	if _, err := os.Stat(young); err != nil {
+		t.Errorf("young temp (live sibling) was removed: %v", err)
+	}
+}
