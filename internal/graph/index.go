@@ -266,7 +266,12 @@ func writeGraphDB(dbPath, repo, module, stampVal string, symbols []*symRow, edge
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o750); err != nil {
 		return fmt.Errorf("create graph dir: %w", err)
 	}
-	tmp := dbPath + ".tmp"
+	// Per-process temp name: a second droids-mem (e.g. the MCP server rebuilding
+	// the same repo while a CLI graph query does too) must not clobber our
+	// half-written file. Each builder writes its own .tmp.<pid> and the rename is
+	// atomic — last writer wins with byte-identical content. In-process, repoLock
+	// already serializes same-repo builds, so pid is unique enough.
+	tmp := fmt.Sprintf("%s.tmp.%d", dbPath, os.Getpid())
 	_ = os.Remove(tmp)
 	db, err := sql.Open("sqlite", "file:"+tmp)
 	if err != nil {
