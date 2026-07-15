@@ -379,9 +379,13 @@ func newHookEntry(matcher, hookCmd string) map[string]any {
 	return entry
 }
 
-// mergeHooksInto reads (or creates) settings.json, adds any missing session-hook
-// entries, and writes it back. Returns the events newly added. Idempotent: an
-// event already pointing at hookCmd is left untouched.
+// mergeHooksInto reads (or creates) settings.json, canonicalizes the session-hook
+// entries, and writes it back. Returns the events touched. Idempotent: an event
+// already holding exactly one current entry is left untouched. Any other
+// session-hook registration — a stale binary path (e.g. a temp build that ran
+// install), a drifted matcher from an older release, or a duplicate — is
+// replaced, not stacked: two live registrations double-fire every hook and
+// double-count the intake gate, halving the effective Stop threshold.
 func mergeHooksInto(path, hookCmd string) ([]string, error) {
 	settings := map[string]any{}
 	if b, err := os.ReadFile(path); err == nil { // #nosec G304 -- path is the settings.json location, not user input
@@ -400,10 +404,31 @@ func mergeHooksInto(path, hookCmd string) ([]string, error) {
 	added := []string{}
 	for _, e := range claudeHookEvents {
 		entries, _ := hooks[e.name].([]any)
-		if hookEntryExists(entries, hookCmd) {
+		kept := make([]any, 0, len(entries)+1)
+		canonical := false
+		changed := false
+		for _, entry := range entries {
+			if !entryHasSessionHook(entry) {
+				kept = append(kept, entry)
+				continue
+			}
+			em, _ := entry.(map[string]any)
+			matcher, _ := em["matcher"].(string)
+			if !canonical && matcher == e.matcher && hookEntryExists([]any{entry}, hookCmd) {
+				canonical = true
+				kept = append(kept, entry)
+				continue
+			}
+			changed = true // stale path, drifted matcher, or duplicate — dropped
+		}
+		if !canonical {
+			kept = append(kept, newHookEntry(e.matcher, hookCmd))
+			changed = true
+		}
+		if !changed {
 			continue
 		}
-		hooks[e.name] = append(entries, newHookEntry(e.matcher, hookCmd))
+		hooks[e.name] = kept
 		added = append(added, e.name)
 	}
 	settings["hooks"] = hooks
