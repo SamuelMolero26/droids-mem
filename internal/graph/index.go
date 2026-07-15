@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"golang.org/x/tools/go/callgraph"
 	"golang.org/x/tools/go/callgraph/cha"
@@ -266,6 +267,7 @@ func writeGraphDB(dbPath, repo, module, stampVal string, symbols []*symRow, edge
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o750); err != nil {
 		return fmt.Errorf("create graph dir: %w", err)
 	}
+	removeStaleTemps(dbPath)
 	// Per-process temp name: a second droids-mem (e.g. the MCP server rebuilding
 	// the same repo while a CLI graph query does too) must not clobber our
 	// half-written file. Each builder writes its own .tmp.<pid> and the rename is
@@ -334,6 +336,28 @@ func writeGraphDB(dbPath, repo, module, stampVal string, symbols []*symRow, edge
 		return fmt.Errorf("close graph db: %w", cerr)
 	}
 	return os.Rename(tmp, dbPath)
+}
+
+// staleTempAge bounds how long a graph build may plausibly run. buildIndex
+// measures ~2.5s; an hour is far past any real build, so anything older is
+// orphaned litter from a builder that was SIGKILLed/crashed before its rename.
+// ponytail: an age guard, not a lockfile — good enough for a local tool, and it
+// never touches a concurrently-live sibling's in-progress temp (that one is young).
+const staleTempAge = time.Hour
+
+// removeStaleTemps deletes leftover <db>.tmp.<pid> files from builders that died
+// before renaming. Age-guarded so a live build on another pid is never removed;
+// best-effort, so any glob/remove error is ignored (the build proceeds regardless).
+func removeStaleTemps(dbPath string) {
+	matches, err := filepath.Glob(dbPath + ".tmp.*")
+	if err != nil {
+		return
+	}
+	for _, p := range matches {
+		if info, err := os.Stat(p); err == nil && time.Since(info.ModTime()) > staleTempAge {
+			_ = os.Remove(p)
+		}
+	}
 }
 
 // ---------- small text helpers ----------
