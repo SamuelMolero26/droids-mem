@@ -26,14 +26,17 @@ type SharedMemory struct {
 // ExportShared streams every scope='shared' memory to w as JSONL, one compact
 // object per line. Rows are already scrubbed in-db (scrub runs on save), so
 // export moves no secrets. Personal rows never appear — the point of the scope
-// column. The `, id` tiebreak makes the output byte-stable across re-exports of
-// an unchanged corpus, so the git-tracked pool file diffs cleanly.
+// column. ORDER BY fingerprint makes the output byte-identical for the same
+// logical corpus on ANY machine: fingerprint is content-derived, not clock- or
+// insert-order-derived, so two teammates re-exporting the same imported pool
+// produce the same bytes and the git-tracked file diffs cleanly (created_at,
+// stamped per-machine at save time, would have churned the diff across peers).
 func (s *Store) ExportShared(ctx context.Context, w io.Writer) error {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT kind, task_type, title, what, learned, tags
 		FROM memories
 		WHERE scope = 'shared'
-		ORDER BY created_at, id`)
+		ORDER BY fingerprint`)
 	if err != nil {
 		return fmt.Errorf("export query: %w", err)
 	}
