@@ -58,6 +58,18 @@ func (s *Store) ExportShared(ctx context.Context, w io.Writer) error {
 	return nil
 }
 
+// CountShared returns how many scope='shared' memories would be published. Used
+// by the `share` guided flow to confirm the count before pushing (FR-1 step 2).
+func (s *Store) CountShared(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM memories WHERE scope = 'shared'`).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count shared: %w", err)
+	}
+	return n, nil
+}
+
 // ImportResult reports how an import batch landed.
 type ImportResult struct {
 	Imported int `json:"imported"` // rows newly saved

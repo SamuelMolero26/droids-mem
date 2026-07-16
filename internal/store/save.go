@@ -72,6 +72,12 @@ var (
 	// their fingerprints rewritten by `migrate --rescrub`.
 	rePunct      = regexp.MustCompile(`[^\w\s\-]`)
 	reWhitespace = regexp.MustCompile(`\s+`)
+	// reTaskType gates task_type at the save trust boundary (SEC-1). task_type
+	// is a path segment on shared-pool export (FR-3: <repo>/<task_type>/shared.jsonl),
+	// so an imported row with `/`, `..`, or a leading dot could escape the repo
+	// root. Allow only a safe single dir/repo slug — nothing legitimate (repo or
+	// top-level dir names) is rejected. Runs on local save AND pool import.
+	reTaskType = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
 	// reRedactionToken matches the bracketed replacement tokens that Scrub
 	// inserts. Used by isEmptyAfterScrub to decide whether the post-scrub
 	// `learned` field is structurally empty.
@@ -585,6 +591,16 @@ func validate(req *SaveRequest) (*ScrubReport, error) {
 	req.TaskType = strings.ToLower(strings.TrimSpace(req.TaskType))
 	if req.TaskType == "" {
 		return nil, &ValidationError{Field: "task_type", Message: "required", Retryable: true}
+	}
+	// SEC-1: task_type crosses to the filesystem as a path segment on shared
+	// export; reject anything that isn't a safe single slug before it is stored.
+	if !reTaskType.MatchString(req.TaskType) {
+		return nil, &ValidationError{
+			Field:      "task_type",
+			Message:    "must match ^[a-z0-9][a-z0-9._-]*$ (a repo/dir slug)",
+			Retryable:  true,
+			Suggestion: "use a short slug like 'crm_upload'; no slashes, path traversal, or leading dot",
+		}
 	}
 	if !validKinds[req.Kind] {
 		return nil, &ValidationError{
