@@ -20,6 +20,9 @@ type Memory struct {
 	Fingerprint string `json:"fingerprint"`
 	CreatedAt   int64  `json:"created_at"`
 	UpdatedAt   int64  `json:"updated_at"`
+	// Scope ('personal'|'shared') is populated only by List — the share picker
+	// renders it. Other reads (RecentSessions, GetRow) leave it "".
+	Scope string `json:"scope,omitempty"`
 }
 
 type ListRequest struct {
@@ -65,7 +68,7 @@ func (s *Store) List(ctx context.Context, req ListRequest) (*ListResponse, error
 	args = append(args, limit)
 
 	stmt := fmt.Sprintf(`
-		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at
+		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at, scope
 		FROM memories %s
 		ORDER BY created_at DESC
 		LIMIT ?
@@ -80,7 +83,7 @@ func (s *Store) List(ctx context.Context, req ListRequest) (*ListResponse, error
 	memories := []Memory{}
 	for rows.Next() {
 		var m Memory
-		if err := rows.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.Scope); err != nil {
 			return nil, fmt.Errorf("scan memory: %w", err)
 		}
 		memories = append(memories, m)
