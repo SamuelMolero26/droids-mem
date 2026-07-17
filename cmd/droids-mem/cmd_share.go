@@ -261,9 +261,13 @@ func runShareFlow(cmd *cobra.Command, s *store.Store) error {
 		exitWith(ExitError)
 	}
 	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "Publish %d shared memories to %s? [y/N] ", count, repo)
+	fmt.Fprintf(out, "%s %s %s %s ",
+		paint("Publish", cBold, cMint),
+		paint(fmt.Sprintf("%d shared memories", count), cBright),
+		paint("to "+repo+"?", cTaupe),
+		paint("[y/N]", cDim))
 	if !yes(readLine(in)) {
-		writeString("aborted")
+		fmt.Fprintln(out, paint("aborted", cPink))
 		return nil
 	}
 	res, err := share.Publish(cmd.Context(), s, repo)
@@ -279,18 +283,18 @@ func runShareFlow(cmd *cobra.Command, s *store.Store) error {
 func pickRepo(cmd *cobra.Command, in *bufio.Reader) (string, error) {
 	known, _ := state.KnownRepos()
 	out := cmd.OutOrStdout()
-	fmt.Fprintln(out, "Select a Memory repo:")
+	fmt.Fprintln(out, paint("Select a Memory repo:", cBold, cMint))
 	for i, r := range known {
-		label := r.Path
+		label := paint(r.Path, cBright)
 		if i == 0 {
-			label += "  (last used)"
+			label += paint("  (last used)", cDim)
 		}
-		fmt.Fprintf(out, "  %d) %s\n", i+1, label)
+		fmt.Fprintf(out, "  %s %s\n", paint(strconv.Itoa(i+1)+")", cDim), label)
 	}
 	enterIdx, createIdx := len(known)+1, len(known)+2
-	fmt.Fprintf(out, "  %d) enter a path\n", enterIdx)
-	fmt.Fprintf(out, "  %d) create a new one\n", createIdx)
-	fmt.Fprint(out, "Choice: ")
+	fmt.Fprintf(out, "  %s %s\n", paint(strconv.Itoa(enterIdx)+")", cDim), "enter a path")
+	fmt.Fprintf(out, "  %s %s\n", paint(strconv.Itoa(createIdx)+")", cDim), "create a new one")
+	fmt.Fprint(out, paint("Choice: ", cTaupe))
 	choice, _ := strconv.Atoi(strings.TrimSpace(readLine(in)))
 	switch {
 	case choice >= 1 && choice <= len(known):
@@ -318,15 +322,21 @@ func pickMemories(cmd *cobra.Command, s *store.Store, in *bufio.Reader) error {
 	if len(res.Memories) == 0 {
 		return nil
 	}
-	fmt.Fprintln(out, "\nShare which memories? (comma list, 'all', enter to skip)")
+	fmt.Fprintln(out, paint("\nShare which memories?", cBold, cMint)+paint(" (comma list, 'all', enter to skip)", cDim))
 	for i, m := range res.Memories {
 		scope := m.Scope
 		if scope == "" {
 			scope = "personal"
 		}
-		fmt.Fprintf(out, "  %d) [%s] %-13s %s\n", i+1, scope, m.Kind, m.Title)
+		tag := paint("[personal]", cDim)
+		if scope == "shared" {
+			tag = paint("[shared]  ", cMint)
+		}
+		fmt.Fprintf(out, "  %s %s %s %s\n",
+			paint(strconv.Itoa(i+1)+")", cDim), tag,
+			paint(fmt.Sprintf("%-13s", m.Kind), cTaupe), paint(m.Title, cBright))
 	}
-	fmt.Fprint(out, "Choice: ")
+	fmt.Fprint(out, paint("Choice: ", cTaupe))
 	picks := parsePicks(readLine(in), len(res.Memories))
 	marked := 0
 	for _, idx := range picks {
@@ -340,7 +350,7 @@ func pickMemories(cmd *cobra.Command, s *store.Store, in *bufio.Reader) error {
 		marked++
 	}
 	if marked > 0 {
-		fmt.Fprintf(out, "→ %d marked shared.\n", marked)
+		fmt.Fprintln(out, paint(fmt.Sprintf("→ %d marked shared.", marked), cMint))
 	}
 	return nil
 }
@@ -377,13 +387,20 @@ func createRepo(cmd *cobra.Command, in *bufio.Reader) (string, error) {
 		return "", errors.New("gh not found; create the repo and re-run, or pass --repo <clone-path>")
 	}
 	out := cmd.OutOrStdout()
-	fmt.Fprint(out, "New repo name: ")
+	fmt.Fprint(out, paint("New repo name: ", cTaupe))
 	name := strings.TrimSpace(readLine(in))
 	if name == "" {
 		return "", errors.New("repo name required")
 	}
 	home, _ := os.UserHomeDir()
-	dest := filepath.Join(home, "droids-mem-repos", name)
+	def := filepath.Join(home, name)
+	fmt.Fprintf(out, "%s%s%s ", paint("Clone to [", cTaupe), paint(def, cBright), paint("]:", cTaupe))
+	dest := strings.TrimSpace(readLine(in))
+	if dest == "" {
+		dest = def
+	} else if abs, err := filepath.Abs(dest); err == nil {
+		dest = abs
+	}
 	if err := runGH(cmd, "repo", "create", name, "--private"); err != nil {
 		return "", err
 	}
