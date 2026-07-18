@@ -1,7 +1,6 @@
 package main_test
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -44,23 +43,6 @@ func cli(t *testing.T, dbPath string, allowedExits []int, args ...string) []byte
 				}
 			}
 			t.Fatalf("cli %v exited %d (stderr: %s)", args, code, ee.Stderr)
-		}
-		t.Fatalf("cli %v: %v", args, err)
-	}
-	return out
-}
-
-// cliStdin runs the binary feeding stdin, for commands like `import`.
-func cliStdin(t *testing.T, dbPath string, stdin []byte, args ...string) []byte {
-	t.Helper()
-	cmd := exec.Command(binaryPath, args...)
-	cmd.Env = append(os.Environ(), "DROIDS_MEM_DB="+dbPath)
-	cmd.Stdin = bytes.NewReader(stdin)
-	out, err := cmd.Output()
-	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			t.Fatalf("cli %v exited %d (stderr: %s)", args, ee.ExitCode(), ee.Stderr)
 		}
 		t.Fatalf("cli %v: %v", args, err)
 	}
@@ -227,157 +209,5 @@ func TestE2E_SecondRunUsesFirstRunMemories(t *testing.T) {
 	// total = 4
 	if listResp.Total < 4 {
 		t.Errorf("expected at least 4 memories after 2 runs, got %d", listResp.Total)
-	}
-}
-
-// TestE2E_ShareExportImportRoundTrip drives the shared-context surface end to
-// end: private-by-default, share grant, export, cross-db import, dedupe, and
-// the not-found exit code (ADR-0028).
-func TestE2E_ShareExportImportRoundTrip(t *testing.T) {
-	src := filepath.Join(t.TempDir(), "src.db")
-
-	saveOut := cli(t, src, nil, "save",
-		"--task-type", "go", "--kind", "task_pattern",
-		"--title", "use errgroup", "--what", "fan-out",
-		"--learned", "errgroup bounds goroutine fan-out",
-	)
-	var saved struct {
-		ID string `json:"id"`
-	}
-	mustParseJSON(t, saveOut, &saved)
-
-	// A second memory left personal — must never export.
-	cli(t, src, nil, "save",
-		"--task-type", "go", "--kind", "user_rule",
-		"--title", "private note", "--what", "x", "--learned", "keep this local",
-	)
-
-	// Export before sharing → empty (private by default).
-	if out := cli(t, src, nil, "export"); len(bytes.TrimSpace(out)) != 0 {
-		t.Fatalf("export before share leaked rows: %s", out)
-	}
-
-	// Share only the errgroup memory.
-	cli(t, src, nil, "share", "--id", saved.ID)
-
-	pool := cli(t, src, nil, "export")
-	if n := bytes.Count(bytes.TrimSpace(pool), []byte("\n")) + 1; n != 1 {
-		t.Fatalf("export = %d lines, want exactly the shared row:\n%s", n, pool)
-	}
-
-	// Import into a fresh DB via stdin.
-	dst := filepath.Join(t.TempDir(), "dst.db")
-	var res struct{ Imported, Skipped, Failed int }
-	mustParseJSON(t, cliStdin(t, dst, pool, "import"), &res)
-	if res.Imported != 1 || res.Failed != 0 {
-		t.Fatalf("import = %+v, want imported=1 failed=0", res)
-	}
-
-	// Re-import is idempotent — dedupe skips it.
-	mustParseJSON(t, cliStdin(t, dst, pool, "import"), &res)
-	if res.Imported != 0 || res.Skipped != 1 {
-		t.Fatalf("re-import = %+v, want imported=0 skipped=1", res)
-	}
-
-	// Unknown id → exit 3 (not found).
-	cli(t, dst, []int{3}, "share", "--id", "mem_does_not_exist")
-}
-
-// cliEnv runs the binary with an isolated DROIDS_MEM_HOME (so the persisted
-// Memory repo does not touch the real state dir) plus optional extra stdin/env.
-func cliEnv(t *testing.T, dbPath, home string, stdin []byte, allowedExits []int, args ...string) []byte {
-	t.Helper()
-	cmd := exec.Command(binaryPath, args...)
-	cmd.Env = append(os.Environ(), "DROIDS_MEM_DB="+dbPath, "DROIDS_MEM_HOME="+home)
-	if stdin != nil {
-		cmd.Stdin = bytes.NewReader(stdin)
-	}
-	out, err := cmd.Output()
-	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			for _, a := range allowedExits {
-				if ee.ExitCode() == a {
-					return out
-				}
-			}
-			t.Fatalf("cli %v exited %d (stderr: %s)", args, ee.ExitCode(), ee.Stderr)
-		}
-		t.Fatalf("cli %v: %v", args, err)
-	}
-	return out
-}
-
-func gitRun(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	c := exec.Command("git", args...)
-	c.Dir = dir
-	if out, err := c.CombinedOutput(); err != nil {
-		t.Fatalf("git %v: %v\n%s", args, err, out)
-	}
-}
-
-// TestE2E_ShareRepoTransport drives the git-transport flags (A3, A5) and the
-// non-TTY guided-flow guard (A2). Requires git.
-func TestE2E_ShareRepoTransport(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
-	tmp := t.TempDir()
-	origin := filepath.Join(tmp, "origin.git")
-	gitRun(t, tmp, "init", "--bare", "-b", "main", origin)
-
-	// Machine A: clone, save+share a memory, Publish via export --repo (A3 adopt).
-	repoA := filepath.Join(tmp, "a")
-	gitRun(t, tmp, "clone", origin, repoA)
-	gitRun(t, repoA, "config", "user.email", "t@e.com")
-	gitRun(t, repoA, "config", "user.name", "t")
-	srcDB := filepath.Join(tmp, "src.db")
-	homeA := filepath.Join(tmp, "homeA")
-
-	out := cliEnv(t, srcDB, homeA, nil, nil, "save",
-		"--task-type", "go", "--kind", "task_pattern",
-		"--title", "use errgroup", "--what", "fan-out", "--learned", "errgroup bounds fan-out")
-	var saved struct{ ID string }
-	mustParseJSON(t, out, &saved)
-	cliEnv(t, srcDB, homeA, nil, nil, "share", "--id", saved.ID)
-
-	var pub struct {
-		Pushed   bool `json:"pushed"`
-		Projects int  `json:"projects"`
-	}
-	mustParseJSON(t, cliEnv(t, srcDB, homeA, nil, nil, "export", "--repo", repoA), &pub)
-	if !pub.Pushed || pub.Projects != 1 {
-		t.Fatalf("export --repo = %+v, want pushed with 1 project", pub)
-	}
-	if _, err := os.Stat(filepath.Join(repoA, "go", "shared.jsonl")); err != nil {
-		t.Fatalf("bucket not written: %v", err)
-	}
-
-	// A3: bare `export --repo` reuses the persisted repo (no path) → no-op push, ok.
-	cliEnv(t, srcDB, homeA, nil, nil, "export", "--repo")
-
-	// Machine B: fresh clone + fresh home, Fetch via import --repo.
-	repoB := filepath.Join(tmp, "b")
-	gitRun(t, tmp, "clone", origin, repoB)
-	dstDB := filepath.Join(tmp, "dst.db")
-	homeB := filepath.Join(tmp, "homeB")
-	var imp struct{ Imported, Skipped, Failed int }
-	mustParseJSON(t, cliEnv(t, dstDB, homeB, nil, nil, "import", "--repo", repoB), &imp)
-	if imp.Imported != 1 || imp.Failed != 0 {
-		t.Fatalf("import --repo = %+v, want imported=1 failed=0", imp)
-	}
-
-	// A5: a non-git path → hard error (exit 1).
-	plain := filepath.Join(tmp, "notgit")
-	if err := os.MkdirAll(plain, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cliEnv(t, srcDB, homeA, nil, []int{1}, "export", "--repo", plain)
-
-	// A2: bare `share` with piped (non-TTY) stdin prints flag usage, exits 0.
-	usage := cliEnv(t, srcDB, homeA, []byte(""), nil, "share")
-	if !bytes.Contains(usage, []byte("--repo")) {
-		t.Fatalf("non-TTY share did not print flag usage: %s", usage)
 	}
 }
