@@ -6,6 +6,11 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// theme centralizes every color the inspector uses (ADR-0021). Values are lifted
+// from the Paper mockup; lipgloss + termenv auto-degrade truecolor to 256/16 on
+// limited terminals. The inspector is borderless and dark-only — panes are set
+// off by faint dividers and a selected-row fill, not boxes. Roles, not raw
+// hexes, are what the views reference; retheming is this file.
 var (
 	// Grounds. No app-wide fill — the terminal's own background shows through
 	// (full-width painted bands read as shadow strips on real terminals). Only
@@ -74,10 +79,6 @@ var (
 	footerKey   = lipgloss.NewStyle().Foreground(colMeta)
 	dangerStyle = lipgloss.NewStyle().Bold(true).Foreground(colDanger)
 
-	// Pane border colors — dim when unfocused, bright on focus.
-	paneBorderColor     = lipgloss.Color("#3A3E49") // dim, same as connSpine
-	paneBorderHighlight = colSelect                 // cyan, same as search caret
-
 	// Scope filter + sharing (share-registry mockups).
 	sharedChip  = lipgloss.NewStyle().Foreground(colSelect)            // ◇ SHARED row/detail chip (cyan)
 	selectDot   = lipgloss.NewStyle().Foreground(colAmber)             // ● multi-select marker
@@ -99,7 +100,12 @@ func chromeRow(width int) lipgloss.Style {
 	return lipgloss.NewStyle().Width(width)
 }
 
-// hrule is the faint horizontal divider between chrome rows.
+// hrule / vrule are the faint dividers that replace pane borders.
 func hrule(width int) string {
 	return lipgloss.NewStyle().Foreground(colDiv).Render(strings.Repeat("─", max(0, width)))
+}
+
+func vrule(height int) string {
+	col := lipgloss.NewStyle().Foreground(colDiv).Render("│")
+	return strings.Repeat(col+"\n", max(1, height)-1) + col
 }

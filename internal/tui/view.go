@@ -3,7 +3,6 @@ package tui
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/samuelmolero26/droids-mem/internal/store"
@@ -13,7 +12,6 @@ func (m Model) View() string {
 	if !m.ready {
 		return "loading…"
 	}
-
 	bodyH := max(1, m.height-6)
 	rows := []string{
 		m.headerView(),
@@ -48,19 +46,17 @@ func (m Model) searchView() string {
 	return chromeRow(m.width).Render(left + strings.Repeat(" ", gap) + pill)
 }
 
-// bodyView composes the three panes as bordered boxes. The focused pane gets a
-// cyan border; the others get a dim border. Borders replace the old vrule
-// dividers between panes (ADR-0021 update).
+// bodyView composes the three borderless columns separated by vertical rules.
 func (m Model) bodyView(bodyH int) string {
-	inner := max(20, m.width-sidebarWidth)
+	inner := max(20, m.width-sidebarWidth-2)
 	detailW := inner * 34 / 100
 	listW := inner - detailW
 
-	sidebar := m.paneStyle(focusSidebar, sidebarWidth-2, bodyH-2).Render(m.sidebarView())
-	list := m.paneStyle(focusList, listW-2, bodyH-2).Render(m.list.View())
-	detail := m.paneStyle(focusDetail, detailW-2, bodyH-2).Render(m.detail.View())
+	sidebar := lipgloss.NewStyle().Width(sidebarWidth).Height(bodyH).Render(m.sidebarView())
+	list := lipgloss.NewStyle().Width(listW).Height(bodyH).Render(m.list.View())
+	detail := lipgloss.NewStyle().Width(detailW).Height(bodyH).Render(m.detail.View())
 
-	row := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, list, detail)
+	row := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, vrule(bodyH), list, vrule(bodyH), detail)
 	if m.mode == modeConfirm {
 		return row + "\n" + dangerStyle.Render(fmt.Sprintf("Delete %q?  [y/N]", m.confirmTarget.title))
 	}
@@ -68,16 +64,6 @@ func (m Model) bodyView(bodyH int) string {
 		return lipgloss.Place(m.width, bodyH, lipgloss.Center, lipgloss.Center, m.shareDialog())
 	}
 	return row
-}
-
-// paneStyle builds a rounded-border box for one of the three panes. The border
-// is highlighted (cyan) when the pane owns keyboard focus, dim otherwise.
-func (m Model) paneStyle(pane focus, w, h int) lipgloss.Style {
-	s := lipgloss.NewStyle().Width(w).Height(h).Border(lipgloss.RoundedBorder()).BorderForeground(paneBorderColor)
-	if m.focus == pane {
-		s = s.BorderForeground(paneBorderHighlight)
-	}
-	return s
 }
 
 // shareDialog is the share-confirm modal (share-registry mockup, registry chrome
@@ -115,7 +101,7 @@ func (m Model) shareDialog() string {
 	b.WriteString("\n\n")
 	b.WriteString(shareWarn.Render("⚠ Shared copies enter the git-tracked pool and can't be fully\n  retracted — anyone who pulled keeps their copy."))
 	b.WriteString("\n\n")
-	b.WriteString(metaStyle.Render("Memory repo:") + " " + m.repoInput.View())
+	b.WriteString(metaStyle.Render("push to repo:") + " " + m.repoInput.View())
 	b.WriteString("\n\n")
 	b.WriteString(footerKey.Render("esc") + footerStyle.Render(" cancel") + "   " + shareBtn.Render(fmt.Sprintf("↵ Push %d", n)))
 	return shareBox.Render(b.String())
@@ -227,16 +213,6 @@ func renderDetail(mem *store.Memory, neighbors []store.Neighbor, w int) string {
 	}
 	b.WriteString(strings.Join(chips, " "))
 	b.WriteString("\n\n")
-
-	// authored_at is provenance, not recency: it only earns a line when it
-	// diverges from created_at, which happens on an imported (scope='shared')
-	// row — ImportShared re-stamps created_at to the local import time but
-	// carries the peer's original authoring date forward.
-	if mem.AuthoredAt != 0 && mem.AuthoredAt != mem.CreatedAt {
-		authored := time.Unix(mem.AuthoredAt, 0).UTC().Format("2006-01-02")
-		b.WriteString(metaStyle.Render("authored " + authored))
-		b.WriteString("\n\n")
-	}
 
 	body := mem.Learned
 	if body == "" {

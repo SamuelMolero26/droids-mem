@@ -3,7 +3,6 @@ package tui
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -12,7 +11,6 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/samuelmolero26/droids-mem/internal/share"
 	"github.com/samuelmolero26/droids-mem/internal/state"
 	"github.com/samuelmolero26/droids-mem/internal/store"
 )
@@ -161,7 +159,7 @@ func New(s memStore) Model {
 	ti.Focus()
 
 	ri := textinput.New()
-	ri.Placeholder = "Memory repo path — outside any code repo"
+	ri.Placeholder = "path to git repo"
 	ri.Prompt = ""
 	ri.Cursor.Style = lipgloss.NewStyle().Foreground(colSelect)
 
@@ -175,7 +173,7 @@ func New(s memStore) Model {
 	l.SetFilteringEnabled(false) // we drive search ourselves via store.Search
 	l.SetShowStatusBar(false)
 
-	m := Model{
+	return Model{
 		store:     s,
 		mode:      modeNormal,
 		focus:     focusList,
@@ -184,16 +182,9 @@ func New(s memStore) Model {
 		repoInput: ri,
 		counts:    map[string]int{},
 		selected:  selected,
-		// memStore is a superset of share.Store, so the wrappers just adapt the
-		// param type; the git transport lives in internal/share (ADR-0029 §5).
-		push: func(ctx context.Context, repo string, s memStore, n int) error {
-			return share.Push(ctx, repo, s, n)
-		},
-		pull: func(ctx context.Context, repo string, s memStore) (store.ImportResult, error) {
-			return share.Fetch(ctx, repo, s)
-		},
+		push:      pushShared,
+		pull:      pullShared,
 	}
-	return m
 }
 
 func (m Model) Init() tea.Cmd {
@@ -302,7 +293,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "y", "Y":
 			id := m.confirmTarget.id
-			delete(m.selected, id) // drop the deleted row from the share selection
 			m.mode = modeNormal
 			return m, m.deleteCmd(id)
 		default: // n / esc / anything else cancels
@@ -318,12 +308,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.status = "share failed: no repo set"
 				return m, nil
 			}
-			abs, err := filepath.Abs(repo)
-			if err != nil {
-				m.status = "share failed: " + err.Error()
-				return m, nil
-			}
-			repo = abs
 			ids := m.shareTargets()
 			m.mode = modeNormal
 			return m, m.shareCmd(ids, repo)
@@ -564,28 +548,18 @@ func (m Model) shareCmd(ids []string, repo string) tea.Cmd {
 	s, push := m.store, m.push
 	return func() tea.Msg {
 		ctx := context.Background()
-		// Flip must precede export (ExportShared reads scope='shared' from the
-		// db), so on any failure revert the flips — otherwise the census would
-		// show rows as shared that never reached the pool.
-		flipped := make([]string, 0, len(ids))
-		revert := func() {
-			for _, id := range flipped {
-				_, _ = s.SetScope(ctx, id, "personal")
-			}
-		}
+		n := 0
 		for _, id := range ids {
 			if _, err := s.SetScope(ctx, id, "shared"); err != nil {
-				revert()
-				return sharedMsg{err: err}
+				return sharedMsg{n: n, err: err}
 			}
-			flipped = append(flipped, id)
+			n++
 		}
-		if err := push(ctx, repo, s, len(flipped)); err != nil {
-			revert()
-			return sharedMsg{err: err}
+		if err := push(ctx, repo, s, n); err != nil {
+			return sharedMsg{n: n, err: err}
 		}
 		_ = state.SaveShareRepo(repo) // remember for reuse; a save miss isn't fatal
-		return sharedMsg{n: len(flipped)}
+		return sharedMsg{n: n}
 	}
 }
 
@@ -632,16 +606,14 @@ func (m *Model) layout() {
 	if m.width <= 0 || m.height <= 0 {
 		return
 	}
-	// Bordered panes (ADR-0021 update). Fixed rows: header(1) + search(1) + top
-	// rule(1) + bottom rule(1) + footer(1) = 5 chrome rows; the 6th is the
-	// mobile-cta placeholder that's always empty.
+	// Borderless (ADR-0021 visual match). Fixed rows: header(1) + underline(1) +
+	// search(1) + top rule(1) + bottom rule(1) + footer(1) = 6.
 	bodyH := max(1, m.height-6)
-	// Sidebar is fixed width; the rest splits into list + detail. No vrule
-	// columns needed — pane borders serve as separators.
-	inner := max(20, m.width-sidebarWidth)
+	// Two 1-col vertical dividers separate the three columns; sidebar is fixed,
+	// detail ~34% of the remainder, list takes the rest.
+	inner := max(20, m.width-sidebarWidth-2)
 	detailW := inner * 34 / 100
 	listW := inner - detailW
-	// Subtract 2 from each dimension for the border (left+right, top+bottom).
-	m.list.SetSize(listW-2, bodyH-2)
-	m.detail = viewport.New(detailW-2, bodyH-2)
+	m.list.SetSize(listW, bodyH)
+	m.detail = viewport.New(detailW, bodyH)
 }
