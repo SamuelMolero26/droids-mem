@@ -163,11 +163,6 @@ func Run(ctx context.Context, cfg Config, st *store.Store) error {
 		serveErr <- nil
 	}()
 
-	// PERF-1: boot-Fetch the shared pool in its own goroutine, launched AFTER
-	// the listener goroutine above is up. Best-effort; a blocking import here
-	// would serialize every tool call through the single-connection DB pool.
-	go bootFetch(ctx, st, logger)
-
 	select {
 	case err := <-serveErr:
 		if err != nil {
