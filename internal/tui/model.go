@@ -2,6 +2,8 @@ package tui
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -9,6 +11,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/samuelmolero26/droids-mem/internal/state"
 	"github.com/samuelmolero26/droids-mem/internal/store"
 )
 
@@ -19,6 +22,17 @@ const (
 	searchLimit    = 20  // live-search result cap
 	sidebarWidth   = 26  // fixed sidebar column
 )
+
+// scopeFilters is the SCOPE rotation `s` cycles through; "" is "all" (no scope
+// filter). Order matches the mockup: all → personal → shared.
+var scopeFilters = []string{"", "personal", "shared"}
+
+func scopeLabel(s string) string {
+	if s == "" {
+		return "all"
+	}
+	return s
+}
 
 // focus is which of the three panes owns the arrow keys (ADR-0021). Printable
 // keys always feed search regardless of focus; tab cycles this.
@@ -36,6 +50,7 @@ type mode int
 const (
 	modeNormal mode = iota
 	modeConfirm
+	modeShare // share-confirm dialog: flip selected memories into the shared pool
 )
 
 // sidebarKinds is the fixed KINDS rotation shown in the sidebar; "" is the
@@ -55,6 +70,7 @@ func kindLabel(k string) string {
 type queryDesc struct {
 	search string
 	kind   string
+	scope  string // "" = all; "personal"|"shared" (SCOPE filter, cycled by `s`)
 }
 
 // --- messages ---
@@ -73,9 +89,19 @@ type detailMsg struct {
 type countsMsg struct {
 	counts map[string]int
 	total  int
+	shared int
 	err    error
 }
 type deletedMsg struct{ err error }
+type sharedMsg struct {
+	n   int // memories flipped to shared + pushed to the pool repo
+	err error
+}
+type pulledMsg struct { // teammate's pool pulled + imported
+	res store.ImportResult
+	err error
+}
+type scopeChangedMsg struct{ err error } // one row's scope flipped (unshare); reload quietly
 type tickMsg struct{ gen int }
 
 // Model is the root BubbleTea model for the Memory inspector.
@@ -84,13 +110,20 @@ type Model struct {
 	mode  mode
 	focus focus
 
-	search textinput.Model
-	list   list.Model
-	detail viewport.Model
+	search    textinput.Model
+	repoInput textinput.Model // pool git repo path, edited in the share modal (ADR-0028)
+	list      list.Model
+	detail    viewport.Model
 
-	kindIdx int
-	counts  map[string]int
-	total   int
+	kindIdx  int
+	scopeIdx int
+	counts   map[string]int
+	total    int
+	shared   int // scope=='shared' census, feeds the SCOPE sidebar section
+
+	// selected is the multi-select set for sharing (row id → chosen). Empty means
+	// the share action targets the cursor row instead.
+	selected map[string]bool
 
 	query queryDesc
 
@@ -105,9 +138,17 @@ type Model struct {
 	confirmTarget listItem
 	status        string
 
+	// push/pull do the git side of sharing; defaulted to the real git-shelling
+	// funcs, overridden in tests so the model logic runs without a live repo.
+	push pushFunc
+	pull pullFunc
+
 	width, height int
 	ready         bool
 }
+
+type pushFunc func(ctx context.Context, repo string, s memStore, n int) error
+type pullFunc func(ctx context.Context, repo string, s memStore) (store.ImportResult, error)
 
 // New builds an inspector model over the given store.
 func New(s memStore) Model {
@@ -117,19 +158,32 @@ func New(s memStore) Model {
 	ti.Cursor.Style = lipgloss.NewStyle().Foreground(colSelect) // cyan caret
 	ti.Focus()
 
-	l := list.New(nil, memDelegate{}, 0, 0)
+	ri := textinput.New()
+	ri.Placeholder = "path to git repo"
+	ri.Prompt = ""
+	ri.Cursor.Style = lipgloss.NewStyle().Foreground(colSelect)
+
+	// selected is shared by reference with the delegate so ticked rows render a
+	// dot without threading state through every Render; it's cleared in place
+	// (never reassigned) so the delegate keeps pointing at the live set.
+	selected := map[string]bool{}
+	l := list.New(nil, memDelegate{selected: selected}, 0, 0)
 	l.SetShowTitle(false)
 	l.SetShowHelp(false)
 	l.SetFilteringEnabled(false) // we drive search ourselves via store.Search
 	l.SetShowStatusBar(false)
 
 	return Model{
-		store:  s,
-		mode:   modeNormal,
-		focus:  focusList,
-		list:   l,
-		search: ti,
-		counts: map[string]int{},
+		store:     s,
+		mode:      modeNormal,
+		focus:     focusList,
+		list:      l,
+		search:    ti,
+		repoInput: ri,
+		counts:    map[string]int{},
+		selected:  selected,
+		push:      pushShared,
+		pull:      pullShared,
 	}
 }
 
@@ -175,7 +229,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case countsMsg:
 		if msg.err == nil {
-			m.counts, m.total = msg.counts, msg.total
+			m.counts, m.total, m.shared = msg.counts, msg.total, msg.shared
 		}
 		return m, nil
 
@@ -186,6 +240,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "deleted"
 		}
 		m.mode = modeNormal
+		m.gen++
+		return m, tea.Batch(m.loadCmd(m.gen, m.query), m.countsCmd())
+
+	case sharedMsg:
+		m.mode = modeNormal
+		if msg.err != nil {
+			m.status = "share failed: " + msg.err.Error()
+			return m, nil
+		}
+		clear(m.selected) // clear in place — the delegate shares this map instance
+		m.status = fmt.Sprintf("✓ pushed %d %s", msg.n, plural(msg.n, "memory", "memories"))
+		m.gen++
+		return m, tea.Batch(m.loadCmd(m.gen, m.query), m.countsCmd())
+
+	case pulledMsg:
+		if msg.err != nil {
+			m.status = "pull failed: " + msg.err.Error()
+			return m, nil
+		}
+		r := msg.res
+		m.status = fmt.Sprintf("✓ pulled: %d imported, %d skipped, %d failed", r.Imported, r.Skipped, r.Failed)
+		m.gen++
+		return m, tea.Batch(m.loadCmd(m.gen, m.query), m.countsCmd())
+
+	case scopeChangedMsg:
+		if msg.err != nil {
+			m.status = "unshare failed: " + msg.err.Error()
+			return m, nil
+		}
+		m.status = ""
 		m.gen++
 		return m, tea.Batch(m.loadCmd(m.gen, m.query), m.countsCmd())
 
@@ -216,6 +300,26 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	if m.mode == modeShare {
+		switch msg.String() {
+		case "enter":
+			repo := strings.TrimSpace(m.repoInput.Value())
+			if repo == "" {
+				m.status = "share failed: no repo set"
+				return m, nil
+			}
+			ids := m.shareTargets()
+			m.mode = modeNormal
+			return m, m.shareCmd(ids, repo)
+		case "esc":
+			m.mode = modeNormal
+			return m, nil
+		default: // keystrokes edit the repo-path field
+			var cmd tea.Cmd
+			m.repoInput, cmd = m.repoInput.Update(msg)
+			return m, cmd
+		}
+	}
 	return m.handleNormalKey(msg)
 }
 
@@ -236,10 +340,50 @@ func (m Model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.mode = modeConfirm
 		}
 		return m, nil
+	case "ctrl+s": // share: open the confirm dialog for the selection (or cursor row)
+		if len(m.shareTargets()) > 0 {
+			repo, _ := state.LoadShareRepo() // prefill the remembered repo for reuse
+			m.repoInput.SetValue(repo)
+			m.repoInput.CursorEnd()
+			m.repoInput.Focus()
+			m.mode = modeShare
+		}
+		return m, nil
+	case "ctrl+p": // pull + import a teammate's pool from the remembered repo
+		repo, _ := state.LoadShareRepo()
+		if strings.TrimSpace(repo) == "" {
+			m.status = "pull failed: no repo set — share once to set it"
+			return m, nil
+		}
+		m.status = "pulling…"
+		return m, m.pullCmd(repo)
+	case "ctrl+x": // unshare: flip the cursor row back to personal
+		if it, ok := m.list.SelectedItem().(listItem); ok && it.shared {
+			return m, m.setScopeCmd(it.id, "personal")
+		}
+		return m, nil
+	case " ": // toggle the cursor row in the multi-select set (empty search box
+		// only — otherwise space is a literal separator in a multi-word query).
+		if m.search.Value() != "" {
+			break
+		}
+		if it, ok := m.list.SelectedItem().(listItem); ok {
+			if m.selected[it.id] {
+				delete(m.selected, it.id)
+			} else {
+				m.selected[it.id] = true
+			}
+		}
+		return m, nil
 	case "esc":
 		if m.search.Value() != "" {
 			m.search.SetValue("")
 			m.query.search = ""
+			m.gen++
+			return m, m.loadCmd(m.gen, m.query)
+		}
+		if m.query.scope != "" { // clear an active scope filter before quitting
+			m.query.scope, m.scopeIdx = "", 0
 			m.gen++
 			return m, m.loadCmd(m.gen, m.query)
 		}
@@ -250,6 +394,23 @@ func (m Model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "up", "down", "pgup", "pgdown", "home", "end":
 		return m.handleNav(msg)
+	}
+
+	// `q` quits outright from an empty search box (once the box has text, `q` is
+	// a literal search rune — search is always-on, ADR-0021).
+	if msg.String() == "q" && m.search.Value() == "" {
+		return m, tea.Quit
+	}
+
+	// `s` cycles the SCOPE filter, but only from an empty search box — once the
+	// box has text, `s` is a literal search rune (search is always-on, ADR-0021).
+	// ponytail: the cost is you can't begin a search with 's' from empty; scope
+	// cycling is the rarer action and the mockup binds it to a bare `s`.
+	if msg.String() == "s" && m.search.Value() == "" {
+		m.scopeIdx = (m.scopeIdx + 1) % len(scopeFilters)
+		m.query.scope = scopeFilters[m.scopeIdx]
+		m.gen++
+		return m, m.loadCmd(m.gen, m.query)
 	}
 
 	// Everything else is text input into the search box (always-on, ADR-0021). A
@@ -308,7 +469,7 @@ func (m Model) loadCmd(gen int, q queryDesc) tea.Cmd {
 			}
 			return itemsMsg{gen: gen, items: itemsFromSearch(resp)}
 		}
-		resp, err := s.List(ctx, store.ListRequest{Kind: q.kind, Limit: listPageLimit})
+		resp, err := s.List(ctx, store.ListRequest{Kind: q.kind, Scope: q.scope, Limit: listPageLimit})
 		if err != nil {
 			return itemsMsg{gen: gen, err: err}
 		}
@@ -350,12 +511,83 @@ func (m Model) detailCmd(gen int, id string) tea.Cmd {
 func (m Model) countsCmd() tea.Cmd {
 	s := m.store
 	return func() tea.Msg {
-		resp, err := s.Counts(context.Background())
+		ctx := context.Background()
+		resp, err := s.Counts(ctx)
 		if err != nil {
 			return countsMsg{err: err}
 		}
-		return countsMsg{counts: resp.ByKind, total: resp.Total}
+		shared, err := s.CountShared(ctx)
+		if err != nil {
+			return countsMsg{err: err}
+		}
+		return countsMsg{counts: resp.ByKind, total: resp.Total, shared: shared}
 	}
+}
+
+// shareTargets is the id set a share action operates on: the multi-select set if
+// non-empty, else the cursor row alone (so `^s` with nothing ticked still works).
+func (m Model) shareTargets() []string {
+	if len(m.selected) > 0 {
+		ids := make([]string, 0, len(m.selected))
+		for id := range m.selected {
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	if it, ok := m.list.SelectedItem().(listItem); ok {
+		return []string{it.id}
+	}
+	return nil
+}
+
+// shareCmd flips each id to scope='shared', then exports the whole pool into
+// repo and pushes it (ADR-0028, full-automation share). One bad flip fails the
+// batch — sharing is a deliberate action, not a resilient import. The repo is
+// remembered on success so the next share defaults to it (reuse).
+func (m Model) shareCmd(ids []string, repo string) tea.Cmd {
+	s, push := m.store, m.push
+	return func() tea.Msg {
+		ctx := context.Background()
+		n := 0
+		for _, id := range ids {
+			if _, err := s.SetScope(ctx, id, "shared"); err != nil {
+				return sharedMsg{n: n, err: err}
+			}
+			n++
+		}
+		if err := push(ctx, repo, s, n); err != nil {
+			return sharedMsg{n: n, err: err}
+		}
+		_ = state.SaveShareRepo(repo) // remember for reuse; a save miss isn't fatal
+		return sharedMsg{n: n}
+	}
+}
+
+// pullCmd pulls repo and imports its pool into the local store (^p).
+func (m Model) pullCmd(repo string) tea.Cmd {
+	s, pull := m.store, m.pull
+	return func() tea.Msg {
+		res, err := pull(context.Background(), repo, s)
+		return pulledMsg{res: res, err: err}
+	}
+}
+
+// setScopeCmd flips one memory's scope (the `^x` unshare path). Its result
+// reloads the list + census without a toast — unsharing is a quiet correction.
+func (m Model) setScopeCmd(id, scope string) tea.Cmd {
+	s := m.store
+	return func() tea.Msg {
+		_, err := s.SetScope(context.Background(), id, scope)
+		return scopeChangedMsg{err: err}
+	}
+}
+
+// plural picks the singular or plural noun for n.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 func (m Model) deleteCmd(id string) tea.Cmd {

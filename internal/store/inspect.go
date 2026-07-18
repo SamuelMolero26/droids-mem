@@ -20,14 +20,15 @@ type Memory struct {
 	Fingerprint string `json:"fingerprint"`
 	CreatedAt   int64  `json:"created_at"`
 	UpdatedAt   int64  `json:"updated_at"`
-	// Scope ('personal'|'shared') is populated only by List — the in-process TUI
-	// sharing surface renders it. Other reads (RecentSessions, GetRow) leave it "".
+	// Scope ('personal'|'shared') is populated by List and GetRow — the in-process
+	// TUI sharing surface renders it. RecentSessions leaves it "".
 	Scope string `json:"scope,omitempty"`
 }
 
 type ListRequest struct {
 	TaskType string
 	Kind     string
+	Scope    string // "" = any; "personal"|"shared" narrows to that scope (TUI scope filter)
 	Limit    int
 }
 
@@ -59,6 +60,10 @@ func (s *Store) List(ctx context.Context, req ListRequest) (*ListResponse, error
 	if req.Kind != "" {
 		conditions = append(conditions, "kind = ?")
 		args = append(args, req.Kind)
+	}
+	if req.Scope != "" {
+		conditions = append(conditions, "scope = ?")
+		args = append(args, req.Scope)
 	}
 
 	where := ""
@@ -157,9 +162,9 @@ func (s *Store) GetRow(ctx context.Context, id string) (*Memory, error) {
 
 	var m Memory
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at
+		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at, scope
 		FROM memories WHERE id = ?
-	`, id).Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt)
+	`, id).Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.Scope)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

@@ -6,6 +6,7 @@ package tui
 
 import (
 	"context"
+	"io"
 
 	"github.com/samuelmolero26/droids-mem/internal/store"
 )
@@ -22,4 +23,11 @@ type memStore interface {
 	Prune(context.Context, store.PruneRequest) (*store.PruneResponse, error)
 	Counts(context.Context) (*store.CountsResponse, error)
 	Neighbors(context.Context, string, int) ([]store.Neighbor, error)
+	// Sharing (ADR-0028): SetScope flips one memory personal↔shared; CountShared
+	// feeds the sidebar SCOPE census. Share = flip into the git-tracked pool,
+	// then ExportShared writes it out and ImportShared pulls a teammate's in.
+	SetScope(context.Context, string, string) (bool, error)
+	CountShared(context.Context) (int, error)
+	ExportShared(context.Context, io.Writer) error
+	ImportShared(context.Context, io.Reader) (store.ImportResult, error)
 }
