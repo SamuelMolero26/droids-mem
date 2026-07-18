@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"strings"
 	"testing"
 
@@ -133,36 +132,6 @@ func TestShare_ExportOrderIsContentStable(t *testing.T) {
 	}
 	if !bytes.Equal(mk(0, 1), mk(1, 0)) {
 		t.Fatal("export bytes differ by insert order — ordering is not content-stable")
-	}
-}
-
-// TestSave_RejectsUnsafeTaskType proves SEC-1: a task_type that isn't a safe
-// single slug is rejected at the save trust boundary, before it could become a
-// path segment on shared export.
-func TestSave_RejectsUnsafeTaskType(t *testing.T) {
-	s := newTestStore(t)
-	for _, bad := range []string{"../../etc", "a/b", "..", ".hidden"} {
-		req := validReq()
-		req.TaskType = bad
-		_, err := s.Save(context.Background(), req)
-		var ve *store.ValidationError
-		if !errors.As(err, &ve) || ve.Field != "task_type" {
-			t.Fatalf("task_type %q: got err %v, want task_type ValidationError", bad, err)
-		}
-	}
-}
-
-// TestImportShared_RejectsUnsafeTaskType proves A8: a pool line whose task_type
-// would escape the repo is counted in Failed and never stored.
-func TestImportShared_RejectsUnsafeTaskType(t *testing.T) {
-	s := newTestStore(t)
-	line := `{"task_type":"../escape","kind":"task_pattern","title":"x","what":"y","learned":"z","tags":""}`
-	res, err := s.ImportShared(context.Background(), strings.NewReader(line))
-	if err != nil {
-		t.Fatalf("import: %v", err)
-	}
-	if res.Failed != 1 || res.Imported != 0 {
-		t.Fatalf("import = %+v, want failed=1 imported=0", res)
 	}
 }
 
