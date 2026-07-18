@@ -20,8 +20,8 @@ type Memory struct {
 	Fingerprint string `json:"fingerprint"`
 	CreatedAt   int64  `json:"created_at"`
 	UpdatedAt   int64  `json:"updated_at"`
-	// Scope ('personal'|'shared') is populated only by List — the share picker
-	// renders it. Other reads (RecentSessions, GetRow) leave it "".
+	// Scope ('personal'|'shared') is populated only by List — the in-process TUI
+	// sharing surface renders it. Other reads (RecentSessions, GetRow) leave it "".
 	Scope string `json:"scope,omitempty"`
 }
 
