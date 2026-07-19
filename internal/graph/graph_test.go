@@ -176,6 +176,35 @@ func TestTransitiveCallers(t *testing.T) {
 	}
 }
 
+// transitive_callers is a call-edge metric, so it is omitted for non-callable
+// symbols (types/consts/vars); the hint redirects by kind instead of reporting a
+// structural 0 an agent would misread as "safe to change" (issue #47).
+func TestBlastRadiusSuppressed(t *testing.T) {
+	m, repo := testManager(t)
+	ctx := context.Background()
+
+	cases := []struct {
+		symbol string
+		hint   string
+	}{
+		{"English", blastTypeHint}, // a type with a method: redirect to it
+		{"Greeter", blastRefHint},  // a method-less type (interface): no handle
+		{"Lang", blastRefHint},     // a const: reference-level, not indexed
+	}
+	for _, tc := range cases {
+		resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: tc.symbol})
+		if err != nil {
+			t.Fatalf("Symbol %s: %v", tc.symbol, err)
+		}
+		if resp.TransitiveCallers != nil {
+			t.Errorf("%s: transitive_callers = %v, want omitted (nil)", tc.symbol, *resp.TransitiveCallers)
+		}
+		if resp.Hint != tc.hint {
+			t.Errorf("%s: hint = %q, want %q", tc.symbol, resp.Hint, tc.hint)
+		}
+	}
+}
+
 // A name that doesn't resolve falls back to a BM25 search menu instead of
 // not-found, with no scored symbol attached.
 func TestSearchFallback(t *testing.T) {

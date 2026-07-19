@@ -3,6 +3,10 @@
 // (main → Announce → pick).
 package main
 
+// Lang is a fixture const: a non-callable symbol, so a blast-radius query on it
+// has no call edges (issue #47).
+const Lang = "en"
+
 // Greeter is the fixture interface.
 type Greeter interface {
 	Greet() string

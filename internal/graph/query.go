@@ -26,6 +26,15 @@ const (
 	blastCap        = 500 // transitive-caller count sentinel (compute + number guard)
 	staleGraphHint  = "graph is stale: the repo changed but no longer type-checks, serving the last good index"
 	pkgSymbolsLimit = "exported symbols only; re-query an unexported symbol by its name"
+	// blast radius rides entirely on call edges, and only func/method symbols are
+	// edge endpoints (byPos maps FuncDecls only). So transitive_callers is a
+	// structural 0 for a type/const/var — omitting it (issue #47) stops an agent
+	// reading 0 as "safe to change, nothing uses it". The hint redirects to the
+	// path that does carry the answer: a type WITH methods points at them
+	// (blastTypeHint); a const/var or a method-less type has no call-graph handle
+	// at all, so its uses are reference-level and unindexed (blastRefHint).
+	blastTypeHint = "transitive_callers is a call-edge metric (func/method); for a type, query its methods with direction=up to gauge dependents"
+	blastRefHint  = "transitive_callers is a call-edge metric (func/method); this symbol has no call edges, and reference-level usage is not indexed"
 )
 
 // SymbolRequest is a symbol-anchored query (ADR-0020 tool 1): point lookup,
@@ -123,11 +132,39 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	}
 	resp.Symbol = &info
 
-	tc, err := transitiveCallers(conn, id)
-	if err != nil {
-		return nil, err
+	var blastHint string // see blastTypeHint/blastRefHint above for the why
+	switch info.Kind {
+	case "func", "method":
+		tc, err := transitiveCallers(conn, id)
+		if err != nil {
+			return nil, err
+		}
+		resp.TransitiveCallers = &tc
+	case "type":
+		// Only redirect to methods when the type has some; a method-less type
+		// (a plain data struct, or an interface with no concrete method symbols)
+		// has no call-graph handle, so it gets the reference-level hint instead.
+		hasMethods, err := typeHasMethods(conn, info.QName)
+		if err != nil {
+			return nil, err
+		}
+		if hasMethods {
+			blastHint = blastTypeHint
+		} else {
+			blastHint = blastRefHint
+		}
+	case "const", "var":
+		blastHint = blastRefHint
+	default:
+		// Unknown future kind: assert nothing about its blast semantics — leave
+		// the generic neighbor hint rather than guess. Revisit if a kind is added.
 	}
-	resp.TransitiveCallers = &tc
+	if blastHint != "" {
+		resp.Hint = blastHint
+		if fresh.Stale {
+			resp.Hint = staleGraphHint + "; " + blastHint
+		}
+	}
 
 	depth := req.Depth
 	if depth < 1 {
@@ -254,6 +291,19 @@ func transitiveCallers(conn *sql.DB, id int64) (int, error) {
 		)
 		SELECT COUNT(*) FROM (SELECT sym FROM up LIMIT ?)`, id, blastCap).Scan(&n)
 	return n, err
+}
+
+// typeHasMethods reports whether the type named by qname has any indexed
+// methods, so a blast-radius query on it can point at them (a method's qname is
+// the type's qname + "." + method). A method-less type has no call-graph handle.
+// ponytail: LIKE prefix left unescaped — a '_' in the qname is a LIKE wildcard,
+// but a false match only swaps in the method-redirect hint (the agent finds no
+// methods and self-corrects), never a wrong answer, so no ESCAPE clause.
+func typeHasMethods(conn *sql.DB, qname string) (bool, error) {
+	var exists int
+	err := conn.QueryRow(`SELECT EXISTS(SELECT 1 FROM symbols
+		WHERE kind = 'method' AND qname LIKE ?)`, qname+".%").Scan(&exists)
+	return exists == 1, err
 }
 
 func scanNeighbors(rows *sql.Rows, depth int) ([]Neighbor, error) {
