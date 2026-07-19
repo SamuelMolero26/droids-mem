@@ -55,8 +55,7 @@ Single binary, layered. Don't bypass layers:
    - `context.go` — two-tier context bundle assembly (always + browse)
    - `doctor.go` / `inspect.go` — health checks (incl. ADR-0010 growth warnings), introspection
    - `prune.go` — manual deletion + `--suggest-dupes` cluster discovery (ADR-0010); never automatic
-   - `scrub.go` — thin aliases re-exporting the engine from `internal/scrub`
-   - `eval.go` — recall eval engine (ADR-0025): scores paraphrase→memory fixture pairs against `mem_search`/`mem_context`; driven by `recall_benchmark_test.go`
+   - `eval_engine_test.go` — recall eval engine (ADR-0025), test-only: scores paraphrase→memory fixture pairs against `mem_search`/`mem_context`; driven by `recall_benchmark_test.go`. Store code imports `internal/scrub` directly (no alias layer).
 4. **`internal/scrub/`** — the scrub *engine* (ADR-0008): `spec.yaml` (embedded declarative detector spec, single source of truth, pinned-hash version enforcement), `scrub.go` (single-pass collect → overlap-resolve → splice, windowed scanning), `entropy.go` (deterministic gate for usage-class detectors), `corpus.go` + `testdata/` (fixture corpus, `[CUT]` defang convention). No store imports.
 5. **`internal/db/`** — `db.go` opens connection + applies pragmas; `schema.go` holds raw DDL string.
 6. **`internal/state/`** — `LoadOrCreateToken()` is the canonical bearer-token resolver. Owns all `~/.droids-mem/` file ops.

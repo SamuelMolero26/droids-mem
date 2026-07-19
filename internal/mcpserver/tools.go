@@ -9,6 +9,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/oklog/ulid/v2"
+	"github.com/samuelmolero26/droids-mem/internal/scrub"
 
 	"github.com/samuelmolero26/droids-mem/internal/store"
 )
@@ -234,7 +235,7 @@ func toolErr(err error) *mcp.CallToolResult {
 			Actual          int                `json:"actual,omitempty"`
 			OffendingTags   []string           `json:"offending_tags,omitempty"`
 			MatchedPatterns []string           `json:"matched_patterns,omitempty"`
-			Scrub           *store.ScrubReport `json:"scrub,omitempty"`
+			Scrub           *scrub.ScrubReport `json:"scrub,omitempty"`
 		}{
 			Status:          "error",
 			Error:           "validation_error",

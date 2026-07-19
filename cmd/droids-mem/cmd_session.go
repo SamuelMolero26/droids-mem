@@ -28,7 +28,6 @@ func newSessionCmd(a *app) *cobra.Command {
 		newSessionStageCmd(),
 		newSessionDeclineCmd(),
 		newSessionMarkChangeCmd(),
-		newSessionCheckCmd(),
 		newSessionFlushCmd(a),
 		newSessionRecoverCmd(a),
 		newSessionPullCmd(a),
@@ -282,37 +281,6 @@ func newSessionMarkChangeCmd() *cobra.Command {
 				exitWith(ExitError)
 			}
 			writeJSON(map[string]any{"count": n})
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&ccID, "session", "", "Claude Code session id (required)")
-	_ = cmd.MarkFlagRequired("session")
-	return cmd
-}
-
-func newSessionCheckCmd() *cobra.Command {
-	var ccID string
-	cmd := &cobra.Command{
-		Use:   "check",
-		Short: "Report whether the session should stage now (Stop hook)",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			count, err := state.ChangeCount(ccID)
-			if err != nil {
-				writeError("check_failed", err.Error(), true)
-				exitWith(ExitError)
-			}
-			_, hasStaged, err := state.StagedModTime(ccID)
-			if err != nil {
-				writeError("check_failed", err.Error(), true)
-				exitWith(ExitError)
-			}
-			writeJSON(map[string]any{
-				"count":         count,
-				"threshold":     state.IntakeThreshold,
-				"threshold_met": count >= state.IntakeThreshold,
-				"has_staged":    hasStaged,
-				"needs_stage":   sessionNeedsStage(ccID),
-			})
 			return nil
 		},
 	}

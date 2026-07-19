@@ -139,9 +139,3 @@ func init() {
 	}
 	detectors = compiled
 }
-
-// SpecBytes returns the raw embedded spec. Exposed for the spec-hash pin
-// test and for operator tooling that renders the detector table.
-func SpecBytes() []byte {
-	return specYAML
-}

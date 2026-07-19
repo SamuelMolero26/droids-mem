@@ -83,7 +83,8 @@ start of each run — all via a local binary with zero external dependencies.`,
 				return err
 			}
 			err = db.AssertBootReady(a.db)
-			if err == nil || !db.IsBootGateError(err) {
+			var bgErr *db.BootGateError
+			if err == nil || !errors.As(err, &bgErr) {
 				return err // ready, or a failure migrating can't fix — surface as-is
 			}
 			// Auto-remediate rather than take down all memory tools until a

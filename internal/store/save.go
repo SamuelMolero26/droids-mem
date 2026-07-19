@@ -15,6 +15,7 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
+	"github.com/samuelmolero26/droids-mem/internal/scrub"
 	"github.com/samuelmolero26/droids-mem/internal/state"
 )
 
@@ -107,16 +108,16 @@ type SaveRequest struct {
 }
 
 type SaveResponse struct {
-	Status         string       `json:"status"` // saved | skipped | updated
-	ID             string       `json:"id,omitempty"`
-	SessionID      string       `json:"session_id,omitempty"`
-	MatchedID      string       `json:"matched_id,omitempty"`      // present when skipped
-	MatchedTitle   string       `json:"matched_title,omitempty"`   // echo norm-setting wording on skip
-	MatchedLearned string       `json:"matched_learned,omitempty"` // echo norm-setting wording on skip
-	Reason         string       `json:"reason,omitempty"`          // duplicate | near_duplicate
-	Score          float64      `json:"score,omitempty"`           // Jaccard similarity for near_duplicate
-	Scrub          *ScrubReport `json:"scrub,omitempty"`           // present only when redactions occurred
-	Superseded     string       `json:"superseded,omitempty"`      // id deleted via supersedes (ADR-0018); absent when target didn't match
+	Status         string             `json:"status"` // saved | skipped | updated
+	ID             string             `json:"id,omitempty"`
+	SessionID      string             `json:"session_id,omitempty"`
+	MatchedID      string             `json:"matched_id,omitempty"`      // present when skipped
+	MatchedTitle   string             `json:"matched_title,omitempty"`   // echo norm-setting wording on skip
+	MatchedLearned string             `json:"matched_learned,omitempty"` // echo norm-setting wording on skip
+	Reason         string             `json:"reason,omitempty"`          // duplicate | near_duplicate
+	Score          float64            `json:"score,omitempty"`           // Jaccard similarity for near_duplicate
+	Scrub          *scrub.ScrubReport `json:"scrub,omitempty"`           // present only when redactions occurred
+	Superseded     string             `json:"superseded,omitempty"`      // id deleted via supersedes (ADR-0018); absent when target didn't match
 }
 
 // ValidationError is the structured error envelope returned for any save-path
@@ -130,11 +131,11 @@ type ValidationError struct {
 	Retryable  bool   `json:"retryable"`
 	Suggestion string `json:"suggestion,omitempty"`
 	// Limit/Actual are set only on field_too_large, both in bytes.
-	Limit           int          `json:"limit,omitempty"`
-	Actual          int          `json:"actual,omitempty"`
-	OffendingTags   []string     `json:"offending_tags,omitempty"`
-	MatchedPatterns []string     `json:"matched_patterns,omitempty"`
-	Scrub           *ScrubReport `json:"scrub,omitempty"`
+	Limit           int                `json:"limit,omitempty"`
+	Actual          int                `json:"actual,omitempty"`
+	OffendingTags   []string           `json:"offending_tags,omitempty"`
+	MatchedPatterns []string           `json:"matched_patterns,omitempty"`
+	Scrub           *scrub.ScrubReport `json:"scrub,omitempty"`
 }
 
 func (e *ValidationError) Error() string {
@@ -283,7 +284,7 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 			scrub_pattern_version = excluded.scrub_pattern_version,
 			scrub_counts          = excluded.scrub_counts
 	`, id, sessionID, req.TaskType, req.Kind, req.Title, req.What, req.Learned, req.Tags, fp,
-		now, now, req.Scope, ScrubPatternVersion, scrubCountsJSON, req.Origin)
+		now, now, req.Scope, scrub.Version, scrubCountsJSON, req.Origin)
 	if err != nil {
 		return nil, fmt.Errorf("insert memory: %w", err)
 	}
@@ -454,7 +455,7 @@ func forceUpdateConn(ctx context.Context, conn *sql.Conn, existingID, sessionID 
 		    scope=?, scrub_pattern_version=?, scrub_counts=?
 		WHERE id=?
 	`, req.Title, req.What, req.Learned, req.Tags, fp, now,
-		req.Scope, ScrubPatternVersion, scrubCountsJSON, existingID)
+		req.Scope, scrub.Version, scrubCountsJSON, existingID)
 	if err != nil {
 		return nil, fmt.Errorf("force update: %w", err)
 	}
@@ -578,10 +579,10 @@ func findByFingerprintConn(ctx context.Context, conn *sql.Conn, fp string) (*mat
 //  6. Scrub title/what/learned.
 //  7. Empty-after-scrub check on `learned`.
 //
-// Returns the aggregated ScrubReport across all three text fields. nil when
+// Returns the aggregated scrub.ScrubReport across all three text fields. nil when
 // nothing was redacted; callers may still receive a non-nil report with
 // RedactionCount == 0 (no fields fired) for code-path uniformity.
-func validate(req *SaveRequest) (*ScrubReport, error) {
+func validate(req *SaveRequest) (*scrub.ScrubReport, error) {
 	req.TaskType = strings.ToLower(strings.TrimSpace(req.TaskType))
 	if req.TaskType == "" {
 		return nil, &ValidationError{Field: "task_type", Message: "required", Retryable: true}
@@ -664,9 +665,9 @@ func validate(req *SaveRequest) (*ScrubReport, error) {
 	req.Learned = strings.TrimSpace(req.Learned)
 	req.Tags = strings.TrimSpace(req.Tags)
 
-	titleOut, titleRep := Scrub(req.Title)
-	whatOut, whatRep := Scrub(req.What)
-	learnedOut, learnedRep := Scrub(req.Learned)
+	titleOut, titleRep := scrub.Scrub(req.Title)
+	whatOut, whatRep := scrub.Scrub(req.What)
+	learnedOut, learnedRep := scrub.Scrub(req.Learned)
 	req.Title = titleOut
 	req.What = whatOut
 	req.Learned = learnedOut
@@ -719,7 +720,7 @@ func checkTagsForSecrets(tags string) error {
 	// joined string can only detect a superset of the per-token hits — more
 	// surrounding context never suppresses a match — so a zero here guarantees
 	// every individual tag is clean.
-	if _, whole := Scrub(tags); whole.RedactionCount == 0 {
+	if _, whole := scrub.Scrub(tags); whole.RedactionCount == 0 {
 		return nil
 	}
 	// A redaction fired. Re-scrub per token to name the offenders for the
@@ -728,7 +729,7 @@ func checkTagsForSecrets(tags string) error {
 	var offending []string
 	matched := map[string]struct{}{}
 	for _, tok := range tokens {
-		_, rep := Scrub(tok)
+		_, rep := scrub.Scrub(tok)
 		if rep.RedactionCount == 0 {
 			continue
 		}
@@ -741,7 +742,7 @@ func checkTagsForSecrets(tags string) error {
 	// localized. Report the whole-string patterns so the save is still rejected
 	// rather than silently passing.
 	if len(matched) == 0 {
-		_, whole := Scrub(tags)
+		_, whole := scrub.Scrub(tags)
 		for name := range whole.PerPatternCounts {
 			matched[name] = struct{}{}
 		}
@@ -770,7 +771,7 @@ func checkIdentifierForSecrets(field, value string) error {
 	if value == "" {
 		return nil
 	}
-	_, rep := Scrub(value)
+	_, rep := scrub.Scrub(value)
 	if rep.RedactionCount == 0 {
 		return nil
 	}
@@ -792,12 +793,12 @@ func checkIdentifierForSecrets(field, value string) error {
 // aggregateScrubReports folds the per-field reports into one row-level
 // summary. FieldsRedacted lists fields with at least one redaction in stable
 // (title, what, learned) order so callers see deterministic output.
-func aggregateScrubReports(title, what, learned ScrubReport) ScrubReport {
-	agg := ScrubReport{
+func aggregateScrubReports(title, what, learned scrub.ScrubReport) scrub.ScrubReport {
+	agg := scrub.ScrubReport{
 		PerPatternCounts: map[string]int{},
-		PatternVersion:   ScrubPatternVersion,
+		PatternVersion:   scrub.Version,
 	}
-	fold := func(field string, r ScrubReport) {
+	fold := func(field string, r scrub.ScrubReport) {
 		if r.RedactionCount == 0 {
 			return
 		}
@@ -823,7 +824,7 @@ func isEmptyAfterScrub(s string) bool {
 
 // scrubReportForResponse returns a pointer suitable for the response envelope
 // per decision #7: only emitted when at least one redaction fired.
-func scrubReportForResponse(agg *ScrubReport) *ScrubReport {
+func scrubReportForResponse(agg *scrub.ScrubReport) *scrub.ScrubReport {
 	if agg == nil || agg.RedactionCount == 0 {
 		return nil
 	}
@@ -834,7 +835,7 @@ func scrubReportForResponse(agg *ScrubReport) *ScrubReport {
 // scrubCountsForStorage marshals the per-row scrub_counts JSON column. NULL
 // when no redactions fired so the column stays sparse and `doctor
 // --scrub-stats` can filter via json_extract IS NOT NULL.
-func scrubCountsForStorage(agg *ScrubReport) (sql.NullString, error) {
+func scrubCountsForStorage(agg *scrub.ScrubReport) (sql.NullString, error) {
 	if agg == nil || agg.RedactionCount == 0 {
 		return sql.NullString{}, nil
 	}

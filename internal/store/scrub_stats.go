@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+
+	"github.com/samuelmolero26/droids-mem/internal/scrub"
 )
 
 // ScrubStatsReport is the shape emitted by `droids-mem doctor --scrub-stats`.
@@ -27,7 +29,7 @@ func (s *Store) ScrubStats() (*ScrubStatsReport, error) {
 	rep := &ScrubStatsReport{
 		Status:         "ok",
 		PerPattern:     map[string]int{},
-		PatternVersion: ScrubPatternVersion,
+		PatternVersion: scrub.Version,
 	}
 
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memories`).

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/samuelmolero26/droids-mem/internal/store"
+	"github.com/samuelmolero26/droids-mem/internal/scrub"
 )
 
 func TestScrubStats_EmptyCorpus(t *testing.T) {
@@ -27,8 +27,8 @@ func TestScrubStats_EmptyCorpus(t *testing.T) {
 	if len(rep.PerPattern) != 0 {
 		t.Errorf("per_pattern = %v, want empty", rep.PerPattern)
 	}
-	if rep.PatternVersion != store.ScrubPatternVersion {
-		t.Errorf("pattern_version = %d, want %d", rep.PatternVersion, store.ScrubPatternVersion)
+	if rep.PatternVersion != scrub.Version {
+		t.Errorf("pattern_version = %d, want %d", rep.PatternVersion, scrub.Version)
 	}
 }
 
@@ -85,7 +85,7 @@ func TestScrubStats_AggregatesAcrossRows(t *testing.T) {
 }
 
 func TestRunCorpus_AllPass(t *testing.T) {
-	rep, err := store.RunCorpus()
+	rep, err := scrub.RunCorpus()
 	if err != nil {
 		t.Fatalf("RunCorpus: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestRunCorpus_AllPass(t *testing.T) {
 	if rep.Passed+rep.Failed != rep.Total {
 		t.Errorf("passed+failed=%d, total=%d", rep.Passed+rep.Failed, rep.Total)
 	}
-	if rep.PatternVersion != store.ScrubPatternVersion {
-		t.Errorf("pattern_version = %d, want %d", rep.PatternVersion, store.ScrubPatternVersion)
+	if rep.PatternVersion != scrub.Version {
+		t.Errorf("pattern_version = %d, want %d", rep.PatternVersion, scrub.Version)
 	}
 }
