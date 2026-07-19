@@ -309,6 +309,9 @@ func implementsEdges(pkgs []*packages.Package, byPos map[string]*symRow) map[[2]
 			if !ok {
 				continue
 			}
+			if named.TypeParams().Len() > 0 {
+				continue // generic type: constraint satisfaction is out of v1 scope (#48)
+			}
 			row, ok := resolve(tn)
 			if !ok {
 				continue // not a repo-local symbol (or unmappable position)
