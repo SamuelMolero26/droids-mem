@@ -58,6 +58,18 @@ func (s *Store) ExportShared(ctx context.Context, w io.Writer) error {
 	return nil
 }
 
+// CountShared returns how many scope='shared' memories exist. Reserved for the
+// in-process TUI sharing surface; no CLI caller after the transport was dropped.
+func (s *Store) CountShared(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM memories WHERE scope = 'shared'`).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count shared: %w", err)
+	}
+	return n, nil
+}
+
 // ImportResult reports how an import batch landed.
 type ImportResult struct {
 	Imported int `json:"imported"` // rows newly saved

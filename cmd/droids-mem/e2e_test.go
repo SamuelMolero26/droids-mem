@@ -1,7 +1,6 @@
 package main_test
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -44,23 +43,6 @@ func cli(t *testing.T, dbPath string, allowedExits []int, args ...string) []byte
 				}
 			}
 			t.Fatalf("cli %v exited %d (stderr: %s)", args, code, ee.Stderr)
-		}
-		t.Fatalf("cli %v: %v", args, err)
-	}
-	return out
-}
-
-// cliStdin runs the binary feeding stdin, for commands like `import`.
-func cliStdin(t *testing.T, dbPath string, stdin []byte, args ...string) []byte {
-	t.Helper()
-	cmd := exec.Command(binaryPath, args...)
-	cmd.Env = append(os.Environ(), "DROIDS_MEM_DB="+dbPath)
-	cmd.Stdin = bytes.NewReader(stdin)
-	out, err := cmd.Output()
-	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			t.Fatalf("cli %v exited %d (stderr: %s)", args, ee.ExitCode(), ee.Stderr)
 		}
 		t.Fatalf("cli %v: %v", args, err)
 	}
@@ -228,57 +210,4 @@ func TestE2E_SecondRunUsesFirstRunMemories(t *testing.T) {
 	if listResp.Total < 4 {
 		t.Errorf("expected at least 4 memories after 2 runs, got %d", listResp.Total)
 	}
-}
-
-// TestE2E_ShareExportImportRoundTrip drives the shared-context surface end to
-// end: private-by-default, share grant, export, cross-db import, dedupe, and
-// the not-found exit code (ADR-0028).
-func TestE2E_ShareExportImportRoundTrip(t *testing.T) {
-	src := filepath.Join(t.TempDir(), "src.db")
-
-	saveOut := cli(t, src, nil, "save",
-		"--task-type", "go", "--kind", "task_pattern",
-		"--title", "use errgroup", "--what", "fan-out",
-		"--learned", "errgroup bounds goroutine fan-out",
-	)
-	var saved struct {
-		ID string `json:"id"`
-	}
-	mustParseJSON(t, saveOut, &saved)
-
-	// A second memory left personal — must never export.
-	cli(t, src, nil, "save",
-		"--task-type", "go", "--kind", "user_rule",
-		"--title", "private note", "--what", "x", "--learned", "keep this local",
-	)
-
-	// Export before sharing → empty (private by default).
-	if out := cli(t, src, nil, "export"); len(bytes.TrimSpace(out)) != 0 {
-		t.Fatalf("export before share leaked rows: %s", out)
-	}
-
-	// Share only the errgroup memory.
-	cli(t, src, nil, "share", "--id", saved.ID)
-
-	pool := cli(t, src, nil, "export")
-	if n := bytes.Count(bytes.TrimSpace(pool), []byte("\n")) + 1; n != 1 {
-		t.Fatalf("export = %d lines, want exactly the shared row:\n%s", n, pool)
-	}
-
-	// Import into a fresh DB via stdin.
-	dst := filepath.Join(t.TempDir(), "dst.db")
-	var res struct{ Imported, Skipped, Failed int }
-	mustParseJSON(t, cliStdin(t, dst, pool, "import"), &res)
-	if res.Imported != 1 || res.Failed != 0 {
-		t.Fatalf("import = %+v, want imported=1 failed=0", res)
-	}
-
-	// Re-import is idempotent — dedupe skips it.
-	mustParseJSON(t, cliStdin(t, dst, pool, "import"), &res)
-	if res.Imported != 0 || res.Skipped != 1 {
-		t.Fatalf("re-import = %+v, want imported=0 skipped=1", res)
-	}
-
-	// Unknown id → exit 3 (not found).
-	cli(t, dst, []int{3}, "share", "--id", "mem_does_not_exist")
 }

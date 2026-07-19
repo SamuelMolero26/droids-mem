@@ -24,6 +24,13 @@ var (
 	colDanger   = lipgloss.Color("#D9484D") // delete confirmation; error_resolution dot + anchor ring
 	colConnBlue = lipgloss.Color("#0E6CDF") // session_summary dot (Connection Layout mockup)
 
+	// Sharing (share-confirm mockup — amber dialog mirrors the delete-confirm
+	// danger accent; green marks the kept ✓ SHARED column).
+	colShareGreen = lipgloss.Color("#446D57") // ✓ SHARED label
+	colAmber      = lipgloss.Color("#BE986B") // share-confirm accent + button
+	colAmberDim   = lipgloss.Color("#665C50") // share-confirm border
+	colStripped   = colDanger                 // ✗ STRIPPED column label
+
 	// Text ramp.
 	colBright = lipgloss.Color("#E8E8E8") // selected title
 	colText   = lipgloss.Color("#C6C6C6") // titles, body
@@ -71,6 +78,20 @@ var (
 	footerStyle = lipgloss.NewStyle().Foreground(colDim)
 	footerKey   = lipgloss.NewStyle().Foreground(colMeta)
 	dangerStyle = lipgloss.NewStyle().Bold(true).Foreground(colDanger)
+
+	// Scope filter + sharing (share-registry mockups).
+	sharedChip  = lipgloss.NewStyle().Foreground(colSelect)            // ◇ SHARED row/detail chip (cyan)
+	selectDot   = lipgloss.NewStyle().Foreground(colAmber)             // ● multi-select marker
+	scopeActive = lipgloss.NewStyle().Foreground(colSelect).Bold(true) // selected SCOPE row
+
+	// Share-confirm dialog — amber bordered box, SHARED/STRIPPED columns, warning.
+	shareBox = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).BorderForeground(colAmberDim).Padding(0, 2)
+	shareTitle = lipgloss.NewStyle().Bold(true).Foreground(colBright)
+	shareKept  = lipgloss.NewStyle().Foreground(colShareGreen) // ✓ SHARED label
+	shareStrip = lipgloss.NewStyle().Foreground(colStripped)   // ✗ STRIPPED label
+	shareWarn  = lipgloss.NewStyle().Foreground(colAmber)
+	shareBtn   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#0A0A0A")).Background(colAmber).Padding(0, 1)
 )
 
 // chromeRow lays out a full-width header/search/footer row. No background — the

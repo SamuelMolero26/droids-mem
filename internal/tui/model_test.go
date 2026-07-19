@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"io"
 	"testing"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -17,12 +18,16 @@ type fakeStore struct {
 	neighborsResp []store.Neighbor
 
 	listCalls, searchCalls, getCalls, pruneCalls, countsCalls, neighborsCalls int
+	setScopeCalls                                                             int
 	lastList                                                                  store.ListRequest
 	lastSearch                                                                store.SearchRequest
 	lastGetID                                                                 string
 	lastPrune                                                                 store.PruneRequest
 	lastNeighborsID                                                           string
+	scopeSets                                                                 []scopeSet
 }
+
+type scopeSet struct{ id, scope string }
 
 func (f *fakeStore) List(_ context.Context, r store.ListRequest) (*store.ListResponse, error) {
 	f.listCalls++
@@ -61,6 +66,16 @@ func (f *fakeStore) Neighbors(_ context.Context, id string, _ int) ([]store.Neig
 	f.neighborsCalls++
 	f.lastNeighborsID = id
 	return f.neighborsResp, nil
+}
+func (f *fakeStore) SetScope(_ context.Context, id, scope string) (bool, error) {
+	f.setScopeCalls++
+	f.scopeSets = append(f.scopeSets, scopeSet{id, scope})
+	return true, nil
+}
+func (f *fakeStore) CountShared(_ context.Context) (int, error)        { return 0, nil }
+func (f *fakeStore) ExportShared(_ context.Context, _ io.Writer) error { return nil }
+func (f *fakeStore) ImportShared(_ context.Context, _ io.Reader) (store.ImportResult, error) {
+	return store.ImportResult{}, nil
 }
 
 func upd(t *testing.T, m Model, msg tea.Msg) (Model, tea.Cmd) {
@@ -136,6 +151,10 @@ func key(s string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyCtrlD}
 	case "ctrl+g":
 		return tea.KeyMsg{Type: tea.KeyCtrlG}
+	case "ctrl+s":
+		return tea.KeyMsg{Type: tea.KeyCtrlS}
+	case "ctrl+x":
+		return tea.KeyMsg{Type: tea.KeyCtrlX}
 	case "esc":
 		return tea.KeyMsg{Type: tea.KeyEsc}
 	default:
@@ -349,6 +368,109 @@ func TestConfirm_CancelDoesNotPrune(t *testing.T) {
 	}
 	if fs.pruneCalls != 0 {
 		t.Errorf("cancel pruned anyway: %d calls", fs.pruneCalls)
+	}
+}
+
+func TestScopeCycle_FiltersAndReloads(t *testing.T) {
+	fs := &fakeStore{}
+	m := New(fs) // empty search box → `s` cycles scope
+	m, cmd := upd(t, m, key("s"))
+	if m.query.scope != "personal" {
+		t.Fatalf("first `s` → scope %q, want personal", m.query.scope)
+	}
+	runCmd(cmd)
+	if fs.lastList.Scope != "personal" {
+		t.Errorf("reload scope filter = %q, want personal", fs.lastList.Scope)
+	}
+	m, _ = upd(t, m, key("s")) // personal → shared
+	if m.query.scope != "shared" {
+		t.Errorf("second `s` → scope %q, want shared", m.query.scope)
+	}
+	m, _ = upd(t, m, key("s")) // shared → all
+	if m.query.scope != "" {
+		t.Errorf("third `s` → scope %q, want all (empty)", m.query.scope)
+	}
+	// esc clears an active scope filter (reload back to all).
+	m, _ = upd(t, m, key("s")) // scope=personal
+	m, _ = upd(t, m, key("esc"))
+	if m.query.scope != "" || m.scopeIdx != 0 {
+		t.Errorf("esc did not clear scope: scope=%q idx=%d", m.query.scope, m.scopeIdx)
+	}
+}
+
+func TestScopeKey_IsLiteralWhenSearching(t *testing.T) {
+	m := New(&fakeStore{})
+	m, _ = upd(t, m, key("c")) // search box now non-empty
+	m, _ = upd(t, m, key("s")) // `s` must type, not cycle scope
+	if m.query.scope != "" {
+		t.Errorf("`s` cycled scope mid-search: %q", m.query.scope)
+	}
+	if m.search.Value() != "cs" {
+		t.Errorf("search value = %q, want cs", m.search.Value())
+	}
+}
+
+func TestShare_SelectionConfirmFlipsScope(t *testing.T) {
+	fs := &fakeStore{}
+	m := New(fs)
+	m.list.SetItems([]list.Item{
+		listItem{id: "a", title: "A"}, listItem{id: "b", title: "B"},
+	})
+	m, _ = upd(t, m, key(" ")) // select cursor row "a"
+	if !m.selected["a"] {
+		t.Fatal("space did not select cursor row")
+	}
+	m, _ = upd(t, m, key("ctrl+s")) // open share dialog
+	if m.mode != modeShare {
+		t.Fatalf("ctrl+s → mode %v, want modeShare", m.mode)
+	}
+	m.repoInput.SetValue("/tmp/pool") // a repo path is required to confirm
+	m.push = func(_ context.Context, _ string, _ memStore, _ int) error { return nil }
+	m, cmd := upd(t, m, key("enter")) // confirm
+	if m.mode != modeNormal {
+		t.Errorf("post-share mode = %v, want normal", m.mode)
+	}
+	msg, ok := runCmd(cmd).(sharedMsg)
+	if !ok || msg.n != 1 {
+		t.Fatalf("share cmd = %+v, want sharedMsg{n:1}", msg)
+	}
+	if fs.setScopeCalls != 1 || fs.scopeSets[0] != (scopeSet{"a", "shared"}) {
+		t.Errorf("SetScope = %d %+v, want 1× {a shared}", fs.setScopeCalls, fs.scopeSets)
+	}
+	// sharedMsg clears selection, sets the footer status, reloads.
+	m, _ = upd(t, m, msg)
+	if len(m.selected) != 0 || m.status == "" {
+		t.Errorf("post-share: selected=%d status=%q, want cleared + status set", len(m.selected), m.status)
+	}
+}
+
+func TestQuit_BareQFromEmptySearch(t *testing.T) {
+	m := New(&fakeStore{})
+	// q with an empty search box quits outright.
+	if _, cmd := upd(t, m, key("q")); cmd == nil || runCmd(cmd) != tea.Quit() {
+		t.Error("bare q did not quit")
+	}
+	// q while searching is a literal rune, not quit.
+	m, _ = upd(t, m, key("f"))
+	m2, cmd := upd(t, m, key("q"))
+	if cmd != nil && runCmd(cmd) == tea.Quit() {
+		t.Error("q quit while search box had text")
+	}
+	if m2.search.Value() != "fq" {
+		t.Errorf("q not typed into search: %q", m2.search.Value())
+	}
+}
+
+func TestUnshare_FlipsCursorRowToPersonal(t *testing.T) {
+	fs := &fakeStore{}
+	m := New(fs)
+	m.list.SetItems([]list.Item{listItem{id: "a", title: "A", shared: true}})
+	m, cmd := upd(t, m, key("ctrl+x"))
+	if _, ok := runCmd(cmd).(scopeChangedMsg); !ok {
+		t.Fatal("ctrl+x on shared row did not emit scopeChangedMsg")
+	}
+	if fs.setScopeCalls != 1 || fs.scopeSets[0] != (scopeSet{"a", "personal"}) {
+		t.Errorf("unshare SetScope = %d %+v, want 1× {a personal}", fs.setScopeCalls, fs.scopeSets)
 	}
 }
 

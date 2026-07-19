@@ -36,7 +36,11 @@ func (m Model) headerView() string {
 }
 
 func (m Model) searchView() string {
-	pill := pillStyle.Render("kind:"+kindLabel(m.query.kind)) + " " + hintStyle.Render("⇥ cycle")
+	pill := pillStyle.Render("kind:" + kindLabel(m.query.kind))
+	if m.query.scope != "" { // active scope filter shows as a cyan chip left of kind
+		pill = sharedChip.Render("scope:"+m.query.scope+" ×") + " " + pill
+	}
+	pill += " " + hintStyle.Render("⇥ cycle")
 	left := m.search.View()
 	gap := max(1, m.width-lipgloss.Width(left)-lipgloss.Width(pill))
 	return chromeRow(m.width).Render(left + strings.Repeat(" ", gap) + pill)
@@ -56,10 +60,65 @@ func (m Model) bodyView(bodyH int) string {
 	if m.mode == modeConfirm {
 		return row + "\n" + dangerStyle.Render(fmt.Sprintf("Delete %q?  [y/N]", m.confirmTarget.title))
 	}
+	if m.mode == modeShare { // amber confirm dialog, centered over a dimmed list
+		return lipgloss.Place(m.width, bodyH, lipgloss.Center, lipgloss.Center, m.shareDialog())
+	}
 	return row
 }
 
-// sidebarView renders the KINDS census.
+// shareDialog is the share-confirm modal (share-registry mockup, registry chrome
+// dropped): what will be shared, the SHARED/STRIPPED split, and the public-pool
+// warning. It flips the targeted memories into the git-tracked shared pool.
+func (m Model) shareDialog() string {
+	ids := m.shareTargets()
+	n := len(ids)
+	var b strings.Builder
+	b.WriteString(shareWarn.Render("⚠ ") + shareTitle.Render(fmt.Sprintf("Share %d %s?", n, plural(n, "memory", "memories"))))
+	b.WriteString("\n")
+	b.WriteString(metaStyle.Render("into the shared pool · public"))
+	b.WriteString("\n\n")
+
+	// Rows: title + kind chip for each target (cap the list so the box stays sane).
+	for i, id := range ids {
+		if i >= 6 {
+			b.WriteString(metaStyle.Render(fmt.Sprintf("  …and %d more", n-i)))
+			b.WriteByte('\n')
+			break
+		}
+		title := id
+		if it, ok := m.itemByID(id); ok {
+			title = it.title
+			b.WriteString(selectDot.Render("● ") + bodyStyle.Render(truncate(title, 40)) + " " + pillStyle.Render(it.kind))
+		} else {
+			b.WriteString(selectDot.Render("● ") + bodyStyle.Render(truncate(title, 40)))
+		}
+		b.WriteByte('\n')
+	}
+	b.WriteString("\n")
+	b.WriteString(shareKept.Render("✓ SHARED  ") + metaStyle.Render("content · tags · kind"))
+	b.WriteString("\n")
+	b.WriteString(shareStrip.Render("✗ STRIPPED ") + metaStyle.Render("local paths · session ids · timestamps"))
+	b.WriteString("\n\n")
+	b.WriteString(shareWarn.Render("⚠ Shared copies enter the git-tracked pool and can't be fully\n  retracted — anyone who pulled keeps their copy."))
+	b.WriteString("\n\n")
+	b.WriteString(metaStyle.Render("push to repo:") + " " + m.repoInput.View())
+	b.WriteString("\n\n")
+	b.WriteString(footerKey.Render("esc") + footerStyle.Render(" cancel") + "   " + shareBtn.Render(fmt.Sprintf("↵ Push %d", n)))
+	return shareBox.Render(b.String())
+}
+
+// itemByID finds a loaded list row by id (for the share dialog's title lookup).
+func (m Model) itemByID(id string) (listItem, bool) {
+	for _, raw := range m.list.Items() {
+		if it, ok := raw.(listItem); ok && it.id == id {
+			return it, true
+		}
+	}
+	return listItem{}, false
+}
+
+// sidebarView renders the KINDS census (arrow-navigable) and the SCOPE section
+// (cycled by `s`, not the cursor) — the scope-filter mockup.
 func (m Model) sidebarView() string {
 	var b strings.Builder
 	b.WriteString(sectionLabel.Render("KINDS"))
@@ -80,16 +139,51 @@ func (m Model) sidebarView() string {
 		b.WriteString(count)
 		b.WriteByte('\n')
 	}
+
+	b.WriteString("\n")
+	b.WriteString(sectionLabel.Render("SCOPE"))
+	b.WriteString("\n\n")
+	personal := max(0, m.total-m.shared)
+	for _, sc := range scopeFilters {
+		n := m.total
+		switch sc {
+		case "personal":
+			n = personal
+		case "shared":
+			n = m.shared
+		}
+		label := fmt.Sprintf("%-17s", scopeLabel(sc))
+		count := countStyle.Render(fmt.Sprintf("%d", n))
+		if sc == m.query.scope { // active filter — highlighted, not cursor-marked
+			b.WriteString(scopeActive.Render("▸ " + label))
+		} else {
+			b.WriteString("  ")
+			b.WriteString(sidebarUnsel.Render(label))
+		}
+		b.WriteString(count)
+		b.WriteByte('\n')
+	}
 	return b.String()
 }
 
 func (m Model) footerView() string {
 	left := footerKey.Render("↵") + footerStyle.Render(" open   ") +
-		footerKey.Render("^d") + footerStyle.Render(" delete   ") +
-		footerKey.Render("⇥") + footerStyle.Render(" kind")
-	right := footerKey.Render("esc") + footerStyle.Render(" quit")
+		footerKey.Render("^s") + footerStyle.Render(" share   ") +
+		footerKey.Render("^p") + footerStyle.Render(" pull   ") +
+		footerKey.Render("s") + footerStyle.Render(" scope   ") +
+		footerKey.Render("^d") + footerStyle.Render(" delete")
+	if it, ok := m.list.SelectedItem().(listItem); ok && it.shared {
+		left += "   " + footerKey.Render("^x") + footerStyle.Render(" unshare")
+	}
+	if n := len(m.selected); n > 0 {
+		left = footerStyle.Render(fmt.Sprintf("%d selected", n)) + "   " + left
+	}
 	if m.status != "" {
 		left = footerStyle.Render(m.status) + "   " + left
+	}
+	right := footerKey.Render("q") + footerStyle.Render(" quit")
+	if m.query.scope != "" {
+		right = footerKey.Render("esc") + footerStyle.Render(" clear filter")
 	}
 	gap := max(1, m.width-lipgloss.Width(left)-lipgloss.Width(right))
 	return chromeRow(m.width).Render(left + strings.Repeat(" ", gap) + right)
@@ -114,10 +208,11 @@ func renderDetail(mem *store.Memory, neighbors []store.Neighbor, w int) string {
 	if mem.TaskType != "" {
 		chips = append(chips, pillStyle.Render(mem.TaskType))
 	}
-	if len(chips) > 0 {
-		b.WriteString(strings.Join(chips, " "))
-		b.WriteString("\n\n")
+	if mem.Scope == "shared" { // shared memories carry a cyan ◇ chip (scope-filter mockup)
+		chips = append(chips, sharedChip.Render("◇ shared"))
 	}
+	b.WriteString(strings.Join(chips, " "))
+	b.WriteString("\n\n")
 
 	body := mem.Learned
 	if body == "" {
