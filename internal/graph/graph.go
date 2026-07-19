@@ -50,6 +50,16 @@ CREATE TABLE edges (
   PRIMARY KEY (caller, callee)
 ) WITHOUT ROWID;
 CREATE INDEX idx_edges_callee ON edges(callee);
+-- Implements edges (issue #48): iface → concrete type it is satisfied by.
+-- Exact (types.Implements), not CHA-approximate. Both endpoints are repo-local
+-- symbols.id, mirroring edges. Reverse index serves the "what does X satisfy"
+-- direction (satisfies) the same way idx_edges_callee serves callers.
+CREATE TABLE implements (
+  iface INTEGER NOT NULL,
+  impl  INTEGER NOT NULL,
+  PRIMARY KEY (iface, impl)
+) WITHOUT ROWID;
+CREATE INDEX idx_implements_impl ON implements(impl);
 -- Ranks symbols by relevance to a free-text task phrase (the graph_symbol
 -- search fallback). rowid == symbols.id, so a MATCH joins straight back.
 -- Populated wholesale in writeGraphDB — the graph never updates in place, so
