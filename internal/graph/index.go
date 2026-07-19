@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/token"
+	"go/types"
 	"os"
 	"path/filepath"
 	"strings"
@@ -99,8 +100,9 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	if err != nil {
 		return err
 	}
+	impls := implementsEdges(pkgs, byPos)
 
-	return writeGraphDB(dbPath, repo, module, stampVal, symbols, edges)
+	return writeGraphDB(dbPath, repo, module, stampVal, symbols, edges, impls)
 }
 
 func shortPkgPath(pkgPath, module string) string {
@@ -194,8 +196,17 @@ func appendDeclSymbols(out []*symRow, byPos map[string]*symRow, fset *token.File
 					doc = sp.Doc.Text()
 				}
 				src := slice(sp.Pos(), sp.End())
-				out = append(out, add(sp.Name.Pos(), sp.Name.Name, "type",
-					firstLine("type "+collapseWS(slice(sp.Pos(), sp.Type.Pos()))+"…"), doc, src))
+				kind := "type"
+				if _, isIface := sp.Type.(*ast.InterfaceType); isIface {
+					kind = "interface" // issue #48: interface vs concrete drives implements
+				}
+				row := add(sp.Name.Pos(), sp.Name.Name, kind,
+					firstLine("type "+collapseWS(slice(sp.Pos(), sp.Type.Pos()))+"…"), doc, src)
+				out = append(out, row)
+				// Register the type's position so implementsEdges can map a
+				// types.Object back to this row (same file:line key SSA uses).
+				tp := fset.Position(sp.Name.Pos())
+				byPos[fmt.Sprintf("%s:%d", tp.Filename, tp.Line)] = row
 			case *ast.ValueSpec:
 				if sp.Doc != nil {
 					doc = sp.Doc.Text()
@@ -261,9 +272,75 @@ func callEdges(pkgs []*packages.Package, byPos map[string]*symRow) (map[[2]int64
 	return edges, nil
 }
 
+// implementsEdges computes exact interface-satisfaction relations (issue #48):
+// for every repo-local interface, the concrete repo types whose method set
+// satisfies it. Uses types.Implements over the POINTER method set, so a type
+// that satisfies an interface only through pointer-receiver methods (the common
+// Go idiom) is still captured. Zero-method interfaces (any, interface{}) are
+// skipped — every type satisfies them, so the edge is noise, not signal. Both
+// endpoints map back to symbol rows by declaration position via byPos (which
+// appendDeclSymbols now registers for types too); an endpoint that does not map
+// (a dep type reachable through NeedDeps) is dropped, keeping the graph
+// repo-local — the same boundary callEdges draws at a dependency.
+func implementsEdges(pkgs []*packages.Package, byPos map[string]*symRow) map[[2]int64]bool {
+	fset := pkgs[0].Fset
+	resolve := func(obj types.Object) (*symRow, bool) {
+		if obj == nil || !obj.Pos().IsValid() {
+			return nil, false
+		}
+		p := fset.Position(obj.Pos())
+		row, ok := byPos[fmt.Sprintf("%s:%d", p.Filename, p.Line)]
+		return row, ok
+	}
+
+	type namedType struct {
+		row *symRow
+		typ *types.Named
+	}
+	var ifaces, concretes []namedType
+	for _, p := range pkgs {
+		scope := p.Types.Scope()
+		for _, name := range scope.Names() {
+			tn, ok := scope.Lookup(name).(*types.TypeName)
+			if !ok || tn.IsAlias() {
+				continue
+			}
+			named, ok := tn.Type().(*types.Named)
+			if !ok {
+				continue
+			}
+			row, ok := resolve(tn)
+			if !ok {
+				continue // not a repo-local symbol (or unmappable position)
+			}
+			if iface, ok := named.Underlying().(*types.Interface); ok {
+				if iface.NumMethods() == 0 {
+					continue // any/interface{}: universal satisfaction = noise
+				}
+				ifaces = append(ifaces, namedType{row, named})
+			} else {
+				concretes = append(concretes, namedType{row, named})
+			}
+		}
+	}
+
+	edges := map[[2]int64]bool{}
+	for _, iface := range ifaces {
+		it, _ := iface.typ.Underlying().(*types.Interface)
+		for _, c := range concretes {
+			// Pointer method set is the superset (value + pointer receivers), so
+			// this catches types satisfying the interface only via *T methods.
+			if types.Implements(types.NewPointer(c.typ), it) {
+				edges[[2]int64{iface.row.id, c.row.id}] = true
+			}
+		}
+	}
+	return edges
+}
+
 // writeGraphDB builds the new db at dbPath+".tmp" and renames it into place,
 // so readers never observe a half-built graph.
-func writeGraphDB(dbPath, repo, module, stampVal string, symbols []*symRow, edges map[[2]int64]bool) error {
+func writeGraphDB(dbPath, repo, module, stampVal string, symbols []*symRow, edges, impls map[[2]int64]bool) error {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o750); err != nil {
 		return fmt.Errorf("create graph dir: %w", err)
 	}
@@ -309,6 +386,16 @@ func writeGraphDB(dbPath, repo, module, stampVal string, symbols []*symRow, edge
 		defer edgeIns.Close()
 		for e := range edges {
 			if _, err := edgeIns.Exec(e[0], e[1]); err != nil {
+				return err
+			}
+		}
+		implIns, err := tx.Prepare(`INSERT OR IGNORE INTO implements (iface, impl) VALUES (?,?)`)
+		if err != nil {
+			return err
+		}
+		defer implIns.Close()
+		for e := range impls {
+			if _, err := implIns.Exec(e[0], e[1]); err != nil {
 				return err
 			}
 		}

@@ -35,6 +35,11 @@ const (
 	// at all, so its uses are reference-level and unindexed (blastRefHint).
 	blastTypeHint = "transitive_callers is a call-edge metric (func/method); for a type, query its methods with direction=up to gauge dependents"
 	blastRefHint  = "transitive_callers is a call-edge metric (func/method); this symbol has no call edges, and reference-level usage is not indexed"
+	// implementers ARE the blast radius of a method-signature change on an
+	// interface — the exact must-update set (issue #48), not the call-edge
+	// closure. Scoped so implementers_total:0 reads as "no REPO implementer",
+	// never "implements nothing" (a repo type may still satisfy a stdlib iface).
+	implementersHint = "implementers are the concrete types satisfying this interface — the exact set a method-signature change must update (repo-defined types only; stdlib/dependency implementers are not indexed); re-query one by its qname for its body"
 )
 
 // SymbolRequest is a symbol-anchored query (ADR-0020 tool 1): point lookup,
@@ -82,8 +87,19 @@ type SymbolResponse struct {
 	// call this one (up-closure, capped). A pointer so 0 ("safe to change,
 	// nothing calls it") is distinct from absent (a search-menu response, no
 	// single symbol to score). Set only on an exact match.
-	TransitiveCallers *int   `json:"transitive_callers,omitempty"`
-	Hint              string `json:"hint,omitempty"`
+	TransitiveCallers *int `json:"transitive_callers,omitempty"`
+	// Implementers lists the concrete types satisfying this interface (issue
+	// #48) — set only when the symbol is an interface. ImplementersTotal is the
+	// true count even when Implementers is capped, and a pointer so 0 ("nobody
+	// implements it — a dead interface, safe to change") is definitive, distinct
+	// from absent ("not an interface").
+	Implementers      []Neighbor `json:"implementers,omitempty"`
+	ImplementersTotal *int       `json:"implementers_total,omitempty"`
+	// Satisfies lists the repo-defined interfaces a concrete type implements.
+	// Absent means it satisfies none (no *_total: a concrete type satisfies few
+	// interfaces, never near the neighbor cap, so the list is its own count).
+	Satisfies []Neighbor `json:"satisfies,omitempty"`
+	Hint      string     `json:"hint,omitempty"`
 }
 
 // Symbol resolves and answers a symbol-anchored query against repo's graph.
@@ -140,10 +156,26 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 			return nil, err
 		}
 		resp.TransitiveCallers = &tc
+	case "interface":
+		// implementers ARE the interface's blast radius — the exact, not
+		// CHA-approximate, set a method-signature change must update (issue #48).
+		impls, total, trunc, err := implementers(conn, id)
+		if err != nil {
+			return nil, err
+		}
+		resp.Implementers = impls
+		resp.ImplementersTotal = &total
+		resp.Truncated = resp.Truncated || trunc
+		blastHint = implementersHint
 	case "type":
-		// Only redirect to methods when the type has some; a method-less type
-		// (a plain data struct, or an interface with no concrete method symbols)
-		// has no call-graph handle, so it gets the reference-level hint instead.
+		// A concrete type: list the interfaces it satisfies, then redirect the
+		// (call-edge) blast question to its methods — or to reference-level when
+		// it has none, which has no call-graph handle at all (issue #47).
+		sat, err := satisfies(conn, id)
+		if err != nil {
+			return nil, err
+		}
+		resp.Satisfies = sat
 		hasMethods, err := typeHasMethods(conn, info.QName)
 		if err != nil {
 			return nil, err
@@ -304,6 +336,43 @@ func typeHasMethods(conn *sql.DB, qname string) (bool, error) {
 	err := conn.QueryRow(`SELECT EXISTS(SELECT 1 FROM symbols
 		WHERE kind = 'method' AND qname LIKE ?)`, qname+".%").Scan(&exists)
 	return exists == 1, err
+}
+
+// implementers lists concrete types satisfying interface id, capped at
+// maxNeighbors, plus the true total so a god-interface's capped list still
+// reports its real size (AXI §4 — spares the agent a re-count call).
+func implementers(conn *sql.DB, id int64) (rows []Neighbor, total int, truncated bool, err error) {
+	if err = conn.QueryRow(`SELECT COUNT(*) FROM implements WHERE iface = ?`, id).Scan(&total); err != nil {
+		return nil, 0, false, err
+	}
+	r, err := conn.Query(`SELECT s.qname, s.signature, s.file, s.line
+		FROM implements i JOIN symbols s ON s.id = i.impl
+		WHERE i.iface = ? ORDER BY s.qname LIMIT ?`, id, maxNeighbors+1)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	rows, err = scanNeighbors(r, 0)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	if len(rows) > maxNeighbors {
+		rows = rows[:maxNeighbors]
+		truncated = true
+	}
+	return rows, total, truncated, nil
+}
+
+// satisfies lists the repo-defined interfaces concrete type id implements
+// (reverse of implementers, served by idx_implements_impl). No total: a type
+// satisfies few interfaces, never near the cap, so the list is its own count.
+func satisfies(conn *sql.DB, id int64) ([]Neighbor, error) {
+	r, err := conn.Query(`SELECT s.qname, s.signature, s.file, s.line
+		FROM implements i JOIN symbols s ON s.id = i.iface
+		WHERE i.impl = ? ORDER BY s.qname LIMIT ?`, id, maxNeighbors)
+	if err != nil {
+		return nil, err
+	}
+	return scanNeighbors(r, 0)
 }
 
 func scanNeighbors(rows *sql.Rows, depth int) ([]Neighbor, error) {

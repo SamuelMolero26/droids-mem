@@ -187,8 +187,7 @@ func TestBlastRadiusSuppressed(t *testing.T) {
 		symbol string
 		hint   string
 	}{
-		{"English", blastTypeHint}, // a type with a method: redirect to it
-		{"Greeter", blastRefHint},  // a method-less type (interface): no handle
+		{"English", blastTypeHint}, // a concrete type with a method: redirect to it
 		{"Lang", blastRefHint},     // a const: reference-level, not indexed
 	}
 	for _, tc := range cases {
@@ -278,6 +277,71 @@ func TestInterfaceFanOut(t *testing.T) {
 	}
 	if resp.TransitiveCallers == nil || *resp.TransitiveCallers != 3 {
 		t.Errorf("MockStore.Save transitive_callers = %v, want 3", resp.TransitiveCallers)
+	}
+}
+
+// TestImplements covers the exact interface-satisfaction relation (issue #48):
+// interface → concrete implementers, concrete type → interfaces it satisfies,
+// definitive-zero on an unimplemented interface, and the empty-interface skip.
+func TestImplements(t *testing.T) {
+	m, repo := testManagerAt(t, "testdata/fanout")
+	ctx := context.Background()
+
+	// Interface → its exact concrete implementer set (all three, incl. the
+	// never-constructed MockStore — implements is type-set membership, not calls).
+	resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "fanout.Store"})
+	if err != nil {
+		t.Fatalf("Symbol Store: %v", err)
+	}
+	if resp.Symbol == nil || resp.Symbol.Kind != "interface" {
+		t.Fatalf("Store kind = %+v, want interface", resp.Symbol)
+	}
+	impls := map[string]bool{}
+	for _, n := range resp.Implementers {
+		impls[n.QName] = true
+	}
+	for _, want := range []string{"fanout.SQLStore", "fanout.MemStore", "fanout.MockStore"} {
+		if !impls[want] {
+			t.Errorf("implementer %s missing from %v", want, impls)
+		}
+	}
+	if resp.ImplementersTotal == nil || *resp.ImplementersTotal != 3 {
+		t.Errorf("Store implementers_total = %v, want 3", resp.ImplementersTotal)
+	}
+	if resp.Hint != implementersHint {
+		t.Errorf("Store hint = %q, want implementersHint", resp.Hint)
+	}
+
+	// Concrete type → interfaces it satisfies (reverse edge). Marker (empty
+	// interface) must NOT appear — it was skipped at index time.
+	resp, err = m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "fanout.SQLStore"})
+	if err != nil {
+		t.Fatalf("Symbol SQLStore: %v", err)
+	}
+	sat := map[string]bool{}
+	for _, n := range resp.Satisfies {
+		sat[n.QName] = true
+	}
+	if !sat["fanout.Store"] {
+		t.Errorf("SQLStore should satisfy fanout.Store; got %v", sat)
+	}
+	if sat["fanout.Marker"] {
+		t.Errorf("empty interface Marker must be skipped, but SQLStore satisfies it: %v", sat)
+	}
+	if resp.ImplementersTotal != nil {
+		t.Errorf("concrete type carries no implementers_total, got %d", *resp.ImplementersTotal)
+	}
+
+	// Definitive zero: a repo interface nobody implements → total present at 0.
+	resp, err = m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "fanout.Lonely"})
+	if err != nil {
+		t.Fatalf("Symbol Lonely: %v", err)
+	}
+	if resp.ImplementersTotal == nil || *resp.ImplementersTotal != 0 {
+		t.Errorf("Lonely implementers_total = %v, want 0 (definitive, present)", resp.ImplementersTotal)
+	}
+	if len(resp.Implementers) != 0 {
+		t.Errorf("Lonely should have no implementers, got %v", resp.Implementers)
 	}
 }
 
