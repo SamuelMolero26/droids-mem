@@ -39,9 +39,16 @@ func RenderSymbol(r *SymbolResponse) string {
 	writeNeighbors(&b, "callees", r.Callees)
 	writeNeighbors(&b, "path", r.Path)
 	writeNeighbors(&b, "matches", r.Matches)
+	writeNeighbors(&b, "implementers", r.Implementers)
+	writeNeighbors(&b, "satisfies", r.Satisfies)
 
 	if r.TransitiveCallers != nil {
 		fmt.Fprintf(&b, "transitive_callers: %d\n", *r.TransitiveCallers)
+	}
+	// Emitted even at 0 (definitive: a repo interface nobody implements), and
+	// when it exceeds the shown implementers count the list was capped.
+	if r.ImplementersTotal != nil {
+		fmt.Fprintf(&b, "implementers_total: %d\n", *r.ImplementersTotal)
 	}
 	if r.Truncated {
 		b.WriteString("truncated: true\n")

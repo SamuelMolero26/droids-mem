@@ -22,6 +22,14 @@ type MockStore struct{}
 
 func (MockStore) Save() {}
 
+// Lonely is a repo interface no concrete type implements — its implementers_total
+// is a definitive 0 (issue #48), not an absent field.
+type Lonely interface{ Alone() }
+
+// Marker is an empty interface: every type satisfies it, so it is skipped as an
+// implements edge (universal satisfaction is noise, not signal).
+type Marker interface{}
+
 // Broadcast dispatches through the interface — CHA resolves Save() to every
 // Store implementation, one edge per implementation.
 func Broadcast(s Store) { s.Save() }
