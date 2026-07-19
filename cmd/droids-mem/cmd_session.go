@@ -26,6 +26,7 @@ func newSessionCmd(a *app) *cobra.Command {
 	}
 	cmd.AddCommand(
 		newSessionStageCmd(),
+		newSessionDeclineCmd(),
 		newSessionMarkChangeCmd(),
 		newSessionCheckCmd(),
 		newSessionFlushCmd(a),
@@ -247,6 +248,28 @@ func newSessionStageCmd() *cobra.Command {
 	return cmd
 }
 
+// newSessionDeclineCmd records a deliberate "nothing worth recalling" decision.
+// It writes a declined staged marker so the Stop-hook gate stops re-blocking
+// (until IntakeThreshold further changes land), while flush skips it entirely.
+func newSessionDeclineCmd() *cobra.Command {
+	var ccID string
+	cmd := &cobra.Command{
+		Use:   "decline",
+		Short: "Mark the session as having nothing worth staging (silences the Stop checkpoint)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := state.StageSummary(ccID, state.StagedSummary{Declined: true}); err != nil {
+				writeError("decline_failed", err.Error(), true)
+				exitWith(ExitError)
+			}
+			writeJSON(map[string]any{"declined": true, "session": ccID})
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&ccID, "session", "", "Claude Code session id (required)")
+	_ = cmd.MarkFlagRequired("session")
+	return cmd
+}
+
 func newSessionMarkChangeCmd() *cobra.Command {
 	var ccID string
 	cmd := &cobra.Command{
@@ -403,6 +426,9 @@ func flushSession(ctx context.Context, s *store.Store, ccID string) flushResult 
 	}
 	if staged == nil {
 		return flushResult{reason: "no_staged"}
+	}
+	if staged.Declined {
+		return flushResult{reason: "declined"}
 	}
 	// File provenance (ADR-0021 Phase 2) is independent of the intake gate: the
 	// files a run touched are worth recording even when the summary is too thin
