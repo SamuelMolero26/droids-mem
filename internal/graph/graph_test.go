@@ -187,7 +187,8 @@ func TestBlastRadiusSuppressed(t *testing.T) {
 		symbol string
 		hint   string
 	}{
-		{"English", blastTypeHint}, // a type: redirect to its methods
+		{"English", blastTypeHint}, // a type with a method: redirect to it
+		{"Greeter", blastRefHint},  // a method-less type (interface): no handle
 		{"Lang", blastRefHint},     // a const: reference-level, not indexed
 	}
 	for _, tc := range cases {
