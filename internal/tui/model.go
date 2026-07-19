@@ -293,6 +293,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "y", "Y":
 			id := m.confirmTarget.id
+			delete(m.selected, id) // drop the deleted row from the share selection
 			m.mode = modeNormal
 			return m, m.deleteCmd(id)
 		default: // n / esc / anything else cancels
@@ -548,18 +549,28 @@ func (m Model) shareCmd(ids []string, repo string) tea.Cmd {
 	s, push := m.store, m.push
 	return func() tea.Msg {
 		ctx := context.Background()
-		n := 0
+		// Flip must precede export (ExportShared reads scope='shared' from the
+		// db), so on any failure revert the flips — otherwise the census would
+		// show rows as shared that never reached the pool.
+		flipped := make([]string, 0, len(ids))
+		revert := func() {
+			for _, id := range flipped {
+				_, _ = s.SetScope(ctx, id, "personal")
+			}
+		}
 		for _, id := range ids {
 			if _, err := s.SetScope(ctx, id, "shared"); err != nil {
-				return sharedMsg{n: n, err: err}
+				revert()
+				return sharedMsg{err: err}
 			}
-			n++
+			flipped = append(flipped, id)
 		}
-		if err := push(ctx, repo, s, n); err != nil {
-			return sharedMsg{n: n, err: err}
+		if err := push(ctx, repo, s, len(flipped)); err != nil {
+			revert()
+			return sharedMsg{err: err}
 		}
 		_ = state.SaveShareRepo(repo) // remember for reuse; a save miss isn't fatal
-		return sharedMsg{n: n}
+		return sharedMsg{n: len(flipped)}
 	}
 }
 
