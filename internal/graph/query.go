@@ -26,6 +26,15 @@ const (
 	blastCap        = 500 // transitive-caller count sentinel (compute + number guard)
 	staleGraphHint  = "graph is stale: the repo changed but no longer type-checks, serving the last good index"
 	pkgSymbolsLimit = "exported symbols only; re-query an unexported symbol by its name"
+	// blast radius rides entirely on call edges, and only func/method symbols are
+	// edge endpoints (byPos maps FuncDecls only). So transitive_callers is a
+	// structural 0 for a type/const/var — omitting it (issue #47) stops an agent
+	// reading 0 as "safe to change, nothing uses it". The hint redirects to the
+	// path that does carry the answer, split by kind: a type's dependents are
+	// reachable through its methods; a const/var's uses are reference-level, which
+	// the call graph does not model.
+	blastTypeHint = "transitive_callers is a call-edge metric (func/method); for a type, query its methods with direction=up to gauge dependents"
+	blastRefHint  = "transitive_callers is a call-edge metric (func/method); reference-level usage of consts/vars is not indexed"
 )
 
 // SymbolRequest is a symbol-anchored query (ADR-0020 tool 1): point lookup,
@@ -123,11 +132,25 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	}
 	resp.Symbol = &info
 
-	tc, err := transitiveCallers(conn, id)
-	if err != nil {
-		return nil, err
+	var blastHint string // see blastTypeHint/blastRefHint above for the why
+	switch info.Kind {
+	case "func", "method":
+		tc, err := transitiveCallers(conn, id)
+		if err != nil {
+			return nil, err
+		}
+		resp.TransitiveCallers = &tc
+	case "type":
+		blastHint = blastTypeHint
+	default: // const, var
+		blastHint = blastRefHint
 	}
-	resp.TransitiveCallers = &tc
+	if blastHint != "" {
+		resp.Hint = blastHint
+		if fresh.Stale {
+			resp.Hint = staleGraphHint + "; " + blastHint
+		}
+	}
 
 	depth := req.Depth
 	if depth < 1 {
