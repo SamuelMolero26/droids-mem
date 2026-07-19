@@ -171,11 +171,12 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 		// A concrete type: list the interfaces it satisfies, then redirect the
 		// (call-edge) blast question to its methods — or to reference-level when
 		// it has none, which has no call-graph handle at all (issue #47).
-		sat, err := satisfies(conn, id)
+		sat, trunc, err := satisfies(conn, id)
 		if err != nil {
 			return nil, err
 		}
 		resp.Satisfies = sat
+		resp.Truncated = resp.Truncated || trunc
 		hasMethods, err := typeHasMethods(conn, info.QName)
 		if err != nil {
 			return nil, err
@@ -363,16 +364,25 @@ func implementers(conn *sql.DB, id int64) (rows []Neighbor, total int, truncated
 }
 
 // satisfies lists the repo-defined interfaces concrete type id implements
-// (reverse of implementers, served by idx_implements_impl). No total: a type
-// satisfies few interfaces, never near the cap, so the list is its own count.
-func satisfies(conn *sql.DB, id int64) ([]Neighbor, error) {
+// (reverse of implementers, served by idx_implements_impl). Capped at
+// maxNeighbors with a truncation flag; no total (a type satisfies few
+// interfaces, never near the cap, so the shown list is its own count).
+func satisfies(conn *sql.DB, id int64) (rows []Neighbor, truncated bool, err error) {
 	r, err := conn.Query(`SELECT s.qname, s.signature, s.file, s.line
 		FROM implements i JOIN symbols s ON s.id = i.iface
-		WHERE i.impl = ? ORDER BY s.qname LIMIT ?`, id, maxNeighbors)
+		WHERE i.impl = ? ORDER BY s.qname LIMIT ?`, id, maxNeighbors+1)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return scanNeighbors(r, 0)
+	rows, err = scanNeighbors(r, 0)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(rows) > maxNeighbors {
+		rows = rows[:maxNeighbors]
+		truncated = true
+	}
+	return rows, truncated, nil
 }
 
 func scanNeighbors(rows *sql.Rows, depth int) ([]Neighbor, error) {
