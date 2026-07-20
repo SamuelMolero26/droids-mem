@@ -3,6 +3,8 @@
 // (main → Announce → pick).
 package main
 
+import "example.com/testmod/zz"
+
 // Lang is a fixture const: a non-callable symbol, so a blast-radius query on it
 // has no call edges (issue #47).
 const Lang = "en"
@@ -27,4 +29,5 @@ func Announce() string {
 
 func main() {
 	println(Announce())
+	zz.Hub() // cross-package caller of zz.Hub (issue #49 ordering fixture)
 }
