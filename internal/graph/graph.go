@@ -140,6 +140,29 @@ func canonicalRepo(repo string) (string, error) {
 	return abs, nil
 }
 
+// bump records one query against tool ("symbol"|"package") as a single byte
+// appended to a per-repo side-file, so the file size is the call count — an
+// adoption signal (issue #51) telling whether agents actually use the tools.
+// It lives beside graph.db, not inside it: the counter is the only mutation on
+// the read path, and keeping it out preserves graph.db's query_only invariant.
+// Best-effort — a dropped byte never fails a query.
+//
+// ponytail: 1 byte/call, file size = count. ~1KB per 1k calls; truncate to reset.
+// Read it with `wc -c <state dir>/graphs/*/queries.*` — no CLI, deliberately.
+func (m *Manager) bump(repo, tool string) {
+	canon, err := canonicalRepo(repo)
+	if err != nil {
+		return
+	}
+	path := filepath.Join(filepath.Dir(m.dbPath(canon)), "queries."+tool)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644) //nolint:gosec // G304: state dir + repo hash + constant tool name, no user input
+	if err != nil {
+		return
+	}
+	_, _ = f.Write([]byte{'.'})
+	_ = f.Close()
+}
+
 func (m *Manager) dbPath(repo string) string {
 	h := sha256.Sum256([]byte(repo))
 	return filepath.Join(m.base, hex.EncodeToString(h[:6]), "graph.db")
