@@ -25,6 +25,47 @@ func testManagerAt(t *testing.T, rel string) (*Manager, string) {
 	return m, repo
 }
 
+func TestQueryCounter(t *testing.T) {
+	m, repo := testManager(t)
+	ctx := context.Background()
+
+	for range 2 {
+		if _, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"}); err != nil {
+			t.Fatalf("Symbol: %v", err)
+		}
+	}
+	if _, err := m.Package(ctx, PackageRequest{Repo: repo, Package: "testmod"}); err != nil {
+		t.Fatalf("Package: %v", err)
+	}
+
+	canon, err := canonicalRepo(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(m.dbPath(canon))
+	if got := counterSize(t, filepath.Join(dir, "queries.symbol")); got != 2 {
+		t.Errorf("symbol count = %d, want 2", got)
+	}
+	if got := counterSize(t, filepath.Join(dir, "queries.package")); got != 1 {
+		t.Errorf("package count = %d, want 1", got)
+	}
+	if got := counterSize(t, filepath.Join(dir, "queries.nope")); got != 0 {
+		t.Errorf("missing counter = %d, want 0", got)
+	}
+}
+
+func counterSize(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Size()
+}
+
 func TestIndexAndSymbol(t *testing.T) {
 	m, repo := testManager(t)
 	ctx := context.Background()

@@ -124,6 +124,7 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	if err != nil {
 		return nil, err
 	}
+	m.bump(req.Repo, "symbol")
 	resp := &SymbolResponse{Repo: req.Repo, Freshness: fresh, Hint: expandHint}
 	if fresh.Stale {
 		resp.Hint = staleGraphHint + "; " + expandHint
@@ -614,6 +615,7 @@ func (m *Manager) Package(ctx context.Context, req PackageRequest) (*PackageResp
 	if err != nil {
 		return nil, err
 	}
+	m.bump(req.Repo, "package")
 	pkg := strings.Trim(req.Package, "/")
 	var resolved string
 	err = conn.QueryRow(`SELECT package FROM symbols
