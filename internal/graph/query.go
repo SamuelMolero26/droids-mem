@@ -12,7 +12,6 @@ import (
 const (
 	maxDepth      = 5
 	maxPathDepth  = 10
-	maxNeighbors  = 50 // per direction, across all depths
 	maxMatches    = 20
 	maxPkgSymbols = 200
 	// Hints are surface-neutral (ADR-0027): they name the action + the qname to
@@ -46,6 +45,11 @@ const (
 	// (depth=1 only). Redirect: narrow with direction+depth=1 or graph_package.
 	truncatedHint = "neighbor list is a partial slice at the cap (see *_total), not the closest — narrow with a single direction at depth=1, or graph_package"
 )
+
+// maxNeighbors caps neighbors per direction across all depths. A var, not a
+// const, purely so tests can shrink the cap and exercise truncation against a
+// small fixture instead of a 51-caller one.
+var maxNeighbors = 50
 
 // SymbolRequest is a symbol-anchored query (ADR-0020 tool 1): point lookup,
 // blast radius (direction=up, depth>1), or call path (To set).
@@ -258,12 +262,12 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	// True neighbor totals only when a list was capped, and only at depth=1 (a
 	// deeper total = full-closure walk, defeating the cap). See issue #49.
 	if upTrunc && depth == 1 {
-		if resp.CallersTotal, err = edgeCount(conn, "callee", id); err != nil {
+		if resp.CallersTotal, err = edgeCount(conn, "up", id); err != nil {
 			return nil, err
 		}
 	}
 	if downTrunc && depth == 1 {
-		if resp.CalleesTotal, err = edgeCount(conn, "caller", id); err != nil {
+		if resp.CalleesTotal, err = edgeCount(conn, "down", id); err != nil {
 			return nil, err
 		}
 	}
@@ -274,17 +278,15 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	return resp, nil
 }
 
-// edgeCount counts distinct neighbors of id on one side (col = "callee" for
-// callers, "caller" for callees) — the true total behind a truncated depth=1
-// list. col is a compile-time constant from the two call sites, never input.
-func edgeCount(conn *sql.DB, col string, id int64) (int, error) {
-	var n int
-	other := "caller"
-	if col == "caller" {
-		other = "callee"
+// edgeCount is the true neighbor total behind a truncated depth=1 list: distinct
+// callers of id ("up") or distinct callees of id ("down").
+func edgeCount(conn *sql.DB, dir string, id int64) (int, error) {
+	q := `SELECT COUNT(DISTINCT caller) FROM edges WHERE callee = ?` // up: who calls me
+	if dir == "down" {
+		q = `SELECT COUNT(DISTINCT callee) FROM edges WHERE caller = ?`
 	}
-	err := conn.QueryRow(fmt.Sprintf( // #nosec G201 -- col/other are compile-time constants
-		`SELECT COUNT(DISTINCT %s) FROM edges WHERE %s = ?`, other, col), id).Scan(&n)
+	var n int
+	err := conn.QueryRow(q, id).Scan(&n)
 	return n, err
 }
 
