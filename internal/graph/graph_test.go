@@ -153,6 +153,47 @@ func TestSymbolNotFound(t *testing.T) {
 	}
 }
 
+// Neighbors are ordered same-package-first, so the cap keeps the closest, not an
+// arbitrary alphabetical slice (issue #49). zz.Hub is called by zz.Near (same
+// package) and testmod.main (cross); "zz" sorts after "testmod", so plain
+// alphabetical would put main first — same-package-first must override that.
+func TestNeighborOrdering(t *testing.T) {
+	m, repo := testManager(t)
+	resp, err := m.Symbol(context.Background(), SymbolRequest{Repo: repo, Symbol: "zz.Hub", Direction: "up"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Callers) != 2 {
+		t.Fatalf("want 2 callers, got %+v", resp.Callers)
+	}
+	if resp.Callers[0].QName != "zz.Near" {
+		t.Errorf("same-package caller should sort first, got %q then %q",
+			resp.Callers[0].QName, resp.Callers[1].QName)
+	}
+}
+
+// A truncated depth=1 list reports the true total and the partial-slice hint
+// (issue #49). Shrinks the cap to 1 so zz.Hub's 2 callers overflow it.
+func TestNeighborTruncationTotal(t *testing.T) {
+	defer func(n int) { maxNeighbors = n }(maxNeighbors)
+	maxNeighbors = 1
+
+	m, repo := testManager(t)
+	resp, err := m.Symbol(context.Background(), SymbolRequest{Repo: repo, Symbol: "zz.Hub", Direction: "up"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Callers) != 1 || !resp.Truncated {
+		t.Fatalf("want 1 caller + truncated, got %d callers truncated=%v", len(resp.Callers), resp.Truncated)
+	}
+	if resp.CallersTotal != 2 {
+		t.Errorf("callers_total = %d, want 2 (true count behind the cap)", resp.CallersTotal)
+	}
+	if !strings.Contains(resp.Hint, "partial slice") {
+		t.Errorf("truncation hint missing from %q", resp.Hint)
+	}
+}
+
 // transitive_callers reports blast size on an exact match, and is absent on a
 // search-menu response (no single symbol to score).
 func TestTransitiveCallers(t *testing.T) {
