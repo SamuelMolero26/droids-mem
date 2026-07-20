@@ -155,7 +155,7 @@ func (m *Manager) bump(repo, tool string) {
 		return
 	}
 	path := filepath.Join(filepath.Dir(m.dbPath(canon)), "queries."+tool)
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644) //nolint:gosec // G304: state dir + repo hash + constant tool name, no user input
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) // #nosec G304 -- path is state dir + repo hash + constant tool name, no user input
 	if err != nil {
 		return
 	}
