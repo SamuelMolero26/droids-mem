@@ -40,6 +40,11 @@ const (
 	// closure. Scoped so implementers_total:0 reads as "no REPO implementer",
 	// never "implements nothing" (a repo type may still satisfy a stdlib iface).
 	implementersHint = "implementers are the concrete types satisfying this interface — the exact set a method-signature change must update (repo-defined types only; stdlib/dependency implementers are not indexed); re-query one by its qname for its body"
+	// truncatedHint fires when a neighbor list hit maxNeighbors (issue #49). The
+	// retained slice is same-package-first then alphabetical — a partial slice,
+	// NOT the closest callers. callers_total/callees_total carry the real count
+	// (depth=1 only). Redirect: narrow with direction+depth=1 or graph_package.
+	truncatedHint = "neighbor list is a partial slice at the cap (see *_total), not the closest — narrow with a single direction at depth=1, or graph_package"
 )
 
 // SymbolRequest is a symbol-anchored query (ADR-0020 tool 1): point lookup,
@@ -83,6 +88,13 @@ type SymbolResponse struct {
 	Path      []Neighbor  `json:"path,omitempty"`
 	Matches   []Neighbor  `json:"matches,omitempty"`
 	Truncated bool        `json:"truncated,omitempty"`
+	// CallersTotal/CalleesTotal report the true neighbor count when the list was
+	// truncated at maxNeighbors (issue #49) — depth=1 only (a multi-level total
+	// means walking the whole closure, defeating the cap). Plain int, not a
+	// pointer: set only on truncation, so the value is always ≥ maxNeighbors+1
+	// and 0 (omitted) unambiguously means "not truncated".
+	CallersTotal int `json:"callers_total,omitempty"`
+	CalleesTotal int `json:"callees_total,omitempty"`
 	// TransitiveCallers is the blast size: distinct symbols that transitively
 	// call this one (up-closure, capped). A pointer so 0 ("safe to change,
 	// nothing calls it") is distinct from absent (a search-menu response, no
@@ -230,21 +242,50 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 		return resp, nil
 	}
 
+	var upTrunc, downTrunc bool
 	if dir == "up" || dir == "both" {
-		resp.Callers, resp.Truncated, err = bfsNeighbors(conn, id, "up", depth)
+		resp.Callers, upTrunc, err = bfsNeighbors(conn, id, "up", depth, info.Package)
 		if err != nil {
 			return nil, err
 		}
 	}
 	if dir == "down" || dir == "both" {
-		var trunc bool
-		resp.Callees, trunc, err = bfsNeighbors(conn, id, "down", depth)
+		resp.Callees, downTrunc, err = bfsNeighbors(conn, id, "down", depth, info.Package)
 		if err != nil {
 			return nil, err
 		}
-		resp.Truncated = resp.Truncated || trunc
+	}
+	// True neighbor totals only when a list was capped, and only at depth=1 (a
+	// deeper total = full-closure walk, defeating the cap). See issue #49.
+	if upTrunc && depth == 1 {
+		if resp.CallersTotal, err = edgeCount(conn, "callee", id); err != nil {
+			return nil, err
+		}
+	}
+	if downTrunc && depth == 1 {
+		if resp.CalleesTotal, err = edgeCount(conn, "caller", id); err != nil {
+			return nil, err
+		}
+	}
+	if upTrunc || downTrunc {
+		resp.Truncated = true
+		resp.Hint += "; " + truncatedHint
 	}
 	return resp, nil
+}
+
+// edgeCount counts distinct neighbors of id on one side (col = "callee" for
+// callers, "caller" for callees) — the true total behind a truncated depth=1
+// list. col is a compile-time constant from the two call sites, never input.
+func edgeCount(conn *sql.DB, col string, id int64) (int, error) {
+	var n int
+	other := "caller"
+	if col == "caller" {
+		other = "callee"
+	}
+	err := conn.QueryRow(fmt.Sprintf( // #nosec G201 -- col/other are compile-time constants
+		`SELECT COUNT(DISTINCT %s) FROM edges WHERE %s = ?`, other, col), id).Scan(&n)
+	return n, err
 }
 
 // findSymbol resolves a name to symbol stubs: exact qname first, then short
@@ -401,7 +442,9 @@ func scanNeighbors(rows *sql.Rows, depth int) ([]Neighbor, error) {
 
 // bfsNeighbors walks call edges breadth-first up to depth, returning
 // signature stubs, capped at maxNeighbors (truncated=true past the cap).
-func bfsNeighbors(conn *sql.DB, start int64, dir string, depth int) ([]Neighbor, bool, error) {
+// startPkg biases the within-level ordering so same-package neighbors survive
+// the cap first (issue #49) — a partial slice is less arbitrary that way.
+func bfsNeighbors(conn *sql.DB, start int64, dir string, depth int, startPkg string) ([]Neighbor, bool, error) {
 	from, to := "callee", "caller" // up: who calls me
 	if dir == "down" {
 		from, to = "caller", "callee"
@@ -410,7 +453,7 @@ func bfsNeighbors(conn *sql.DB, start int64, dir string, depth int) ([]Neighbor,
 	frontier := []int64{start}
 	var out []Neighbor
 	for d := 1; d <= depth && len(frontier) > 0; d++ {
-		next, truncated, err := neighborLevel(conn, from, to, frontier, seen, &out, d)
+		next, truncated, err := neighborLevel(conn, from, to, frontier, seen, &out, d, startPkg)
 		if err != nil {
 			return nil, false, err
 		}
@@ -425,11 +468,15 @@ func bfsNeighbors(conn *sql.DB, start int64, dir string, depth int) ([]Neighbor,
 // neighborLevel expands one BFS level, appending stubs to out. truncated is
 // true once out hits maxNeighbors.
 func neighborLevel(conn *sql.DB, from, to string, frontier []int64, seen map[int64]bool,
-	out *[]Neighbor, depth int) (next []int64, truncated bool, err error) {
+	out *[]Neighbor, depth int, startPkg string) (next []int64, truncated bool, err error) {
 
+	// ORDER BY (s.package != ?) puts same-package neighbors first (0 < 1), so the
+	// cap keeps the closest, then qname. The startPkg arg trails the frontier IN
+	// placeholders — positional order must match (issue #49).
 	rows, err := conn.Query(fmt.Sprintf(`SELECT DISTINCT s.id, s.qname, s.signature, s.file, s.line
 		FROM edges e JOIN symbols s ON s.id = e.%s
-		WHERE e.%s IN (%s) ORDER BY s.qname`, to, from, placeholders(len(frontier))), idArgs(frontier)...)
+		WHERE e.%s IN (%s) ORDER BY (s.package != ?), s.qname`, to, from, placeholders(len(frontier))),
+		append(idArgs(frontier), startPkg)...)
 	if err != nil {
 		return nil, false, err
 	}
