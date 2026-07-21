@@ -89,9 +89,9 @@ const instructionsTail = `Never put secrets, tokens, or keys in any field; the s
 // variant is byte-identical to the pre-split serverInstructions const.
 func instructions(stdio bool) string {
 	if stdio {
-		return instructionsCore + summaryPolicyStdio + instructionsTail
+		return instructionsCore + "\n" + summaryPolicyStdio + "\n\n" + instructionsTail
 	}
-	return instructionsCore + summaryPolicyHTTP + instructionsTail
+	return instructionsCore + "\n" + summaryPolicyHTTP + "\n\n" + instructionsTail
 }
 
 // Config controls the MCP bridge server. Zero values fall back to defaults.

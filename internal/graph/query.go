@@ -216,6 +216,14 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 			resp.Hint = staleGraphHint + "; " + blastHint
 		}
 	}
+	// Append rebuilding hint when async rebuild is in progress.
+	if fresh.Rebuilding {
+		if resp.Hint != "" {
+			resp.Hint += "; " + rebuildingHint
+		} else {
+			resp.Hint = rebuildingHint
+		}
+	}
 
 	depth := req.Depth
 	if depth < 1 {
@@ -630,8 +638,17 @@ func (m *Manager) Package(ctx context.Context, req PackageRequest) (*PackageResp
 	}
 
 	resp := &PackageResponse{Repo: req.Repo, Freshness: fresh, Package: resolved, Hint: pkgSymbolsLimit}
+
+	var hints []string
 	if fresh.Stale {
-		resp.Hint = staleGraphHint + "; " + pkgSymbolsLimit
+		hints = append(hints, staleGraphHint)
+	}
+	if fresh.Rebuilding {
+		hints = append(hints, rebuildingHint)
+	}
+	if len(hints) > 0 {
+		hints = append(hints, pkgSymbolsLimit)
+		resp.Hint = strings.Join(hints, "; ")
 	}
 	if err := conn.QueryRow(`SELECT COUNT(*) FROM symbols WHERE package = ? AND exported = 0`,
 		resolved).Scan(&resp.Unexported); err != nil {

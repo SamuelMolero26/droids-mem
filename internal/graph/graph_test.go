@@ -160,8 +160,7 @@ func TestStalenessRebuildAndDegradedServe(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Break the repo: staleness check must trip, rebuild must fail, and the
-	// last good graph must be served with Stale set.
+	// Break the repo: staleness check must trip and serve the old graph stale.
 	broken := filepath.Join(repo, "broken_fixture.go")
 	if err := os.WriteFile(broken, []byte("package main\nfunc Bad() { undefined("), 0o600); err != nil {
 		t.Fatal(err)
@@ -174,20 +173,37 @@ func TestStalenessRebuildAndDegradedServe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Symbol on broken repo: %v", err)
 	}
-	if !resp.Freshness.Stale || resp.Freshness.IndexError == "" {
+	if !resp.Freshness.Stale {
 		t.Errorf("expected stale degraded serve, got %+v", resp.Freshness)
 	}
 
-	// Fix the repo: next query must rebuild and clear the stale flag.
+	// Fix the repo: the next query should see fresh within a few
+	// async rebuild cycles.
 	if err := os.Remove(broken); err != nil {
 		t.Fatal(err)
 	}
-	resp, err = m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"})
-	if err != nil {
-		t.Fatalf("Symbol after fix: %v", err)
-	}
-	if resp.Freshness.Stale {
-		t.Errorf("still stale after repo fixed: %+v", resp.Freshness)
+
+	// Loop: query to trigger a rebuild if needed, wait for it, repeat until
+	// fresh or timeout. This handles the race where the async build launched
+	// on the broken repo might run after the fix and write a graph with a
+	// stale stamp, requiring a second async rebuild.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		resp, err = m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"})
+		if err != nil {
+			t.Fatalf("Symbol after fix: %v", err)
+		}
+		if !resp.Freshness.Stale {
+			break // fresh!
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("graph never became fresh: %+v", resp.Freshness)
+		}
+		wb, err := m.WaitBuild(ctx, repo, 5*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = wb
 	}
 }
 

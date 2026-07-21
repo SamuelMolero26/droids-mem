@@ -19,6 +19,7 @@ func registerTools(s *server.MCPServer, st *store.Store) {
 	s.AddTool(searchToolDef(), mcp.NewTypedToolHandler(searchHandler(st)))
 	s.AddTool(contextToolDef(), mcp.NewTypedToolHandler(contextHandler(st)))
 	s.AddTool(getToolDef(), mcp.NewTypedToolHandler(getHandler(st)))
+	s.AddTool(corpusToolDef(), mcp.NewTypedToolHandler(corpusHandler(st)))
 }
 
 // ---------- mem_save ----------
@@ -98,7 +99,7 @@ type searchArgs struct {
 
 func searchToolDef() mcp.Tool {
 	return mcp.NewTool("mem_search",
-		mcp.WithDescription("Full-text search across stored memories ranked by BM25. Call this proactively at the start of a task and whenever the topic shifts — do not wait to be asked; prior fixes, decisions, and conventions live here. Ignore weak or unrelated results."),
+		mcp.WithDescription("Full-text search across stored memories ranked by BM25. Call this proactively at the start of a task and whenever the topic shifts — do not wait to be asked; prior fixes, decisions, and conventions live here. Ignore weak or unrelated results. For code-structure questions in Go repos, prefer graph_symbol/graph_package over text search."),
 		mcp.WithString("query", mcp.Required(),
 			mcp.Description("Free-text search phrase.")),
 		mcp.WithString("task_type",
@@ -148,7 +149,7 @@ type contextEnvelope struct {
 
 func contextToolDef() mcp.Tool {
 	return mcp.NewTool("mem_context",
-		mcp.WithDescription("Load the two-tier orientation bundle for a task_type at the start of a Run. Call this on your own at the start of work when the project has a stable task_type (derive it from the repo or directory name and reuse the exact same string every session). Returns always-tier memories (full body) + browse-tier titles/snippets, plus a session_id to thread through subsequent mem_save calls."),
+		mcp.WithDescription("Load the two-tier orientation bundle for a task_type at the start of a Run. Call this on your own at the start of work when the project has a stable task_type (derive it from the repo or directory name and reuse the exact same string every session). Returns always-tier memories (full body) + browse-tier titles/snippets, plus a session_id to thread through subsequent mem_save calls. For code-structure questions in Go repos, prefer graph_symbol/graph_package over text search."),
 		mcp.WithString("task_type", mcp.Required(),
 			mcp.Description("Workflow tag scoping the bundle.")),
 		mcp.WithString("query",
@@ -186,7 +187,7 @@ type getArgs struct {
 
 func getToolDef() mcp.Tool {
 	return mcp.NewTool("mem_get",
-		mcp.WithDescription("Fetch the full body of a single memory by id (typically a browse-tier id returned by mem_context or mem_search). Use it on your own to expand a promising browse-tier title before relying on it."),
+		mcp.WithDescription("Fetch the full body of a single memory by id (typically a browse-tier id returned by mem_context or mem_search). Use it on your own to expand a promising browse-tier title before relying on it. For code-structure questions in Go repos, prefer graph_symbol/graph_package over text search."),
 		mcp.WithString("id", mcp.Required(),
 			mcp.Description("Memory id, e.g. 'mem_01J...'.")),
 	)
@@ -202,6 +203,77 @@ func getHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, getA
 			return mcp.NewToolResultError(fmt.Sprintf("memory %q not found", a.ID)), nil
 		}
 		return toolJSON(m)
+	}
+}
+
+// ---------- mem_corpus ----------
+
+type corpusArgs struct {
+	Limit int `json:"limit,omitempty"`
+}
+
+// RecentSessionStub is a lightweight summary of one session_summary memory
+// for the mem_corpus response.
+type RecentSessionStub struct {
+	Title     string `json:"title"`
+	CreatedAt int64  `json:"created_at"`
+}
+
+type corpusResponse struct {
+	TaskTypes      []store.TaskTypeCount `json:"task_types"`
+	ByKind         map[string]int        `json:"by_kind"`
+	Total          int                   `json:"total"`
+	RecentSessions []RecentSessionStub   `json:"recent_sessions,omitempty"`
+}
+
+func corpusToolDef() mcp.Tool {
+	return mcp.NewTool("mem_corpus",
+		mcp.WithDescription("Return a census of the memory corpus: task_type list with counts, kind breakdown, total memory count, and recent session_summary titles. Call this at the start of a task to discover orphaned task_types or to assess corpus health."),
+		mcp.WithNumber("limit",
+			mcp.Description("Max recent_sessions to return (default 5, max 20)."),
+			mcp.DefaultNumber(5), mcp.Min(1), mcp.Max(20),
+		),
+	)
+}
+
+func corpusHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, corpusArgs) (*mcp.CallToolResult, error) {
+	return func(ctx context.Context, _ mcp.CallToolRequest, a corpusArgs) (*mcp.CallToolResult, error) {
+		limit := a.Limit
+		if limit <= 0 {
+			limit = 5
+		}
+		if limit > 20 {
+			limit = 20
+		}
+
+		// Gather corpus data from multiple store methods.
+		counts, err := st.Counts(ctx)
+		if err != nil {
+			return toolErr(err), nil
+		}
+
+		types, err := st.ListTaskTypes(ctx)
+		if err != nil {
+			return toolErr(err), nil
+		}
+
+		sessions, err := st.RecentSessions(ctx, store.RecentSessionsRequest{Limit: limit})
+		if err != nil {
+			return toolErr(err), nil
+		}
+
+		stubs := make([]RecentSessionStub, 0, len(sessions.Sessions))
+		for _, s := range sessions.Sessions {
+			stubs = append(stubs, RecentSessionStub{Title: s.Title, CreatedAt: s.CreatedAt})
+		}
+
+		resp := corpusResponse{
+			TaskTypes:      types,
+			ByKind:         counts.ByKind,
+			Total:          counts.Total,
+			RecentSessions: stubs,
+		}
+		return toolJSON(resp)
 	}
 }
 

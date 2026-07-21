@@ -45,13 +45,13 @@ type ContextMemory struct {
 	ID             string `json:"id"`
 	Kind           string `json:"kind"`
 	Title          string `json:"title"`
-	Tier           string `json:"tier"`              // "always" | "browse"
+	Tier           string `json:"tier"` // "always" | "browse"
 	Learned        string `json:"learned,omitempty"`
 	What           string `json:"what,omitempty"`
 	Snippet        string `json:"snippet,omitempty"`
 	CreatedAt      int64  `json:"created_at"`
-	ExpandCount    *int   `json:"expand_count,omitempty"`
-	LastExpandedAt *int64 `json:"last_expanded_at,omitempty"`
+	ExpandCount    int    `json:"expand_count"`
+	LastExpandedAt int64  `json:"last_expanded_at,omitempty"`
 }
 
 type ContextResponse struct {
@@ -190,7 +190,7 @@ func fetchLastSessionConn(ctx context.Context, conn *sql.Conn, taskType string) 
 	var m ContextMemory
 	err := conn.QueryRowContext(ctx, `
 		SELECT id, kind, title, learned, created_at,
-		       expand_count, last_expanded_at
+		       expand_count, COALESCE(last_expanded_at, 0)
 		FROM memories
 		WHERE task_type = ? AND kind = 'session_summary'
 		ORDER BY created_at DESC
@@ -219,7 +219,7 @@ const maxAlwaysTierUserRules = 5
 func fetchUserRulesConn(ctx context.Context, conn *sql.Conn, taskType string, fullCap int) (rules, stubs []ContextMemory, total int, err error) {
 	rows, err := conn.QueryContext(ctx, `
 		SELECT id, kind, title, learned, created_at,
-		       expand_count, last_expanded_at
+		       expand_count, COALESCE(last_expanded_at, 0)
 		FROM memories
 		WHERE task_type = ? AND kind = 'user_rule'
 		ORDER BY created_at DESC
@@ -281,7 +281,7 @@ func fetchBrowseTierConn(ctx context.Context, conn *sql.Conn, ftsQuery, taskType
 func fetchBrowseKindConn(ctx context.Context, conn *sql.Conn, ftsQuery, taskType, kind string, limit int, full bool) ([]ContextMemory, error) {
 	rows, err := conn.QueryContext(ctx, `
 		SELECT m.id, m.kind, m.title, m.what, m.learned, m.created_at,
-		       m.expand_count, m.last_expanded_at
+		       m.expand_count, COALESCE(m.last_expanded_at, 0)
 		FROM memories_fts fts
 		JOIN memories m ON m.rowid = fts.rowid
 		WHERE memories_fts MATCH ?

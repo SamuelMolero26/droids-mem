@@ -2,8 +2,10 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -18,6 +20,7 @@ import (
 func registerGraphTools(s *server.MCPServer, gm *graph.Manager) {
 	s.AddTool(graphSymbolToolDef(), mcp.NewTypedToolHandler(graphSymbolHandler(gm)))
 	s.AddTool(graphPackageToolDef(), mcp.NewTypedToolHandler(graphPackageHandler(gm)))
+	s.AddTool(graphBuildWaitToolDef(), mcp.NewTypedToolHandler(graphBuildWaitHandler(gm)))
 }
 
 // ---------- graph_symbol ----------
@@ -90,6 +93,44 @@ func graphPackageHandler(gm *graph.Manager) func(context.Context, mcp.CallToolRe
 			return graphToolErr(err), nil
 		}
 		return mcp.NewToolResultText(graph.RenderPackage(resp)), nil
+	}
+}
+
+// ---------- graph_build_wait ----------
+
+type graphBuildWaitArgs struct {
+	Repo    string `json:"repo"`
+	Timeout int    `json:"timeout,omitempty"` // seconds, default 10
+}
+
+func graphBuildWaitToolDef() mcp.Tool {
+	return mcp.NewTool("graph_build_wait",
+		mcp.WithDescription("Block until any active async rebuild for the repo finishes, or until timeout. Returns the final freshness state. Use after graph_symbol returns rebuilding: true."),
+		mcp.WithString("repo", mcp.Required(),
+			mcp.Description("Absolute path to the repo root (your project working directory).")),
+		mcp.WithNumber("timeout",
+			mcp.Description("Max seconds to wait (default 10, max 60)."),
+			mcp.DefaultNumber(10), mcp.Min(1), mcp.Max(60),
+		),
+	)
+}
+
+func graphBuildWaitHandler(gm *graph.Manager) func(context.Context, mcp.CallToolRequest, graphBuildWaitArgs) (*mcp.CallToolResult, error) {
+	return func(ctx context.Context, _ mcp.CallToolRequest, a graphBuildWaitArgs) (*mcp.CallToolResult, error) {
+		timeout := time.Duration(a.Timeout) * time.Second
+		if a.Timeout <= 0 {
+			timeout = 10 * time.Second
+		}
+		resp, err := gm.WaitBuild(ctx, a.Repo, timeout)
+		if err != nil {
+			return graphToolErr(err), nil
+		}
+		// JSON for structured consumption — small payload, not a TOON table
+		b, err := json.Marshal(resp)
+		if err != nil {
+			return mcp.NewToolResultError("marshal: " + err.Error()), nil //nolint:nilerr // MCP convention: error in result text, not Go return
+		}
+		return mcp.NewToolResultText(string(b)), nil
 	}
 }
 
