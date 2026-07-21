@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/samuelmolero26/droids-mem/internal/share"
 	"github.com/samuelmolero26/droids-mem/internal/state"
 	"github.com/samuelmolero26/droids-mem/internal/store"
 )
@@ -159,7 +160,7 @@ func New(s memStore) Model {
 	ti.Focus()
 
 	ri := textinput.New()
-	ri.Placeholder = "path to git repo"
+	ri.Placeholder = "Memory repo path — outside any code repo"
 	ri.Prompt = ""
 	ri.Cursor.Style = lipgloss.NewStyle().Foreground(colSelect)
 
@@ -182,8 +183,14 @@ func New(s memStore) Model {
 		repoInput: ri,
 		counts:    map[string]int{},
 		selected:  selected,
-		push:      pushShared,
-		pull:      pullShared,
+		// memStore is a superset of share.Store, so the wrappers just adapt the
+		// param type; the git transport lives in internal/share (ADR-0029 §5).
+		push: func(ctx context.Context, repo string, s memStore, n int) error {
+			return share.Push(ctx, repo, s, n)
+		},
+		pull: func(ctx context.Context, repo string, s memStore) (store.ImportResult, error) {
+			return share.Fetch(ctx, repo, s)
+		},
 	}
 }
 

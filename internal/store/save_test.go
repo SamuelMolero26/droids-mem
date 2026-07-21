@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 
 	"github.com/samuelmolero26/droids-mem/internal/db"
@@ -12,16 +13,6 @@ import (
 
 func newTestStore(t *testing.T) *store.Store {
 	t.Helper()
-	s, _ := newTestStoreWithConn(t)
-	return s
-}
-
-// newTestStoreWithConn also returns the raw *sql.DB backing the store, so
-// tests can seed lifecycle columns (review_after, pinned) directly via SQL —
-// there is no write path for them yet in slice 1 (decay-on-save and pin/unpin
-// CLI land in slices 2-4).
-func newTestStoreWithConn(t *testing.T) (*store.Store, *sql.DB) {
-	t.Helper()
 	conn, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatalf("open db: %v", err)
@@ -30,7 +21,7 @@ func newTestStoreWithConn(t *testing.T) (*store.Store, *sql.DB) {
 		t.Fatalf("init schema: %v", err)
 	}
 	t.Cleanup(func() { conn.Close() })
-	return store.New(conn), conn
+	return store.New(conn)
 }
 
 func validReq() store.SaveRequest {
@@ -137,14 +128,13 @@ func TestSave_Validation_MissingTaskType(t *testing.T) {
 func TestSave_Validation_TaskTypePathTraversal(t *testing.T) {
 	s := newTestStore(t)
 	for _, bad := range []string{"../etc", "a/b", ".."} {
-		t.Run(bad, func(t *testing.T) {
-			req := validReq()
-			req.TaskType = bad
-			_, err := s.Save(context.Background(), req)
-			if ve := mustValidationError(t, err); ve.Field != "task_type" {
-				t.Errorf("expected ValidationError on task_type, got field %q", ve.Field)
-			}
-		})
+		req := validReq()
+		req.TaskType = bad
+		_, err := s.Save(context.Background(), req)
+		var ve *store.ValidationError
+		if ok := isValidationError(err, &ve); !ok || ve.Field != "task_type" {
+			t.Errorf("task_type %q: expected ValidationError on task_type, got %v", bad, err)
+		}
 	}
 }
 
@@ -153,8 +143,12 @@ func TestSave_Validation_InvalidKind(t *testing.T) {
 	req := validReq()
 	req.Kind = "bad_kind"
 	_, err := s.Save(context.Background(), req)
-	if ve := mustValidationError(t, err); ve.Field != "kind" {
-		t.Errorf("expected ValidationError on field kind, got %q", ve.Field)
+	if err == nil {
+		t.Error("expected validation error for invalid kind")
+	}
+	var ve *store.ValidationError
+	if ok := isValidationError(err, &ve); !ok || ve.Field != "kind" {
+		t.Errorf("expected ValidationError on field kind, got %v", err)
 	}
 }
 
@@ -311,4 +305,14 @@ func TestSave_ForceBypassesBM25(t *testing.T) {
 	if resp.Status == "skipped" {
 		t.Error("force=true should bypass BM25 check, but got skipped")
 	}
+}
+
+// isValidationError checks err is a *store.ValidationError and assigns it.
+func isValidationError(err error, target **store.ValidationError) bool {
+	var ve *store.ValidationError
+	if errors.As(err, &ve) {
+		*target = ve
+		return true
+	}
+	return false
 }

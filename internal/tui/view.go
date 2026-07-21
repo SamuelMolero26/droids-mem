@@ -101,7 +101,7 @@ func (m Model) shareDialog() string {
 	b.WriteString("\n\n")
 	b.WriteString(shareWarn.Render("⚠ Shared copies enter the git-tracked pool and can't be fully\n  retracted — anyone who pulled keeps their copy."))
 	b.WriteString("\n\n")
-	b.WriteString(metaStyle.Render("push to repo:") + " " + m.repoInput.View())
+	b.WriteString(metaStyle.Render("Memory repo:") + " " + m.repoInput.View())
 	b.WriteString("\n\n")
 	b.WriteString(footerKey.Render("esc") + footerStyle.Render(" cancel") + "   " + shareBtn.Render(fmt.Sprintf("↵ Push %d", n)))
 	return shareBox.Render(b.String())

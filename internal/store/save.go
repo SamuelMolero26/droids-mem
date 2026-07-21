@@ -77,6 +77,11 @@ var (
 	// inserts. Used by isEmptyAfterScrub to decide whether the post-scrub
 	// `learned` field is structurally empty.
 	reRedactionToken = regexp.MustCompile(`\[[A-Z_]+\]`)
+	// reTaskType gates task_type to a filesystem-safe slug (ADR-0029 SEC-1).
+	// task_type becomes a path segment in the shared-pool transport, so `/` and
+	// `..` are a path-traversal vector; this runs in validate() at the trust
+	// boundary so it protects both save and import. Lowercased first, so no A-Z.
+	reTaskType = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
 )
 
 // jaccardDupeThreshold: token-set Jaccard similarity above this value
@@ -586,6 +591,14 @@ func validate(req *SaveRequest) (*scrub.ScrubReport, error) {
 	req.TaskType = strings.ToLower(strings.TrimSpace(req.TaskType))
 	if req.TaskType == "" {
 		return nil, &ValidationError{Field: "task_type", Message: "required", Retryable: true}
+	}
+	if !reTaskType.MatchString(req.TaskType) {
+		return nil, &ValidationError{
+			Field:      "task_type",
+			Message:    "must be a lowercase slug ^[a-z0-9][a-z0-9._-]*$ — no spaces, slashes, or '..'",
+			Retryable:  true,
+			Suggestion: "use the git repo or top-level dir name, e.g. 'droids-mem'",
+		}
 	}
 	if !validKinds[req.Kind] {
 		return nil, &ValidationError{

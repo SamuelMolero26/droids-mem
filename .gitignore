@@ -2,6 +2,7 @@
 /droids-mem
 *.exe
 
+# Test artifacts
 *.test
 *.out
 coverage.txt
@@ -12,9 +13,12 @@ coverage.html
 *.db-wal
 *.db-shm
 
+# CodeGraph index (regenerable)
+.codegraph/
+
+# Claude configuration and skills (local/regenerable)
 .claude/
 .atl
-.codegraph
 
 # OS
 .DS_Store
@@ -26,13 +30,17 @@ Thumbs.db
 *.swp
 *.swo
 
-# Documentation and files 
+# Env (defensive — repo doesn't currently use .env but cheap insurance)
+.env
+.env.*
+!.env.example
+
+# Documentation and files (regenerable / personal)
 /docs/
 /files/
 future.todo
-CONTEXT.mds
-*.local.md
 CONTEXT.md
 
 # Local business/marketing notes
 *.local.md
+
