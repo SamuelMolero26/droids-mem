@@ -86,17 +86,24 @@ func RenderPackage(r *PackageResponse) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// writeFreshness emits a line only when the graph is stale — the actionable
-// case. Absence means fresh, so the common path costs zero tokens.
+// writeFreshness emits a freshness line only when the graph is stale or being
+// rebuilt — absence means fresh, so the common path costs zero tokens.
 func writeFreshness(b *strings.Builder, f Freshness) {
-	if !f.Stale {
+	var msgs []string
+	if f.Stale {
+		if f.IndexError != "" {
+			msgs = append(msgs, "STALE (repo no longer type-checks; serving last good index: "+f.IndexError+")")
+		} else {
+			msgs = append(msgs, "STALE (repo no longer type-checks; serving last good index)")
+		}
+	}
+	if f.Rebuilding {
+		msgs = append(msgs, "REBUILDING (async rebuild in progress)")
+	}
+	if len(msgs) == 0 {
 		return
 	}
-	if f.IndexError != "" {
-		fmt.Fprintf(b, "freshness: STALE (repo no longer type-checks; serving last good index: %s)\n", f.IndexError)
-		return
-	}
-	b.WriteString("freshness: STALE (repo no longer type-checks; serving last good index)\n")
+	fmt.Fprintf(b, "freshness: %s\n", strings.Join(msgs, "; "))
 }
 
 func writeNeighbors(b *strings.Builder, name string, ns []Neighbor) {

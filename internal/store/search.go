@@ -26,8 +26,8 @@ type SearchResult struct {
 	TaskType       string  `json:"task_type"`
 	CreatedAt      int64   `json:"created_at"`
 	Score          float64 `json:"score"` // BM25 rank — more negative = better match
-	ExpandCount    *int    `json:"expand_count,omitempty"`
-	LastExpandedAt *int64  `json:"last_expanded_at,omitempty"`
+	ExpandCount    int     `json:"expand_count"`
+	LastExpandedAt int64   `json:"last_expanded_at,omitempty"`
 }
 
 type SearchResponse struct {
@@ -91,7 +91,7 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 	// #nosec G201 -- same as above: hardcoded conditions, parameterized values.
 	stmt := fmt.Sprintf(`
 		SELECT m.id, m.kind, m.title, m.learned, m.task_type, m.created_at, fts.rank,
-		       m.expand_count, m.last_expanded_at
+		       m.expand_count, COALESCE(m.last_expanded_at, 0)
 		FROM memories_fts fts
 		JOIN memories m ON m.rowid = fts.rowid
 		WHERE %s

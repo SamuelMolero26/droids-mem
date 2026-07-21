@@ -20,8 +20,8 @@ type Memory struct {
 	Fingerprint    string `json:"fingerprint"`
 	CreatedAt      int64  `json:"created_at"`
 	UpdatedAt      int64  `json:"updated_at"`
-	ExpandCount    *int   `json:"expand_count,omitempty"`
-	LastExpandedAt *int64 `json:"last_expanded_at,omitempty"`
+	ExpandCount    int    `json:"expand_count"`
+	LastExpandedAt int64  `json:"last_expanded_at,omitempty"`
 	// Scope ('personal'|'shared') is populated by List and GetRow — the in-process
 	// TUI sharing surface renders it. RecentSessions leaves it "".
 	Scope string `json:"scope,omitempty"`
@@ -76,7 +76,7 @@ func (s *Store) List(ctx context.Context, req ListRequest) (*ListResponse, error
 
 	stmt := fmt.Sprintf(`
 		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at,
-		       expand_count, last_expanded_at, scope
+		       expand_count, COALESCE(last_expanded_at, 0), scope
 		FROM memories %s
 		ORDER BY created_at DESC
 		LIMIT ?
@@ -129,7 +129,7 @@ func (s *Store) RecentSessions(ctx context.Context, req RecentSessionsRequest) (
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at,
-		       expand_count, last_expanded_at
+		       expand_count, COALESCE(last_expanded_at, 0)
 		FROM memories
 		WHERE origin = 'auto'
 		ORDER BY created_at DESC
@@ -167,7 +167,7 @@ func (s *Store) GetRow(ctx context.Context, id string) (*Memory, error) {
 	var m Memory
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at,
-		       expand_count, last_expanded_at, scope
+		       expand_count, COALESCE(last_expanded_at, 0), scope
 		FROM memories WHERE id = ?
 	`, id).Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &m.Scope)
 	if errors.Is(err, sql.ErrNoRows) {
