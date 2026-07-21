@@ -10,6 +10,22 @@ import (
 	"time"
 )
 
+// TestWriteGraphDB_CancelledCtxDoesNotPublish guards the async-supersede race:
+// a build cancelled by a newer one (ensureFresh calls bs.cancel() on supersede)
+// must not rename its now-stale result into place.
+func TestWriteGraphDB_CancelledCtxDoesNotPublish(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "graph.db")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := writeGraphDB(ctx, dbPath, "repo", "mod", "s", nil, nil, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
+		t.Fatalf("cancelled build published graph.db")
+	}
+}
+
 func testManager(t *testing.T) (*Manager, string) {
 	return testManagerAt(t, "testdata/testmod")
 }

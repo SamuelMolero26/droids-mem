@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/tools/go/callgraph"
@@ -102,7 +103,7 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	}
 	impls := implementsEdges(pkgs, byPos)
 
-	return writeGraphDB(dbPath, repo, module, stampVal, symbols, edges, impls)
+	return writeGraphDB(ctx, dbPath, repo, module, stampVal, symbols, edges, impls)
 }
 
 func shortPkgPath(pkgPath, module string) string {
@@ -343,17 +344,20 @@ func implementsEdges(pkgs []*packages.Package, byPos map[string]*symRow) map[[2]
 
 // writeGraphDB builds the new db at dbPath+".tmp" and renames it into place,
 // so readers never observe a half-built graph.
-func writeGraphDB(dbPath, repo, module, stampVal string, symbols []*symRow, edges, impls map[[2]int64]bool) error {
+func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges, impls map[[2]int64]bool) error {
+	if err := ctx.Err(); err != nil {
+		return err // cancelled before work started
+	}
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o750); err != nil {
 		return fmt.Errorf("create graph dir: %w", err)
 	}
 	removeStaleTemps(dbPath)
-	// Per-process temp name: a second droids-mem (e.g. the MCP server rebuilding
-	// the same repo while a CLI graph query does too) must not clobber our
-	// half-written file. Each builder writes its own .tmp.<pid> and the rename is
-	// atomic — last writer wins with byte-identical content. In-process, repoLock
-	// already serializes same-repo builds, so pid is unique enough.
-	tmp := fmt.Sprintf("%s.tmp.%d", dbPath, os.Getpid())
+	// Per-build temp name: async rebuilds run concurrently in the same process
+	// (ensureFresh releases repoLock before launching the goroutine, and a
+	// superseding build starts before the old one exits), so pid alone is not
+	// unique. pid keeps cross-process builds distinct; the nonce keeps in-process
+	// ones distinct. The rename is atomic — last writer wins.
+	tmp := fmt.Sprintf("%s.tmp.%d.%d", dbPath, os.Getpid(), buildNonce.Add(1))
 	_ = os.Remove(tmp)
 	db, err := sql.Open("sqlite", "file:"+tmp)
 	if err != nil {
@@ -425,8 +429,18 @@ func writeGraphDB(dbPath, repo, module, stampVal string, symbols []*symRow, edge
 		_ = os.Remove(tmp)
 		return fmt.Errorf("close graph db: %w", cerr)
 	}
+	// A superseded async build was cancelled (ensureFresh: bs.cancel()); its
+	// result is stale, so discard it rather than renaming it over the graph.
+	if err := ctx.Err(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
 	return os.Rename(tmp, dbPath)
 }
+
+// buildNonce makes concurrent same-process graph builds write distinct temp
+// files. See writeGraphDB.
+var buildNonce atomic.Uint64
 
 // staleTempAge bounds how long a graph build may plausibly run. buildIndex
 // measures ~2.5s; an hour is far past any real build, so anything older is

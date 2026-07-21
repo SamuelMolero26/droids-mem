@@ -118,16 +118,22 @@ type Manager struct {
 
 	buildsMu sync.Mutex
 	builds   map[string]*buildState // key: canonical repo path
+
+	// lastBuildErrors holds the most recent build error per repo so the
+	// warm-serve path can surface it via Freshness.IndexError. Protected by
+	// buildsMu. Cleared when a new build starts.
+	lastBuildErrors map[string]string
 }
 
 // NewManager creates a Manager storing graphs under base.
 func NewManager(base string) *Manager {
 	return &Manager{
-		base:       base,
-		locks:      make(map[string]*sync.Mutex),
-		conns:      make(map[string]*sql.DB),
-		stampCache: make(map[string]*stampEntry),
-		builds:     make(map[string]*buildState),
+		base:            base,
+		locks:           make(map[string]*sync.Mutex),
+		conns:           make(map[string]*sql.DB),
+		stampCache:      make(map[string]*stampEntry),
+		builds:          make(map[string]*buildState),
+		lastBuildErrors: make(map[string]string),
 	}
 }
 
@@ -152,8 +158,10 @@ func (m *Manager) Close() {
 // buildAsync runs buildIndex in a background goroutine, then cleans up the
 // build tracking state. On success, it closes the old connection so the next
 // open() picks up the newly-renamed graph.db. On failure, the old graph stays
-// in place (served as stale). If the build was superseded by a newer one (stamp
-// changed during the build), the result is discarded.
+// in place (served as stale) and the error is recorded in lastBuildErrors so
+// the warm-serve path can surface it via Freshness.IndexError. If the build was
+// superseded by a newer one (stamp changed during the build), the result is
+// discarded (ensureFresh already cancelled the old build's context).
 func (m *Manager) buildAsync(ctx context.Context, repo, path, stamp string) {
 	buildErr := buildIndex(ctx, repo, path, stamp)
 
@@ -162,16 +170,21 @@ func (m *Manager) buildAsync(ctx context.Context, repo, path, stamp string) {
 
 	bs, ok := m.builds[repo]
 	if !ok || bs.stamp != stamp {
-		// Superseded by a newer build — discard
+		// Superseded by a newer build — discard (ensureFresh already cancelled
+		// the old context, so the ctx here is already dead)
 		return
 	}
 	delete(m.builds, repo)
 	close(bs.done)
+	bs.cancel() // release the cancel func so it doesn't leak
 
 	if buildErr != nil {
+		m.lastBuildErrors[repo] = buildErr.Error()
 		return // failed — old graph stays in place as stale
 	}
-	// Success: close the old connection so next open() picks up the new .db file
+	// Success: clear any prior error and close the old connection so the next
+	// open() picks up the new .db file
+	delete(m.lastBuildErrors, repo)
 	m.closeConn(path)
 }
 
@@ -282,12 +295,17 @@ func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, Freshn
 
 	// Warm-serve: graph exists but stamp mismatched
 	m.buildsMu.Lock()
+	lastErr := m.lastBuildErrors[repo]
 	bs, building := m.builds[repo]
 	if building && bs.stamp == current {
-		// Same-stamp build already running — attach and return stale
+		// Same-stamp build already running — attach and return stale.
+		// If the previous build failed, surface the error even while retrying.
 		m.buildsMu.Unlock()
 		fresh.Stale = true
 		fresh.Rebuilding = true
+		if lastErr != "" {
+			fresh.IndexError = lastErr
+		}
 		lock.Unlock()
 		return conn, fresh, nil
 	}
@@ -305,6 +323,11 @@ func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, Freshn
 		stamp:  current,
 		done:   make(chan struct{}),
 	}
+	// Surface the last build error while a new build is in-flight if one
+	// exists — the agent deserves to know why the graph was stale before
+	// the retry. The error is cleared when the new build finishes (success
+	// deletes it; failure replaces it).
+	fresh.IndexError = lastErr
 	m.buildsMu.Unlock()
 	lock.Unlock() // Release BEFORE goroutine — critical
 
