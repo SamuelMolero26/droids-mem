@@ -167,7 +167,7 @@ func TestSearch_Validation_InvalidKind(t *testing.T) {
 	}
 }
 
-func TestSearch_ResultsOrderedByRank(t *testing.T) {
+func TestSearch_ResultsOrderedByComposite(t *testing.T) {
 	s := newTestStore(t)
 	seedMemories(t, s)
 
@@ -175,11 +175,27 @@ func TestSearch_ResultsOrderedByRank(t *testing.T) {
 	if len(resp.Results) < 2 {
 		t.Skip("not enough results to check ordering")
 	}
+	// Results are re-ranked by CompositeScore (BM25 blended with token overlap),
+	// not by raw BM25 rank — so the composite must be non-decreasing.
 	for i := 1; i < len(resp.Results); i++ {
-		if resp.Results[i].Score < resp.Results[i-1].Score {
-			t.Errorf("results not ordered by rank: [%d] score %f > [%d] score %f",
-				i, resp.Results[i].Score, i-1, resp.Results[i-1].Score)
+		if store.CompositeScore(resp.Results[i]) < store.CompositeScore(resp.Results[i-1]) {
+			t.Errorf("results not ordered by composite: [%d]=%f < [%d]=%f",
+				i, store.CompositeScore(resp.Results[i]), i-1, store.CompositeScore(resp.Results[i-1]))
 		}
+	}
+}
+
+// TestCompositeScore_OverlapPromotesLowBM25 proves the re-rank is not a no-op:
+// a result with a weaker BM25 rank but full token overlap must outrank a
+// stronger-BM25 result with zero overlap. Under the old "BM25 primary, overlap
+// only as tiebreaker" sort this promotion never happened.
+func TestCompositeScore_OverlapPromotesLowBM25(t *testing.T) {
+	weakBM25HighOverlap := store.SearchResult{Score: -1.0, OverlapScore: 1.0} // composite -3.0
+	strongBM25NoOverlap := store.SearchResult{Score: -2.0, OverlapScore: 0.0} // composite -2.0
+
+	if store.CompositeScore(weakBM25HighOverlap) >= store.CompositeScore(strongBM25NoOverlap) {
+		t.Fatalf("high-overlap result did not outrank stronger-BM25 result: %f vs %f",
+			store.CompositeScore(weakBM25HighOverlap), store.CompositeScore(strongBM25NoOverlap))
 	}
 }
 
