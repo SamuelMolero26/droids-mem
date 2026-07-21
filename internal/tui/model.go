@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -316,6 +317,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.status = "share failed: no repo set"
 				return m, nil
 			}
+			abs, err := filepath.Abs(repo)
+			if err != nil {
+				m.status = "share failed: " + err.Error()
+				return m, nil
+			}
+			repo = abs
 			ids := m.shareTargets()
 			m.mode = modeNormal
 			return m, m.shareCmd(ids, repo)

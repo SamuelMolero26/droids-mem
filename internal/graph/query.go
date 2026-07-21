@@ -43,7 +43,8 @@ const (
 	// retained slice is same-package-first then alphabetical — a partial slice,
 	// NOT the closest callers. callers_total/callees_total carry the real count
 	// (depth=1 only). Redirect: narrow with direction+depth=1 or graph_package.
-	truncatedHint = "neighbor list is a partial slice at the cap (see *_total), not the closest — narrow with a single direction at depth=1, or graph_package"
+	truncatedHint  = "neighbor list is a partial slice at the cap (see *_total), not the closest — narrow with a single direction at depth=1, or graph_package"
+	rebuildingHint = "graph is being rebuilt asynchronously — use graph_build_wait to block until ready, or retry"
 )
 
 // maxNeighbors caps neighbors per direction across all depths. A var, not a
@@ -213,6 +214,14 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 		resp.Hint = blastHint
 		if fresh.Stale {
 			resp.Hint = staleGraphHint + "; " + blastHint
+		}
+	}
+	// Append rebuilding hint when async rebuild is in progress.
+	if fresh.Rebuilding {
+		if resp.Hint != "" {
+			resp.Hint += "; " + rebuildingHint
+		} else {
+			resp.Hint = rebuildingHint
 		}
 	}
 
@@ -629,8 +638,17 @@ func (m *Manager) Package(ctx context.Context, req PackageRequest) (*PackageResp
 	}
 
 	resp := &PackageResponse{Repo: req.Repo, Freshness: fresh, Package: resolved, Hint: pkgSymbolsLimit}
+
+	var hints []string
 	if fresh.Stale {
-		resp.Hint = staleGraphHint + "; " + pkgSymbolsLimit
+		hints = append(hints, staleGraphHint)
+	}
+	if fresh.Rebuilding {
+		hints = append(hints, rebuildingHint)
+	}
+	if len(hints) > 0 {
+		hints = append(hints, pkgSymbolsLimit)
+		resp.Hint = strings.Join(hints, "; ")
 	}
 	if err := conn.QueryRow(`SELECT COUNT(*) FROM symbols WHERE package = ? AND exported = 0`,
 		resolved).Scan(&resp.Unexported); err != nil {

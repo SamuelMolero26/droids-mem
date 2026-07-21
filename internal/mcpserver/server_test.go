@@ -181,12 +181,28 @@ func TestLimitBody(t *testing.T) {
 func TestInstructions_TransportFork(t *testing.T) {
 	httpVar, stdioVar := instructions(false), instructions(true)
 
-	// Both variants share the core protocol and the graph/secrets tail.
+	// Both variants share the core protocol, graph tools, and secrets tail.
 	for _, s := range []string{httpVar, stdioVar} {
-		for _, want := range []string{"AT THE START of a task", "mem_save", "Never put secrets", "graph_symbol"} {
+		for _, want := range []string{"AT THE START of a task", "mem_save", "Never put secrets", "graph_symbol", "Available tools:"} {
 			if !strings.Contains(s, want) {
 				t.Errorf("instructions missing %q", want)
 			}
+		}
+	}
+
+	// Graph tools appear before the summary policy in both variants.
+	for _, s := range []string{httpVar, stdioVar} {
+		graphPos := strings.Index(s, "graph_symbol")
+		httpPolicyPos := strings.Index(s, "Do NOT save session summaries")
+		stdioPolicyPos := strings.Index(s, "AT THE END of a run")
+		if graphPos < 0 {
+			t.Errorf("graph tools not found in instructions")
+		}
+		if httpPolicyPos >= 0 && graphPos > httpPolicyPos {
+			t.Errorf("graph_symbol (%d) appears after HTTP summary policy (%d)", graphPos, httpPolicyPos)
+		}
+		if stdioPolicyPos >= 0 && graphPos > stdioPolicyPos {
+			t.Errorf("graph_symbol (%d) appears after stdio summary policy (%d)", graphPos, stdioPolicyPos)
 		}
 	}
 

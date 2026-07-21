@@ -19,13 +19,15 @@ type SearchRequest struct {
 }
 
 type SearchResult struct {
-	ID        string  `json:"id"`
-	Kind      string  `json:"kind"`
-	Title     string  `json:"title"`
-	Learned   string  `json:"learned"`
-	TaskType  string  `json:"task_type"`
-	CreatedAt int64   `json:"created_at"`
-	Score     float64 `json:"score"` // BM25 rank — more negative = better match
+	ID             string  `json:"id"`
+	Kind           string  `json:"kind"`
+	Title          string  `json:"title"`
+	Learned        string  `json:"learned"`
+	TaskType       string  `json:"task_type"`
+	CreatedAt      int64   `json:"created_at"`
+	Score          float64 `json:"score"` // BM25 rank — more negative = better match
+	ExpandCount    int     `json:"expand_count"`
+	LastExpandedAt int64   `json:"last_expanded_at,omitempty"`
 }
 
 type SearchResponse struct {
@@ -88,7 +90,8 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 	pageArgs := append(args, limit)
 	// #nosec G201 -- same as above: hardcoded conditions, parameterized values.
 	stmt := fmt.Sprintf(`
-		SELECT m.id, m.kind, m.title, m.learned, m.task_type, m.created_at, fts.rank
+		SELECT m.id, m.kind, m.title, m.learned, m.task_type, m.created_at, fts.rank,
+		       m.expand_count, COALESCE(m.last_expanded_at, 0)
 		FROM memories_fts fts
 		JOIN memories m ON m.rowid = fts.rowid
 		WHERE %s
@@ -105,7 +108,8 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 	results := []SearchResult{}
 	for rows.Next() {
 		var r SearchResult
-		if err := rows.Scan(&r.ID, &r.Kind, &r.Title, &r.Learned, &r.TaskType, &r.CreatedAt, &r.Score); err != nil {
+		if err := rows.Scan(&r.ID, &r.Kind, &r.Title, &r.Learned, &r.TaskType, &r.CreatedAt, &r.Score,
+			&r.ExpandCount, &r.LastExpandedAt); err != nil {
 			return nil, fmt.Errorf("scan result: %w", err)
 		}
 		results = append(results, r)

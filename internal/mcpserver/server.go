@@ -64,6 +64,8 @@ const (
 // the redundant self-save harmless.
 const instructionsCore = `droids-mem is your persistent memory across sessions. Prior lessons — fixes, decisions, conventions — are stored here so you do not relearn them. Call these tools on your own; do not wait to be asked.
 
+Available tools: mem_save, mem_search, mem_context, mem_get, mem_corpus, graph_symbol, graph_package
+
 AT THE START of a task, and again whenever the topic shifts:
 - Call mem_search with a short description of what you are about to do. This surfaces relevant prior lessons by relevance and needs no task_type. If the results look weak or unrelated, ignore them.
 - If you know a stable workflow tag for this work, also call mem_context with that task_type for curated continuity (prior session summary + standing user rules). Derive task_type mechanically — the git repo name or top-level directory name — and reuse the exact same string every session for that project; inventing a new slug each time silently orphans prior continuity. A miss here is harmless — the search above already covers you.
@@ -74,23 +76,22 @@ AS YOU WORK, when you learn something worth reusing next time, call mem_save:
 - user_rule — a correction or stable preference the user gave you.
 Save only a genuinely reusable lesson, not routine steps. Re-saving the same lesson is harmless (the store deduplicates), so prefer saving over forgetting. Thread the session_id returned by mem_context (or the first mem_save) through later saves in the same run. If you call mem_context again in the same run (topic pivot, mode=refresh), pass that existing session_id back in — omitting it mints a new one and fragments the run's memories.
 
+FOR CODE QUESTIONS in a Go repo, prefer the graph tools over grep and file reading — they answer from a pre-built call graph in one call. graph_package orients you in an area (exported surface, signatures only); graph_symbol shows one symbol's source plus callers/callees as signature stubs, blast radius via direction=up depth>1, call paths via 'to'. Expand a stub by re-querying its exact qname. Pass your project root as 'repo'.
 `
 
 const summaryPolicyHTTP = `Do NOT save session summaries here — your host may record those automatically at session end; saving one yourself would duplicate it.`
 
 const summaryPolicyStdio = `AT THE END of a run — task complete or user wrapping up — save ONE session_summary (kind=session_summary: what happened, what you learned, what comes next). No hook on this host records summaries automatically; skipping this leaves no continuity for the next session. If a summary hook is wired after all, the store's dedupe makes your save harmless.`
 
-const instructionsTail = ` Never put secrets, tokens, or keys in any field; the store scrubs free-text fields on save, but tags are stored verbatim (unscrubbed) — keep secrets out of every field anyway.
-
-FOR CODE QUESTIONS in a Go repo, prefer the graph tools over grep and file reading — they answer from a pre-built call graph in one call. graph_package orients you in an area (exported surface, signatures only); graph_symbol shows one symbol's source plus callers/callees as signature stubs, blast radius via direction=up depth>1, call paths via 'to'. Expand a stub by re-querying its exact qname. Pass your project root as 'repo'.`
+const instructionsTail = `Never put secrets, tokens, or keys in any field; the store scrubs free-text fields on save, but tags are stored verbatim (unscrubbed) — keep secrets out of every field anyway.`
 
 // instructions assembles the transport-appropriate protocol string. The HTTP
 // variant is byte-identical to the pre-split serverInstructions const.
 func instructions(stdio bool) string {
 	if stdio {
-		return instructionsCore + summaryPolicyStdio + instructionsTail
+		return instructionsCore + "\n" + summaryPolicyStdio + "\n\n" + instructionsTail
 	}
-	return instructionsCore + summaryPolicyHTTP + instructionsTail
+	return instructionsCore + "\n" + summaryPolicyHTTP + "\n\n" + instructionsTail
 }
 
 // Config controls the MCP bridge server. Zero values fall back to defaults.
