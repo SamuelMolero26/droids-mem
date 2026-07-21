@@ -3,19 +3,34 @@ package store
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 )
 
 const (
 	defaultSearchLimit = 5
 	maxSearchLimit     = 20
+	// internalFetchMultiplier fetches more results from FTS5 than the caller
+	// requested, then re-ranks by a composite score. This catches relevant
+	// memories that BM25 ranked low but share significant token overlap with
+	// the query (e.g. synonym-heavy queries where FTS5 OR-of-phrases hits
+	// loosely). The multiplier is deliberately modest — embedding-free retrieval
+	// improvement without the cost of sqlite-vec.
+	internalFetchMultiplier = 3
+	maxInternalFetch        = 60
+	// overlapWeight tunes how much literal token overlap (0..1) can promote a
+	// result above its raw BM25 rank in the composite sort. A full-overlap
+	// result gets a -overlapWeight bonus to its (negative, lower-is-better)
+	// BM25 score. Deliberately modest; tune against the recall eval (ADR-0025).
+	overlapWeight = 2.0
 )
 
 type SearchRequest struct {
-	Query    string `json:"query"`
-	TaskType string `json:"task_type"` // optional filter
-	Kind     string `json:"kind"`      // optional filter
-	Limit    int    `json:"limit"`     // default 5, max 20
+	Query       string `json:"query"`
+	TaskType    string `json:"task_type"`    // optional filter
+	Kind        string `json:"kind"`         // optional filter
+	Limit       int    `json:"limit"`        // default 5, max 20
+	AllProjects bool   `json:"all_projects"` // skip task_type filter — search every project
 }
 
 type SearchResult struct {
@@ -25,7 +40,8 @@ type SearchResult struct {
 	Learned        string  `json:"learned"`
 	TaskType       string  `json:"task_type"`
 	CreatedAt      int64   `json:"created_at"`
-	Score          float64 `json:"score"` // BM25 rank — more negative = better match
+	Score          float64 `json:"score"`         // BM25 rank — more negative = better match
+	OverlapScore   float64 `json:"overlap_score"` // TokenOverlap(query, title+learned) — 0..1, higher = more literal token overlap
 	ExpandCount    int     `json:"expand_count"`
 	LastExpandedAt int64   `json:"last_expanded_at,omitempty"`
 }
@@ -62,7 +78,7 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 	conditions := []string{"memories_fts MATCH ?"}
 	args := []any{ftsQuery}
 
-	if req.TaskType != "" {
+	if !req.AllProjects && req.TaskType != "" {
 		conditions = append(conditions, "m.task_type = ?")
 		args = append(args, req.TaskType)
 	}
@@ -87,7 +103,14 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 		return nil, fmt.Errorf("search count: %w", err)
 	}
 
-	pageArgs := append(args, limit)
+	// Fetch more results than requested, then re-rank by a composite of BM25 +
+	// TokenOverlap. FTS5 OR-of-phrases returns results where ANY token matched —
+	// a relevant memory with low lexical overlap may rank below noise. By
+	// fetching 3× the limit internally and re-ranking, we promote results
+	// whose literal token set overlaps meaningfully with the query.
+	internalLimit := min(limit*internalFetchMultiplier, maxInternalFetch)
+
+	pageArgs := append(args, internalLimit)
 	// #nosec G201 -- same as above: hardcoded conditions, parameterized values.
 	stmt := fmt.Sprintf(`
 		SELECT m.id, m.kind, m.title, m.learned, m.task_type, m.created_at, fts.rank,
@@ -112,13 +135,37 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 			&r.ExpandCount, &r.LastExpandedAt); err != nil {
 			return nil, fmt.Errorf("scan result: %w", err)
 		}
+		r.OverlapScore = TokenOverlap(req.Query, r.Title+" "+r.Learned)
 		results = append(results, r)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("search rows: %w", err)
 	}
 
+	// Re-rank by a composite that blends BM25 rank with token overlap (see
+	// CompositeScore). BM25 alone orders by fts.rank; blending overlap in lets a
+	// result at the tail of BM25 rank that shares significant literal token
+	// overlap with the query climb above loosely-matched noise, without
+	// discarding BM25's signal. This is why we fetch 3× the limit internally.
+	sort.SliceStable(results, func(i, j int) bool {
+		return CompositeScore(results[i]) < CompositeScore(results[j])
+	})
+
+	// Trim to requested limit
+	if len(results) > limit {
+		results = results[:limit]
+	}
+
 	return &SearchResponse{Results: results, Total: total}, nil
+}
+
+// CompositeScore blends a result's BM25 rank with its token overlap into a
+// single sort key; lower is better. Score is the FTS5 bm25 rank (negative,
+// more negative = better); OverlapScore is 0..1 (higher = better), so we
+// subtract it (weighted) to reward literal token overlap. This lets a
+// high-overlap result outrank a marginally-better BM25 match.
+func CompositeScore(r SearchResult) float64 {
+	return r.Score - overlapWeight*r.OverlapScore
 }
 
 // phraseFTSQuery converts arbitrary user text into a safe FTS5 MATCH expression.

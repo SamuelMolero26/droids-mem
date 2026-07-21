@@ -53,6 +53,7 @@ const (
 	modeNormal mode = iota
 	modeConfirm
 	modeShare // share-confirm dialog: flip selected memories into the shared pool
+	modeGraph // graph tab: query input + results viewport
 )
 
 // sidebarKinds is the fixed KINDS rotation shown in the sidebar; "" is the
@@ -105,6 +106,10 @@ type pulledMsg struct { // teammate's pool pulled + imported
 }
 type scopeChangedMsg struct{ err error } // one row's scope flipped (unshare); reload quietly
 type tickMsg struct{ gen int }
+type graphMsg struct {
+	content string
+	err     error
+}
 
 // Model is the root BubbleTea model for the Memory inspector.
 type Model struct {
@@ -147,13 +152,21 @@ type Model struct {
 
 	width, height int
 	ready         bool
+
+	// Graph tab (ADR-0020): optional code-graph browser. graphQ is nil when no
+	// graph manager was passed — ctrl+g is silently a no-op.
+	graphQ    GraphQuerier
+	graphIn   textinput.Model
+	graphOut  viewport.Model
+	graphRepo string // repo root passed at construction; "" means use graphQ's default
 }
 
 type pushFunc func(ctx context.Context, repo string, s memStore, n int) error
 type pullFunc func(ctx context.Context, repo string, s memStore) (store.ImportResult, error)
 
-// New builds an inspector model over the given store.
-func New(s memStore) Model {
+// New builds an inspector model over the given store. Pass an optional
+// GraphQuerier and repo root to enable the graph tab (ctrl+g).
+func New(s memStore, graphQ GraphQuerier, repo string) Model {
 	ti := textinput.New()
 	ti.Placeholder = "search memories… (≥3 chars)"
 	ti.Prompt = "/ "
@@ -175,7 +188,12 @@ func New(s memStore) Model {
 	l.SetFilteringEnabled(false) // we drive search ourselves via store.Search
 	l.SetShowStatusBar(false)
 
-	return Model{
+	gi := textinput.New()
+	gi.Placeholder = "package or symbol name (e.g. internal/store or Store.Save)"
+	gi.Prompt = "> "
+	gi.Cursor.Style = lipgloss.NewStyle().Foreground(colSelect)
+
+	m := Model{
 		store:     s,
 		mode:      modeNormal,
 		focus:     focusList,
@@ -193,6 +211,13 @@ func New(s memStore) Model {
 			return share.Fetch(ctx, repo, s)
 		},
 	}
+	if graphQ != nil {
+		m.graphQ = graphQ
+		m.graphIn = gi
+		m.graphRepo = repo
+		m.graphOut = viewport.New(0, 0)
+	}
+	return m
 }
 
 func (m Model) Init() tea.Cmd {
@@ -287,6 +312,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.loadCmd(m.gen, m.query)
 
+	case graphMsg:
+		if msg.err != nil {
+			m.graphOut.SetContent(bodyStyle.Render("graph query failed: " + msg.err.Error()))
+		} else {
+			m.graphOut.SetContent(msg.content)
+		}
+		m.graphOut.GotoTop()
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -339,6 +373,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Graph mode has its own key handler — text goes to the graph query input.
+	if m.mode == modeGraph {
+		return m.handleGraphKey(msg)
+	}
+
 	switch msg.String() {
 	case "tab":
 		m.focus = (m.focus + 1) % 3
@@ -376,6 +415,15 @@ func (m Model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if it, ok := m.list.SelectedItem().(listItem); ok && it.shared {
 			return m, m.setScopeCmd(it.id, "personal")
 		}
+		return m, nil
+	case "ctrl+g":
+		if m.graphQ == nil {
+			return m, nil // no graph manager — silently ignore
+		}
+		m.mode = modeGraph
+		m.graphIn.Focus()
+		m.graphIn.SetValue("")
+		m.graphOut.SetContent("")
 		return m, nil
 	case " ": // toggle the cursor row in the multi-select set (empty search box
 		// only — otherwise space is a literal separator in a multi-word query).
@@ -438,6 +486,70 @@ func (m Model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmd, debounceCmd(m.gen))
 	}
 	return m, cmd
+}
+
+// handleGraphKey processes keys when in graph tab mode. Enter runs the query,
+// esc goes back to memory mode, everything else feeds the query input.
+func (m Model) handleGraphKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.mode = modeNormal
+		m.focus = focusList
+		return m, nil
+	case "enter":
+		q := m.graphIn.Value()
+		if q == "" {
+			return m, nil
+		}
+		m.graphOut.SetContent("querying…")
+		return m, m.graphQueryCmd(q)
+	case "up", "down", "pgup", "pgdown", "home", "end":
+		var cmd tea.Cmd
+		m.graphOut, cmd = m.graphOut.Update(msg)
+		return m, cmd
+	}
+	var cmd tea.Cmd
+	m.graphIn, cmd = m.graphIn.Update(msg)
+	return m, cmd
+}
+
+// graphQueryCmd executes a graph query (package or symbol) and returns the
+// result as a graphMsg. The TUI auto-detects whether the input is a package
+// path (contains "/") or a symbol name — packages get graph_package, names
+// get graph_symbol. On error the message contains the error text.
+func (m Model) graphQueryCmd(q string) tea.Cmd {
+	g := m.graphQ
+	repo := m.graphRepo
+	return func() tea.Msg {
+		// Bound the query so a slow/hung graph rebuild can't block this
+		// goroutine forever; the adapter propagates ctx to graph.Manager.
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		// Heuristic: if the query contains "/" or looks dotted, try symbol first.
+		// Otherwise start with package.
+		hasSlash := strings.Contains(q, "/")
+		hasDot := strings.Contains(q, ".")
+
+		if hasSlash || !hasDot {
+			// Try as a package path first.
+			out, err := g.Package(ctx, repo, q)
+			if err == nil {
+				return graphMsg{content: out}
+			}
+			// Package failed — try as a symbol name (e.g. "Store.Save").
+			out, err = g.Symbol(ctx, repo, q)
+			if err != nil {
+				return graphMsg{err: err}
+			}
+			return graphMsg{content: out}
+		}
+		// Looks like a symbol name — try symbol first.
+		out, err := g.Symbol(ctx, repo, q)
+		if err != nil {
+			return graphMsg{err: err}
+		}
+		return graphMsg{content: out}
+	}
 }
 
 // handleNav routes arrow/paging keys to the focused pane.
@@ -641,4 +753,10 @@ func (m *Model) layout() {
 	listW := inner - detailW
 	m.list.SetSize(listW, bodyH)
 	m.detail = viewport.New(detailW, bodyH)
+
+	// Graph tab: size the results viewport when the tab is active.
+	if m.graphQ != nil {
+		m.graphOut.Width = m.width - 4
+		m.graphOut.Height = max(1, bodyH-4)
+	}
 }

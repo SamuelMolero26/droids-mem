@@ -12,6 +12,12 @@ func (m Model) View() string {
 	if !m.ready {
 		return "loading…"
 	}
+
+	// Graph tab replaces the normal three-pane layout entirely.
+	if m.mode == modeGraph {
+		return m.graphView()
+	}
+
 	bodyH := max(1, m.height-6)
 	rows := []string{
 		m.headerView(),
@@ -20,6 +26,24 @@ func (m Model) View() string {
 		m.bodyView(bodyH),
 		hrule(m.width),
 		m.footerView(),
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, rows...)
+}
+
+// graphView renders the graph tab: header, query input, results viewport.
+func (m Model) graphView() string {
+	h := max(1, m.height-6)
+	outH := max(1, h-2)
+	m.graphOut.Height = outH
+	out := m.graphOut.View()
+	pad := lipgloss.NewStyle().Padding(0, 2)
+	rows := []string{
+		m.headerView(),
+		pad.Render(m.graphIn.View()),
+		hrule(m.width),
+		pad.Render(out),
+		hrule(m.width),
+		footerStyle.Render("  enter=query  esc=back  ↑↓=scroll"),
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, rows...)
 }
@@ -178,6 +202,10 @@ func (m Model) footerView() string {
 	if n := len(m.selected); n > 0 {
 		left = footerStyle.Render(fmt.Sprintf("%d selected", n)) + "   " + left
 	}
+	mid := ""
+	if m.graphQ != nil {
+		mid = footerStyle.Render("   ") + footerKey.Render("^g") + footerStyle.Render(" graph")
+	}
 	if m.status != "" {
 		left = footerStyle.Render(m.status) + "   " + left
 	}
@@ -185,8 +213,8 @@ func (m Model) footerView() string {
 	if m.query.scope != "" {
 		right = footerKey.Render("esc") + footerStyle.Render(" clear filter")
 	}
-	gap := max(1, m.width-lipgloss.Width(left)-lipgloss.Width(right))
-	return chromeRow(m.width).Render(left + strings.Repeat(" ", gap) + right)
+	gap := max(1, m.width-lipgloss.Width(left)-lipgloss.Width(mid)-lipgloss.Width(right))
+	return chromeRow(m.width).Render(left + mid + strings.Repeat(" ", gap) + right)
 }
 
 // renderDetail is the detail-pane body for one Memory: MEMORY label, title,
