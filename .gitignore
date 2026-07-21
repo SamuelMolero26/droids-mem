@@ -18,6 +18,7 @@ coverage.html
 
 # Claude configuration and skills (local/regenerable)
 .claude/
+.atl
 
 # OS
 .DS_Store
@@ -42,3 +43,4 @@ CONTEXT.md
 
 # Local business/marketing notes
 *.local.md
+

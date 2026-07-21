@@ -122,6 +122,22 @@ func TestSave_Validation_MissingTaskType(t *testing.T) {
 	}
 }
 
+// TestSave_Validation_TaskTypePathTraversal covers ADR-0029 SEC-1: task_type
+// becomes a path segment in the shared-pool transport, so a slash or ".." is a
+// traversal vector and must be rejected at the trust boundary (save + import).
+func TestSave_Validation_TaskTypePathTraversal(t *testing.T) {
+	s := newTestStore(t)
+	for _, bad := range []string{"../etc", "a/b", ".."} {
+		req := validReq()
+		req.TaskType = bad
+		_, err := s.Save(context.Background(), req)
+		var ve *store.ValidationError
+		if ok := isValidationError(err, &ve); !ok || ve.Field != "task_type" {
+			t.Errorf("task_type %q: expected ValidationError on task_type, got %v", bad, err)
+		}
+	}
+}
+
 func TestSave_Validation_InvalidKind(t *testing.T) {
 	s := newTestStore(t)
 	req := validReq()

@@ -25,6 +25,8 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/samuelmolero26/droids-mem/internal/graph"
+	"github.com/samuelmolero26/droids-mem/internal/share"
+	"github.com/samuelmolero26/droids-mem/internal/state"
 	"github.com/samuelmolero26/droids-mem/internal/store"
 )
 
@@ -163,6 +165,13 @@ func Run(ctx context.Context, cfg Config, st *store.Store) error {
 		serveErr <- nil
 	}()
 
+	// Boot auto-Fetch (ADR-0029 §5): pull a teammate's shared pool once, in its
+	// own goroutine launched after the listener is already serving, so this
+	// detached server's single DB connection is never blocked at startup.
+	// stopCtx (not ctx) so a SIGTERM cancels an in-flight fetch before the
+	// caller's deferred db.Close runs.
+	startBootFetch(stopCtx, st, logger)
+
 	select {
 	case err := <-serveErr:
 		if err != nil {
@@ -180,6 +189,44 @@ func Run(ctx context.Context, cfg Config, st *store.Store) error {
 		logger.Printf("shutdown complete")
 		return nil
 	}
+}
+
+// bootFetchTimeout bounds the boot auto-Fetch git pull so an unreachable remote
+// can't hang and pin the single DB connection (ADR-0029 §5).
+const bootFetchTimeout = 15 * time.Second
+
+// startBootFetch runs one best-effort Fetch of the configured shared pool in its
+// own goroutine (ADR-0029 §5) so a teammate's memories reach this agent without
+// a human remembering to pull. No repo configured → no-op. Failure is logged,
+// never fatal — a stale or unreachable pool must not degrade serving.
+func startBootFetch(ctx context.Context, st *store.Store, logger *log.Logger) {
+	repo := shareRepo()
+	if repo == "" {
+		return
+	}
+	go func() {
+		fctx, cancel := context.WithTimeout(ctx, bootFetchTimeout)
+		defer cancel()
+		res, err := share.Fetch(fctx, repo, st)
+		if err != nil {
+			logger.Printf("boot fetch skipped: %v", err)
+			return
+		}
+		logger.Printf("boot fetch: imported %d, skipped %d, failed %d from %s",
+			res.Imported, res.Skipped, res.Failed, repo)
+	}()
+}
+
+// shareRepo resolves the shared-pool repo path: DROIDS_MEM_SHARE_REPO overrides
+// (tests/one-offs), else the persisted ~/.droids-mem/share_repo. A detached
+// serve does not inherit the user's shell env, so the file is the load-bearing
+// source (ADR-0029 §6); the env var is the escape hatch.
+func shareRepo() string {
+	if v := os.Getenv("DROIDS_MEM_SHARE_REPO"); v != "" {
+		return v
+	}
+	repo, _ := state.LoadShareRepo()
+	return repo
 }
 
 // identityHandler answers a challenge–response proof of token knowledge:
