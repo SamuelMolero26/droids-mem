@@ -35,7 +35,14 @@ type graphSymbolArgs struct {
 
 func graphSymbolToolDef() mcp.Tool {
 	return mcp.NewTool("graph_symbol",
-		mcp.WithDescription("Query the code graph of a Go repo anchored on one symbol — use this INSTEAD of grep/file-reading to understand code. Returns the symbol's full source plus its callers/callees as one-line signature stubs (interface dispatch resolved) and 'transitive_callers': the blast size (how many symbols transitively call it) so you know if a change is risky before walking it (set on funcs/methods only — a type/const/var omits it and the hint says how to gauge its dependents instead). depth>1 with direction=up lists that blast radius; 'to' gives the call path between two symbols. If the symbol is an INTERFACE, 'implementers' lists the concrete types that satisfy it (the exact set a method-signature change must update) with 'implementers_total'; if it is a concrete TYPE, 'satisfies' lists the interfaces it implements — use these instead of grepping for method sets. To read a stub's body, call again with its exact qname. SEARCH FALLBACK: if 'symbol' does not resolve to a name, it is treated as a task phrase and you get a relevance-ranked 'matches' menu of signatures — re-query with one of their qnames for full context. The graph auto-rebuilds when the repo changed; a 'stale' freshness flag means the repo currently does not compile and the last good graph is being served."),
+		mcp.WithDescription(`Query the code graph of a Go repo anchored on one symbol — use this INSTEAD of grep/file-reading to understand code. Returns the symbol's full source plus its callers/callees as one-line signature stubs (interface dispatch resolved) and 'transitive_callers': the blast size (how many symbols transitively call it) so you know if a change is risky before walking it (set on funcs/methods only — a type/const/var omits it and the hint says how to gauge its dependents instead). depth>1 with direction=up lists that blast radius; 'to' gives the call path between two symbols. If the symbol is an INTERFACE, 'implementers' lists the concrete types that satisfy it (the exact set a method-signature change must update) with 'implementers_total'; if it is a concrete TYPE, 'satisfies' lists the interfaces it implements — use these instead of grepping for method sets. To read a stub's body, call again with its exact qname. SEARCH FALLBACK: if 'symbol' does not resolve to a name, it is treated as a task phrase and you get a relevance-ranked 'matches' menu of signatures — re-query with one of their qnames for full context. The graph auto-rebuilds when the repo changed; a 'stale' freshness flag means the repo currently does not compile and the last good graph is being served.
+
+USAGE PATTERNS:
+- Before EDITING a function: call with direction=up depth=3 first. The transitive_callers count tells you how many symbols break if you change the interface. A high number (>10) means proceed carefully — add a layer or preserve backward compat.
+- Before READING unfamiliar code: use direction=down depth=1 to see what a function depends on, then drill callees that look relevant.
+- Call path (--to): to understand how data flows between two points, e.g. graph_symbol "Store.Save" --to "Store.Search" shows the shortest call chain.
+
+STALE GRAPH: the freshness.stale flag is true when the repo changed but no longer type-checks — the graph serves the last good index. When stale, verify critical findings against actual source files before making decisions. The freshness.index_error field says why the rebuild failed.`),
 		mcp.WithString("repo", mcp.Required(),
 			mcp.Description("Absolute path to the repo root (your project working directory).")),
 		mcp.WithString("symbol", mcp.Required(),
@@ -78,7 +85,11 @@ type graphPackageArgs struct {
 
 func graphPackageToolDef() mcp.Tool {
 	return mcp.NewTool("graph_package",
-		mcp.WithDescription("Get the public surface of one Go package — exported symbols as one-line signatures with first doc lines, never bodies. Use this to orient in an area of a repo before drilling into symbols with graph_symbol. Same auto-rebuild and staleness semantics as graph_symbol."),
+		mcp.WithDescription(`Get the public surface of one Go package — exported symbols as one-line signatures with first doc lines, never bodies. Use this to orient in an area of a repo before drilling into symbols with graph_symbol.
+
+USAGE PATTERN: start with graph_package to see the lay of the land, then call graph_symbol on the symbol you need to understand. unexported_count tells you how many internal symbols exist (they are queryable by name via graph_symbol).
+
+STALE GRAPH: same staleness semantics as graph_symbol. When freshness.stale is true, cross-check against actual source files.`),
 		mcp.WithString("repo", mcp.Required(),
 			mcp.Description("Absolute path to the repo root (your project working directory).")),
 		mcp.WithString("package", mcp.Required(),
