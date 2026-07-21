@@ -39,3 +39,6 @@ Thumbs.db
 /files/
 future.todo
 CONTEXT.md
+
+# Local business/marketing notes
+*.local.md
