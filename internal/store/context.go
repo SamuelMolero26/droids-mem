@@ -42,14 +42,16 @@ type ContextRequest struct {
 // or a browse-tier memory (Snippet truncated from What). Tier field tells
 // the agent which it is.
 type ContextMemory struct {
-	ID        string `json:"id"`
-	Kind      string `json:"kind"`
-	Title     string `json:"title"`
-	Tier      string `json:"tier"`              // "always" | "browse"
-	Learned   string `json:"learned,omitempty"` // populated for always tier (and deep browse)
-	What      string `json:"what,omitempty"`    // populated for browse items in deep mode
-	Snippet   string `json:"snippet,omitempty"` // populated for browse tier (orient)
-	CreatedAt int64  `json:"created_at"`
+	ID             string `json:"id"`
+	Kind           string `json:"kind"`
+	Title          string `json:"title"`
+	Tier           string `json:"tier"`              // "always" | "browse"
+	Learned        string `json:"learned,omitempty"`
+	What           string `json:"what,omitempty"`
+	Snippet        string `json:"snippet,omitempty"`
+	CreatedAt      int64  `json:"created_at"`
+	ExpandCount    *int   `json:"expand_count,omitempty"`
+	LastExpandedAt *int64 `json:"last_expanded_at,omitempty"`
 }
 
 type ContextResponse struct {
@@ -187,12 +189,13 @@ func (s *Store) Context(ctx context.Context, req ContextRequest) (*ContextRespon
 func fetchLastSessionConn(ctx context.Context, conn *sql.Conn, taskType string) (*ContextMemory, error) {
 	var m ContextMemory
 	err := conn.QueryRowContext(ctx, `
-		SELECT id, kind, title, learned, created_at
+		SELECT id, kind, title, learned, created_at,
+		       expand_count, last_expanded_at
 		FROM memories
 		WHERE task_type = ? AND kind = 'session_summary'
 		ORDER BY created_at DESC
 		LIMIT 1
-	`, taskType).Scan(&m.ID, &m.Kind, &m.Title, &m.Learned, &m.CreatedAt)
+	`, taskType).Scan(&m.ID, &m.Kind, &m.Title, &m.Learned, &m.CreatedAt, &m.ExpandCount, &m.LastExpandedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -215,7 +218,8 @@ const maxAlwaysTierUserRules = 5
 // as a full-body always-tier item and stubs is empty (deep mode, ADR-0012).
 func fetchUserRulesConn(ctx context.Context, conn *sql.Conn, taskType string, fullCap int) (rules, stubs []ContextMemory, total int, err error) {
 	rows, err := conn.QueryContext(ctx, `
-		SELECT id, kind, title, learned, created_at
+		SELECT id, kind, title, learned, created_at,
+		       expand_count, last_expanded_at
 		FROM memories
 		WHERE task_type = ? AND kind = 'user_rule'
 		ORDER BY created_at DESC
@@ -229,7 +233,7 @@ func fetchUserRulesConn(ctx context.Context, conn *sql.Conn, taskType string, fu
 	for rows.Next() {
 		var m ContextMemory
 		var learned string
-		if err := rows.Scan(&m.ID, &m.Kind, &m.Title, &learned, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.Kind, &m.Title, &learned, &m.CreatedAt, &m.ExpandCount, &m.LastExpandedAt); err != nil {
 			return nil, nil, 0, fmt.Errorf("scan user rule: %w", err)
 		}
 		total++
@@ -276,7 +280,8 @@ func fetchBrowseTierConn(ctx context.Context, conn *sql.Conn, ftsQuery, taskType
 
 func fetchBrowseKindConn(ctx context.Context, conn *sql.Conn, ftsQuery, taskType, kind string, limit int, full bool) ([]ContextMemory, error) {
 	rows, err := conn.QueryContext(ctx, `
-		SELECT m.id, m.kind, m.title, m.what, m.learned, m.created_at
+		SELECT m.id, m.kind, m.title, m.what, m.learned, m.created_at,
+		       m.expand_count, m.last_expanded_at
 		FROM memories_fts fts
 		JOIN memories m ON m.rowid = fts.rowid
 		WHERE memories_fts MATCH ?
@@ -293,7 +298,7 @@ func fetchBrowseKindConn(ctx context.Context, conn *sql.Conn, ftsQuery, taskType
 	for rows.Next() {
 		var m ContextMemory
 		var what, learned string
-		if err := rows.Scan(&m.ID, &m.Kind, &m.Title, &what, &learned, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.Kind, &m.Title, &what, &learned, &m.CreatedAt, &m.ExpandCount, &m.LastExpandedAt); err != nil {
 			return nil, fmt.Errorf("scan browse (%s): %w", kind, err)
 		}
 		m.Tier = "browse"
