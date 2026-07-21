@@ -33,3 +33,6 @@ future.todo
 CONTEXT.mds
 *.local.md
 CONTEXT.md
+
+# Local business/marketing notes
+*.local.md

@@ -27,6 +27,8 @@ next.
 - **Code graph** — for Go repos, a per-repo symbol + call-edge index answers
   "what calls X / what does X call" in one query, signatures-first.
 - **TUI** — a terminal browser to read and prune the corpus by hand.
+- **Shared context** — opt in per memory to publish lessons into a git-tracked
+  pool teammates pull into their own store (scrubbed, deduped, off by default).
 
 Everything lives in `~/.droids-mem/`. No daemon to babysit — the MCP bridge
 spawns on demand.
@@ -130,6 +132,11 @@ memory list, and a detail pane that follows the cursor. Type to live-search
 backs out. A **CONNECTIONS** view surfaces how memories link to each other and
 to the files they came from.
 
+The TUI is also the front door for **shared context** (see below): `s` cycles a
+scope filter, `ctrl+s` shares the selection into the git-tracked pool (confirm
+dialog shows what's shared vs stripped), `ctrl+p` pulls a teammate's pool, and
+`ctrl+x` unshares a row back to personal.
+
 ```
 droids-mem tui◊
 ```
@@ -223,8 +230,13 @@ Six tools over `/mcp` (bearer auth on every request):
 - `mem_get` — fetch one memory by ID.
 
 **Code graph** (Go repos)
-- `graph_symbol` — a symbol's source plus callers/callees as signature stubs.
+- `graph_symbol` — a symbol's source plus callers/callees (and interface↔concrete
+  `implements` edges) as signature stubs.
 - `graph_package` — a package's exported surface, signatures only.
+
+Graph responses render as **TOON** (Token-Oriented Object Notation) — one shared
+header per neighbor array instead of repeating JSON keys on every row — to keep
+"what calls X" answers cheap on hub symbols.
 
 Operator commands (`list`, `schema`, `doctor`, `migrate`, `prune`, `scrub`) are
 **not** exposed over MCP.
@@ -256,6 +268,25 @@ droids-mem graph package <path> --repo /path      # exported surface
 
 Prefer these over grep for "what calls X" questions — one query, signatures
 only, so agents stay cheap.
+
+---
+
+## Shared context
+
+Memory is local and private by default — every row has a `scope`
+(`personal` | `shared`) that defaults to `personal`, so nothing leaves your
+store implicitly. Opt in per memory from the TUI: flip rows to `shared`, then
+**publish** them into a dedicated **git-tracked pool** (`shared.jsonl`, one file
+per `task_type`) that teammates **pull** into their own store.
+
+- Sharing is explicit and per-row — never a whole-corpus dump.
+- Every shared copy is **scrubbed** at the trust boundary (local paths, session
+  ids, and timestamps are stripped; content, tags, and kind cross over).
+- Import **dedupes across sources** by fingerprint + Jaccard, so the same lesson
+  from two teammates lands once.
+
+Shared copies enter the git-tracked pool and can't be fully retracted — anyone
+who pulled keeps their copy. The TUI confirm dialog spells this out before push.
 
 ---
 
@@ -313,6 +344,7 @@ State dir: `mem.db` (0600), `token` (0600), `mcp.pid`, `mcp.log`.
 | `recent-sessions` | List recent auto-saved session summaries |
 | `session` | Session-memory plumbing (stage, check, flush, recover, hook) |
 | `install` | Wire into a host: Claude Code hooks, or `--host codex\|opencode` MCP registration |
+| `uninstall` | Reverse `install`: unwire hooks, deregister the bridge, strip the CLAUDE.md block |
 | `doctor` | FTS integrity/rebuild, optimize, VACUUM, `--scrub-stats` |
 | `schema` | Show parameter schema for a command |
 | `scrub` | Run the scrub engine ad-hoc (`--check`, `--test`) |

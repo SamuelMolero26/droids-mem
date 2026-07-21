@@ -5,6 +5,70 @@ All notable changes to droids-mem are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Opt-in shared context** (ADR-0028 / ADR-0029): memories carry a
+  `scope` (`personal` | `shared`); `scope` now defaults to `personal` (v4→v5
+  migration backfills every existing row) so nothing leaves the local store
+  implicitly. Sharing is driven from the **TUI**: `s` cycles a scope filter,
+  `^s` opens a confirm dialog that flips the selection into a **git-tracked
+  shared pool** (`shared.jsonl`) and pushes, `^p` pulls a teammate's pool, `^x`
+  unshares a row back to personal. Every shared copy is scrubbed at the trust
+  boundary; import dedupes across sources by fingerprint + Jaccard. Store
+  primitives (`ExportShared` / `ImportShared` / `CountShared` / `SetScope`) back
+  it; no CLI `share`/`export`/`import` verbs.
+- **Uninstall command** (issue #27): `droids-mem uninstall` mirrors `install` —
+  removes the session-memory hooks from `~/.claude/settings.json`, deregisters
+  the MCP bridge, and strips the CLAUDE.md guidance block. Idempotent and
+  non-destructive to unrelated config; `--project`, `--host codex|opencode`,
+  and `--print` mirror `install`.
+- **TOON on the code-graph surface** (ADR-0027): `graph_symbol` / `graph_package`
+  (MCP + CLI) render their signatures-first neighbor arrays as TOON
+  (Token-Oriented Object Notation) — one shared header per array plus bare
+  rows, dropping the per-row JSON key repetition on the tabular graph output.
+- **`implements` edges on `graph_symbol`** (issue #48): an exact-match symbol
+  surfaces its interface↔concrete `implements` relationships alongside
+  callers/callees.
+- **Threshold-tuning log** (ADR-0026): an env-gated append log that records the
+  two unvalidated retrieval thresholds' live score distributions
+  (`jaccardDupeThreshold` near-dupe gate, `DefaultRelevanceFloor` recall floor)
+  so they can be retuned from data instead of inspection. Off by default.
+- **Multi-host install** (ADR-0019): `droids-mem install --host codex|opencode`
+  registers droids-mem as a stdio MCP server in that host's config
+  (`~/.codex/config.toml` / `~/.config/opencode/opencode.json`). Idempotent and
+  non-destructive; `--print` shows the snippet without writing. `--all` stays
+  Claude-only.
+- **Stdio transport**: `droids-mem serve --stdio` serves MCP over stdin/stdout
+  for hosts that spawn the server as a child process — no port, token, or
+  `ensure-server`; the host owns the lifecycle. `--addr`/`--endpoint` are
+  ignored. On stdio hosts the server instructions tell the model to save its
+  own end-of-run `session_summary` (no summary hook is wired); dedupe keeps
+  that safe if a hook is added later.
+- **Recall benchmark** (ADR-0025): a fixed 24-memory / 33-paraphrase corpus in
+  `internal/store/recall_benchmark_test.go` that scores retrieval across the
+  vocabulary gap and fails the build on regression; report in
+  [`eval/RESULTS.md`](eval/RESULTS.md), summary in the README.
+
+### Changed
+- **Graph neighbor truncation ranks by same-package first** (issue #49): when a
+  hub symbol's callers/callees exceed the cap, the kept set favours
+  same-package neighbors, and the response reports honest totals so a
+  truncated list is visible as truncated.
+- **`graph_symbol` per-tool adoption counter** (issue #51): a byte-append
+  side-file (0600) tallies how often each graph tool is invoked, for adoption
+  telemetry without touching `mem.db`.
+- **`transitive_callers` omitted on non-callable symbols** (issue #47): the
+  blast-size field only appears where a call graph exists, not on types/vars.
+- **Boot gate auto-remediates** (issue #29): a stale scrub baseline now
+  auto-runs `migrate --rescrub` on the first non-bypassed command instead of
+  taking down all memory tools until a manual migrate. The `boot_gate` error
+  only surfaces if the auto-migration itself fails.
+- **MCP runtime errors return a structured envelope** (`status`, `error`,
+  `message`, `retryable`, `suggestion`) — the dominant case is a transient
+  `BEGIN IMMEDIATE` write-lock timeout under concurrent writers, so the agent
+  sees `retryable` instead of a raw `SQLITE_BUSY` string.
+
 ## [1.1.1] — 2026-07-04
 
 Headline: a native code graph so agents answer "what calls X" from a
@@ -176,6 +240,7 @@ normally.
 - `workspace.yml` / inline scrub config → v1.1. v1.0 pattern set + order are
   hardcoded.
 
+[Unreleased]: https://github.com/SamuelMolero26/droids-mem/compare/v1.1.1...HEAD
 [1.1.1]: https://github.com/SamuelMolero26/droids-mem/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/SamuelMolero26/droids-mem/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/SamuelMolero26/droids-mem/compare/v1.0.0...v1.0.1
