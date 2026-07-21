@@ -43,7 +43,8 @@ const (
 	// retained slice is same-package-first then alphabetical — a partial slice,
 	// NOT the closest callers. callers_total/callees_total carry the real count
 	// (depth=1 only). Redirect: narrow with direction+depth=1 or graph_package.
-	truncatedHint = "neighbor list is a partial slice at the cap (see *_total), not the closest — narrow with a single direction at depth=1, or graph_package"
+	truncatedHint  = "neighbor list is a partial slice at the cap (see *_total), not the closest — narrow with a single direction at depth=1, or graph_package"
+	rebuildingHint = "graph is being rebuilt asynchronously — use graph_build_wait to block until ready, or retry"
 )
 
 // maxNeighbors caps neighbors per direction across all depths. A var, not a

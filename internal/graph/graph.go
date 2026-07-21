@@ -79,7 +79,33 @@ type Freshness struct {
 	Stamp      string `json:"stamp"`
 	IndexedAt  string `json:"indexed_at"`
 	Stale      bool   `json:"stale,omitempty"`
+	Rebuilding bool   `json:"rebuilding,omitempty"`
 	IndexError string `json:"index_error,omitempty"`
+}
+
+// stampTTL controls how long a stamp() result is cached per repo. The stamp
+// walk (~5-100 ms depending on repo size) runs on every query without the
+// cache; the TTL covers burst queries in an active agent session (the common
+// case). A cache hit serves the previous stamp, skipping the walk entirely,
+// but delays detection of a file edit by at most stampTTL before the stamp
+// comparison fires a rebuild. 2 seconds balances burst speed vs detection lag.
+//
+// Exported as a var (not const) so tests can disable it with stampTTL = 0.
+var stampTTL = 2 * time.Second
+
+type stampEntry struct {
+	stamp   string
+	expires time.Time
+}
+
+// buildState tracks one in-flight async rebuild for a repo.
+//
+//nolint:unused // ctx, stamp, done are forward-declared for Phase 2 (async rebuild lifecycle).
+type buildState struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	stamp  string        // the stamp value this build targets
+	done   chan struct{} // closed when build finishes (success or failure)
 }
 
 // Manager routes queries to per-repo graph databases, rebuilding a repo's
@@ -87,28 +113,42 @@ type Freshness struct {
 type Manager struct {
 	base string // e.g. ~/.droids-mem/graphs
 
-	mu    sync.Mutex
-	locks map[string]*sync.Mutex // per canonical repo path
-	conns map[string]*sql.DB     // open handle per repo db
+	mu         sync.Mutex
+	locks      map[string]*sync.Mutex
+	conns      map[string]*sql.DB     // open handle per repo db
+	stampCache map[string]*stampEntry // key: canonical repo path
+
+	buildsMu sync.Mutex
+	builds   map[string]*buildState // key: canonical repo path
 }
 
 // NewManager creates a Manager storing graphs under base.
 func NewManager(base string) *Manager {
 	return &Manager{
-		base:  base,
-		locks: make(map[string]*sync.Mutex),
-		conns: make(map[string]*sql.DB),
+		base:       base,
+		locks:      make(map[string]*sync.Mutex),
+		conns:      make(map[string]*sql.DB),
+		stampCache: make(map[string]*stampEntry),
+		builds:     make(map[string]*buildState),
 	}
 }
 
-// Close releases all cached database handles.
+// Close releases all cached database handles and cancels any in-flight async
+// rebuilds. Build goroutines detect the cancelled context and exit.
 func (m *Manager) Close() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	for _, c := range m.conns {
 		_ = c.Close()
 	}
 	m.conns = make(map[string]*sql.DB)
+	m.mu.Unlock()
+
+	m.buildsMu.Lock()
+	for _, bs := range m.builds {
+		bs.cancel()
+	}
+	m.builds = make(map[string]*buildState)
+	m.buildsMu.Unlock()
 }
 
 func (m *Manager) repoLock(repo string) *sync.Mutex {
@@ -189,7 +229,7 @@ func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, Freshn
 	lock.Lock()
 	defer lock.Unlock()
 
-	current, err := stamp(repo)
+	current, err := m.cachedStamp(repo)
 	if err != nil {
 		return nil, Freshness{}, err
 	}
@@ -271,6 +311,31 @@ func (m *Manager) closeConn(path string) {
 	}
 }
 
+// cachedStamp returns the stamp for repo, caching the result so rapid-fire
+// queries during an agent session skip the file-tree walk. Returns a fresh
+// stamp from stamp() when the cache is empty or expired (stampTTL).
+func (m *Manager) cachedStamp(repo string) (string, error) {
+	if stampTTL <= 0 {
+		return stamp(repo)
+	}
+	m.mu.Lock()
+	if e, ok := m.stampCache[repo]; ok && time.Now().Before(e.expires) {
+		m.mu.Unlock()
+		return e.stamp, nil
+	}
+	m.mu.Unlock()
+
+	s, err := stamp(repo)
+	if err != nil {
+		return "", err
+	}
+
+	m.mu.Lock()
+	m.stampCache[repo] = &stampEntry{stamp: s, expires: time.Now().Add(stampTTL)}
+	m.mu.Unlock()
+	return s, nil
+}
+
 // Index force-builds (or refreshes) the graph for repo and reports its size.
 func (m *Manager) Index(ctx context.Context, repo string) (*IndexResponse, error) {
 	repo, err := canonicalRepo(repo)
@@ -281,7 +346,7 @@ func (m *Manager) Index(ctx context.Context, repo string) (*IndexResponse, error
 	lock.Lock()
 	defer lock.Unlock()
 
-	current, err := stamp(repo)
+	current, err := m.cachedStamp(repo)
 	if err != nil {
 		return nil, err
 	}

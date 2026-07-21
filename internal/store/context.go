@@ -34,7 +34,7 @@ const (
 
 type ContextRequest struct {
 	TaskType string      `json:"task_type"`
-	Query    string      `json:"query"`          // optional — absent or punctuation-only ranks browse by recency
+	Query    string      `json:"query"`          // optional — falls back to task_type tokens
 	Mode     ContextMode `json:"mode,omitempty"` // optional — defaults to orient
 }
 
@@ -45,19 +45,13 @@ type ContextMemory struct {
 	ID             string `json:"id"`
 	Kind           string `json:"kind"`
 	Title          string `json:"title"`
-	Tier           string `json:"tier"` // "always" | "browse"
+	Tier           string `json:"tier"`              // "always" | "browse"
 	Learned        string `json:"learned,omitempty"`
 	What           string `json:"what,omitempty"`
 	Snippet        string `json:"snippet,omitempty"`
 	CreatedAt      int64  `json:"created_at"`
-	ExpandCount    int    `json:"expand_count"`
-	LastExpandedAt int64  `json:"last_expanded_at,omitempty"`
-	// ReviewAfter/Pinned/NeedsReview mirror Memory (inspect.go) — same
-	// nullable-no-COALESCE scan and Go-computed derivation (D4). Surfaced on
-	// both mem_context and mem_search per D2.
-	ReviewAfter *int64 `json:"review_after,omitempty"`
-	Pinned      bool   `json:"pinned"`
-	NeedsReview bool   `json:"needs_review"`
+	ExpandCount    *int   `json:"expand_count,omitempty"`
+	LastExpandedAt *int64 `json:"last_expanded_at,omitempty"`
 }
 
 type ContextResponse struct {
@@ -101,17 +95,15 @@ func (s *Store) Context(ctx context.Context, req ContextRequest) (*ContextRespon
 		}
 	}
 
-	// Empty (or punctuation-only) query routes the browse tier to its recency
-	// branch. The task_type is deliberately NOT substituted in as a stand-in
-	// search term: it is an identity key, not vocabulary (ADR-0032, issue #76).
-	//
-	// The hasSearchableText gate is load-bearing, not defensive: phraseFTSQuery
-	// splits on strings.Fields, so punctuation-only input yields a non-empty
-	// MATCH expression whose phrases tokenize to nothing and match no row —
-	// silently reproducing the empty browse tier this branch exists to prevent.
-	ftsQuery := ""
-	if hasSearchableText(req.Query) {
-		ftsQuery = phraseFTSQuery(strings.TrimSpace(req.Query))
+	rawQuery := strings.TrimSpace(req.Query)
+	if rawQuery == "" {
+		rawQuery = taskType
+	}
+	ftsQuery := phraseFTSQuery(rawQuery)
+	if ftsQuery == "" {
+		// rawQuery was all punctuation/no tokens; fall back to the task_type
+		// (always a non-empty alphanumeric slug) so the browse tier still ranks.
+		ftsQuery = phraseFTSQuery(taskType)
 	}
 
 	resp := &ContextResponse{
@@ -196,25 +188,20 @@ func (s *Store) Context(ctx context.Context, req ContextRequest) (*ContextRespon
 
 func fetchLastSessionConn(ctx context.Context, conn *sql.Conn, taskType string) (*ContextMemory, error) {
 	var m ContextMemory
-	var reviewAfter sql.NullInt64
 	err := conn.QueryRowContext(ctx, `
 		SELECT id, kind, title, learned, created_at,
-		       expand_count, COALESCE(last_expanded_at, 0), review_after, pinned
+		       expand_count, last_expanded_at
 		FROM memories
 		WHERE task_type = ? AND kind = 'session_summary'
-		ORDER BY created_at DESC, id DESC
+		ORDER BY created_at DESC
 		LIMIT 1
-	`, taskType).Scan(&m.ID, &m.Kind, &m.Title, &m.Learned, &m.CreatedAt, &m.ExpandCount, &m.LastExpandedAt, &reviewAfter, &m.Pinned)
+	`, taskType).Scan(&m.ID, &m.Kind, &m.Title, &m.Learned, &m.CreatedAt, &m.ExpandCount, &m.LastExpandedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("fetch last session: %w", err)
 	}
-	if reviewAfter.Valid {
-		m.ReviewAfter = &reviewAfter.Int64
-	}
-	m.NeedsReview = needsReview(m.ReviewAfter)
 	m.Tier = "always"
 	return &m, nil
 }
@@ -232,10 +219,10 @@ const maxAlwaysTierUserRules = 5
 func fetchUserRulesConn(ctx context.Context, conn *sql.Conn, taskType string, fullCap int) (rules, stubs []ContextMemory, total int, err error) {
 	rows, err := conn.QueryContext(ctx, `
 		SELECT id, kind, title, learned, created_at,
-		       expand_count, COALESCE(last_expanded_at, 0), review_after, pinned
+		       expand_count, last_expanded_at
 		FROM memories
 		WHERE task_type = ? AND kind = 'user_rule'
-		ORDER BY created_at DESC, id DESC
+		ORDER BY created_at DESC
 	`, taskType)
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("fetch user rules: %w", err)
@@ -246,14 +233,9 @@ func fetchUserRulesConn(ctx context.Context, conn *sql.Conn, taskType string, fu
 	for rows.Next() {
 		var m ContextMemory
 		var learned string
-		var reviewAfter sql.NullInt64
-		if err := rows.Scan(&m.ID, &m.Kind, &m.Title, &learned, &m.CreatedAt, &m.ExpandCount, &m.LastExpandedAt, &reviewAfter, &m.Pinned); err != nil {
+		if err := rows.Scan(&m.ID, &m.Kind, &m.Title, &learned, &m.CreatedAt, &m.ExpandCount, &m.LastExpandedAt); err != nil {
 			return nil, nil, 0, fmt.Errorf("scan user rule: %w", err)
 		}
-		if reviewAfter.Valid {
-			m.ReviewAfter = &reviewAfter.Int64
-		}
-		m.NeedsReview = needsReview(m.ReviewAfter)
 		total++
 		if fullCap < 0 || len(rules) < fullCap {
 			m.Tier = "always"
@@ -297,47 +279,17 @@ func fetchBrowseTierConn(ctx context.Context, conn *sql.Conn, ftsQuery, taskType
 }
 
 func fetchBrowseKindConn(ctx context.Context, conn *sql.Conn, ftsQuery, taskType, kind string, limit int, full bool) ([]ContextMemory, error) {
-	// Orient discards `learned` (it only renders a snippet of `what`), so the
-	// column is substituted with an empty literal rather than read — a browse
-	// tier of 20 rows would otherwise pull 20 full bodies off overflow pages on
-	// every session-start call just to throw them away.
-	learnedCol := `''`
-	if full {
-		learnedCol = `m.learned`
-	}
-	browseCols := `m.id, m.kind, m.title, m.what, ` + learnedCol + `, m.created_at,
-		       m.expand_count, COALESCE(m.last_expanded_at, 0), m.review_after, m.pinned`
-
-	var (
-		rows *sql.Rows
-		err  error
-	)
-	if ftsQuery == "" {
-		// No query, no relevance signal: rank by recency. The FTS join is
-		// dropped rather than matched against a placeholder — task_type and
-		// kind already scope the rows, and bm25() is only legal alongside a
-		// MATCH. id DESC only breaks created_at ties (routine: a session-end
-		// rollup saves several memories in one second) so the sort is total.
-		rows, err = conn.QueryContext(ctx, `
-			SELECT `+browseCols+`
-			FROM memories m
-			WHERE m.task_type = ?
-			AND m.kind = ?
-			ORDER BY m.created_at DESC, m.id DESC
-			LIMIT ?
-		`, taskType, kind, limit)
-	} else {
-		rows, err = conn.QueryContext(ctx, `
-			SELECT `+browseCols+`
-			FROM memories_fts fts
-			JOIN memories m ON m.rowid = fts.rowid
-			WHERE memories_fts MATCH ?
-			AND m.task_type = ?
-			AND m.kind = ?
-			ORDER BY bm25(memories_fts, 3, 1, 2, 1)
-			LIMIT ?
-		`, ftsQuery, taskType, kind, limit)
-	}
+	rows, err := conn.QueryContext(ctx, `
+		SELECT m.id, m.kind, m.title, m.what, m.learned, m.created_at,
+		       m.expand_count, m.last_expanded_at
+		FROM memories_fts fts
+		JOIN memories m ON m.rowid = fts.rowid
+		WHERE memories_fts MATCH ?
+		AND m.task_type = ?
+		AND m.kind = ?
+		ORDER BY bm25(memories_fts, 3, 1, 2, 1)
+		LIMIT ?
+	`, ftsQuery, taskType, kind, limit)
 	if err != nil {
 		return nil, fmt.Errorf("fetch browse (%s): %w", kind, err)
 	}
@@ -346,14 +298,9 @@ func fetchBrowseKindConn(ctx context.Context, conn *sql.Conn, ftsQuery, taskType
 	for rows.Next() {
 		var m ContextMemory
 		var what, learned string
-		var reviewAfter sql.NullInt64
-		if err := rows.Scan(&m.ID, &m.Kind, &m.Title, &what, &learned, &m.CreatedAt, &m.ExpandCount, &m.LastExpandedAt, &reviewAfter, &m.Pinned); err != nil {
+		if err := rows.Scan(&m.ID, &m.Kind, &m.Title, &what, &learned, &m.CreatedAt, &m.ExpandCount, &m.LastExpandedAt); err != nil {
 			return nil, fmt.Errorf("scan browse (%s): %w", kind, err)
 		}
-		if reviewAfter.Valid {
-			m.ReviewAfter = &reviewAfter.Int64
-		}
-		m.NeedsReview = needsReview(m.ReviewAfter)
 		m.Tier = "browse"
 		if full {
 			m.What = what

@@ -3,10 +3,12 @@ package tui
 import (
 	"context"
 	"io"
+	"path/filepath"
 	"testing"
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/samuelmolero26/droids-mem/internal/state"
 	"github.com/samuelmolero26/droids-mem/internal/store"
 )
 
@@ -441,6 +443,50 @@ func TestShare_SelectionConfirmFlipsScope(t *testing.T) {
 	m, _ = upd(t, m, msg)
 	if len(m.selected) != 0 || m.status == "" {
 		t.Errorf("post-share: selected=%d status=%q, want cleared + status set", len(m.selected), m.status)
+	}
+}
+
+func TestShareRepo_RelativeInputResolvedAbsolute(t *testing.T) {
+	fs := &fakeStore{}
+	m := New(fs)
+	m.list.SetItems([]list.Item{listItem{id: "a", title: "A"}})
+	m, _ = upd(t, m, key(" "))      // select cursor row "a"
+	m, _ = upd(t, m, key("ctrl+s")) // open share dialog
+	m.repoInput.SetValue("my-shared-repo")
+	var gotRepo string
+	m.push = func(_ context.Context, repo string, _ memStore, _ int) error {
+		gotRepo = repo
+		return nil
+	}
+	m, cmd := upd(t, m, key("enter")) // confirm
+	runCmd(cmd)
+	want, err := filepath.Abs("my-shared-repo")
+	if err != nil {
+		t.Fatalf("filepath.Abs: %v", err)
+	}
+	if gotRepo != want {
+		t.Errorf("push repo = %q, want absolute %q", gotRepo, want)
+	}
+}
+
+func TestShareRepo_PersistedAbsolute_ReusedAcrossCwd(t *testing.T) {
+	t.Setenv("DROIDS_MEM_HOME", t.TempDir())
+	fs := &fakeStore{}
+	m := New(fs)
+	m.list.SetItems([]list.Item{listItem{id: "a", title: "A"}})
+	m, _ = upd(t, m, key(" "))      // select cursor row "a"
+	m, _ = upd(t, m, key("ctrl+s")) // open share dialog
+	m.repoInput.SetValue("my-shared-repo")
+	m.push = func(_ context.Context, _ string, _ memStore, _ int) error { return nil }
+	m, cmd := upd(t, m, key("enter")) // confirm
+	runCmd(cmd)
+
+	loaded, err := state.LoadShareRepo()
+	if err != nil {
+		t.Fatalf("LoadShareRepo: %v", err)
+	}
+	if !filepath.IsAbs(loaded) {
+		t.Fatalf("persisted share_repo = %q, want absolute path", loaded)
 	}
 }
 

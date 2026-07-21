@@ -148,6 +148,11 @@ func TestPackageSurface(t *testing.T) {
 }
 
 func TestStalenessRebuildAndDegradedServe(t *testing.T) {
+	// Disable stamp caching: this test modifies files and queries
+	// immediately, so a cached stamp would mask the change.
+	defer func(d time.Duration) { stampTTL = d }(stampTTL)
+	stampTTL = 0
+
 	m, repo := testManager(t)
 	ctx := context.Background()
 

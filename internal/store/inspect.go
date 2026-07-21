@@ -9,17 +9,19 @@ import (
 )
 
 type Memory struct {
-	ID          string `json:"id"`
-	SessionID   string `json:"session_id"`
-	TaskType    string `json:"task_type"`
-	Kind        string `json:"kind"`
-	Title       string `json:"title"`
-	What        string `json:"what"`
-	Learned     string `json:"learned"`
-	Tags        string `json:"tags"`
-	Fingerprint string `json:"fingerprint"`
-	CreatedAt   int64  `json:"created_at"`
-	UpdatedAt   int64  `json:"updated_at"`
+	ID             string `json:"id"`
+	SessionID      string `json:"session_id"`
+	TaskType       string `json:"task_type"`
+	Kind           string `json:"kind"`
+	Title          string `json:"title"`
+	What           string `json:"what"`
+	Learned        string `json:"learned"`
+	Tags           string `json:"tags"`
+	Fingerprint    string `json:"fingerprint"`
+	CreatedAt      int64  `json:"created_at"`
+	UpdatedAt      int64  `json:"updated_at"`
+	ExpandCount    *int   `json:"expand_count,omitempty"`
+	LastExpandedAt *int64 `json:"last_expanded_at,omitempty"`
 	// Scope ('personal'|'shared') is populated by List and GetRow — the in-process
 	// TUI sharing surface renders it. RecentSessions leaves it "".
 	Scope string `json:"scope,omitempty"`
@@ -73,7 +75,8 @@ func (s *Store) List(ctx context.Context, req ListRequest) (*ListResponse, error
 	args = append(args, limit)
 
 	stmt := fmt.Sprintf(`
-		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at, scope
+		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at,
+		       expand_count, last_expanded_at, scope
 		FROM memories %s
 		ORDER BY created_at DESC
 		LIMIT ?
@@ -88,7 +91,7 @@ func (s *Store) List(ctx context.Context, req ListRequest) (*ListResponse, error
 	memories := []Memory{}
 	for rows.Next() {
 		var m Memory
-		if err := rows.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.Scope); err != nil {
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &m.Scope); err != nil {
 			return nil, fmt.Errorf("scan memory: %w", err)
 		}
 		memories = append(memories, m)
@@ -125,7 +128,8 @@ func (s *Store) RecentSessions(ctx context.Context, req RecentSessionsRequest) (
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at
+		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at,
+		       expand_count, last_expanded_at
 		FROM memories
 		WHERE origin = 'auto'
 		ORDER BY created_at DESC
@@ -139,7 +143,7 @@ func (s *Store) RecentSessions(ctx context.Context, req RecentSessionsRequest) (
 	sessions := []Memory{}
 	for rows.Next() {
 		var m Memory
-		if err := rows.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt); err != nil {
 			return nil, fmt.Errorf("scan session: %w", err)
 		}
 		sessions = append(sessions, m)
@@ -162,9 +166,10 @@ func (s *Store) GetRow(ctx context.Context, id string) (*Memory, error) {
 
 	var m Memory
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at, scope
+		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at,
+		       expand_count, last_expanded_at, scope
 		FROM memories WHERE id = ?
-	`, id).Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.Scope)
+	`, id).Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &m.Scope)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -214,11 +219,15 @@ func (s *Store) Counts(ctx context.Context) (*CountsResponse, error) {
 // best-effort telemetry — a hit returns the Memory whether or not the signal
 // could be written (see recordExpansion). Operator/TUI reads must use GetRow so
 // browsing does not pollute the signal.
+//
+// Get re-reads after recording so the response includes the updated expand
+// signal (expand_count and last_expanded_at reflect the just-made increment).
 func (s *Store) Get(ctx context.Context, id string) (*Memory, error) {
 	m, err := s.GetRow(ctx, id)
 	if err != nil || m == nil {
 		return m, err
 	}
 	s.recordExpansion(ctx, m.ID)
-	return m, nil
+	// Re-read to include the updated expand signal. Cheap: single-row pk lookup.
+	return s.GetRow(ctx, id)
 }

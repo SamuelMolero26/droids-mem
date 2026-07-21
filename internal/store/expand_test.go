@@ -11,7 +11,7 @@ import (
 // readExpand reads the Expand signal columns for a Memory id directly from the
 // DB, bypassing the struct-level fields now surfaced on Memory (via GetRow,
 // List, RecentSessions). Still useful for verifying DB-level state during tests
-// without relying on the struct's omitempty JSON tags.
+// without relying on the struct's pointer-typed fields or omitempty JSON.
 func readExpand(t *testing.T, s *store.Store, id string) (count int, last sql.NullInt64) {
 	t.Helper()
 	if err := s.DB().QueryRow(
@@ -51,7 +51,7 @@ func TestGet_MultipleIncrements(t *testing.T) {
 	s := newTestStore(t)
 	saved, _ := s.Save(context.Background(), validReq())
 
-	for i := range 3 {
+	for i := 0; i < 3; i++ {
 		if _, err := s.Get(context.Background(), saved.ID); err != nil {
 			t.Fatalf("Get #%d: %v", i, err)
 		}

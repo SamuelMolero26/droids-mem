@@ -2,51 +2,20 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
-	"slices"
-	"sort"
 	"strings"
-	"unicode"
 )
 
 const (
 	defaultSearchLimit = 5
 	maxSearchLimit     = 20
-	// internalFetchMultiplier fetches more results from FTS5 than the caller
-	// requested, then re-ranks by a composite score. This catches relevant
-	// memories that BM25 ranked low but share significant token overlap with
-	// the query (e.g. synonym-heavy queries where FTS5 OR-of-phrases hits
-	// loosely). The multiplier is deliberately modest — embedding-free retrieval
-	// improvement without the cost of sqlite-vec.
-	internalFetchMultiplier = 3
-	maxInternalFetch        = 60
-	// overlapWeight tunes how much literal token overlap (0..1) can promote a
-	// result above its raw BM25 rank in the composite sort. A full-overlap
-	// result gets a -overlapWeight bonus to its (negative, lower-is-better)
-	// BM25 score.
-	//
-	// Swept against the recall eval (ADR-0025): every value from 0 through 1.5
-	// scores identically (recall@1 88%, MRR 0.90); 1.75 and above drops to 85% /
-	// 0.89. The cliff is not gradual — adjacent BM25 scores on this corpus sit
-	// ~0.16 apart, so once overlapWeight exceeds ~1.6 a 0.10 overlap edge is
-	// enough to outvote a better BM25 match. Held at 1.0 to stay mid-plateau
-	// rather than one step from the cliff.
-	//
-	// The eval cannot currently justify a *non-zero* value either: 0 and 1.5
-	// score the same, because overlap only reorders ranks 6-9 here. That is a
-	// limit of the 24-memory eval corpus, where BM25's IDF term is degenerate —
-	// not evidence the blend is useless on a real store. Re-tune when the
-	// corpus grows.
-	overlapWeight = 1.0
 )
 
 type SearchRequest struct {
-	Query       string `json:"query"`
-	TaskType    string `json:"task_type"`    // optional filter
-	Kind        string `json:"kind"`         // optional filter
-	Limit       int    `json:"limit"`        // default 5, max 20
-	AllProjects bool   `json:"all_projects"` // skip task_type filter — search every project
+	Query    string `json:"query"`
+	TaskType string `json:"task_type"` // optional filter
+	Kind     string `json:"kind"`      // optional filter
+	Limit    int    `json:"limit"`     // default 5, max 20
 }
 
 type SearchResult struct {
@@ -56,16 +25,9 @@ type SearchResult struct {
 	Learned        string  `json:"learned"`
 	TaskType       string  `json:"task_type"`
 	CreatedAt      int64   `json:"created_at"`
-	Score          float64 `json:"score"`         // BM25 rank — more negative = better match
-	OverlapScore   float64 `json:"overlap_score"` // TokenOverlap(query, title+learned) — 0..1, higher = more literal token overlap
-	ExpandCount    int     `json:"expand_count"`
-	LastExpandedAt int64   `json:"last_expanded_at,omitempty"`
-	// ReviewAfter/Pinned/NeedsReview mirror Memory (inspect.go) — same
-	// nullable-no-COALESCE scan and Go-computed derivation (D4). Audit-only:
-	// never filters or reorders search results (D2), only adds the fields.
-	ReviewAfter *int64 `json:"review_after,omitempty"`
-	Pinned      bool   `json:"pinned"`
-	NeedsReview bool   `json:"needs_review"`
+	Score          float64 `json:"score"` // BM25 rank — more negative = better match
+	ExpandCount    *int    `json:"expand_count,omitempty"`
+	LastExpandedAt *int64  `json:"last_expanded_at,omitempty"`
 }
 
 type SearchResponse struct {
@@ -100,7 +62,7 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 	conditions := []string{"memories_fts MATCH ?"}
 	args := []any{ftsQuery}
 
-	if !req.AllProjects && req.TaskType != "" {
+	if req.TaskType != "" {
 		conditions = append(conditions, "m.task_type = ?")
 		args = append(args, req.TaskType)
 	}
@@ -125,32 +87,15 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 		return nil, fmt.Errorf("search count: %w", err)
 	}
 
-	// Fetch more results than requested, then re-rank by a composite of BM25 +
-	// TokenOverlap. FTS5 OR-of-phrases returns results where ANY token matched —
-	// a relevant memory with low lexical overlap may rank below noise. By
-	// fetching 3× the limit internally and re-ranking, we promote results
-	// whose literal token set overlaps meaningfully with the query.
-	//
-	// The ORDER BY uses the project's column weights (title ×3, learned ×2 —
-	// same vector as save.go, context.go, prune.go, connections.go), not the
-	// bare fts.rank. This gates twice: it decides which rows enter the 3×
-	// window at all (a target missed here can never be re-ranked back in) and
-	// it feeds CompositeScore below.
-	internalLimit := min(limit*internalFetchMultiplier, maxInternalFetch)
-
-	// slices.Clip: append must not write into args' spare capacity, or a later
-	// query reusing args silently sees internalLimit appended. cmd_uninstall.go
-	// already guards the same way with a three-index slice.
-	pageArgs := append(slices.Clip(args), internalLimit)
+	pageArgs := append(args, limit)
 	// #nosec G201 -- same as above: hardcoded conditions, parameterized values.
 	stmt := fmt.Sprintf(`
-		SELECT m.id, m.kind, m.title, m.learned, m.task_type, m.created_at,
-		       bm25(memories_fts, 3, 1, 2, 1) AS rank,
-		       m.expand_count, COALESCE(m.last_expanded_at, 0), m.review_after, m.pinned
+		SELECT m.id, m.kind, m.title, m.learned, m.task_type, m.created_at, fts.rank,
+		       m.expand_count, m.last_expanded_at
 		FROM memories_fts fts
 		JOIN memories m ON m.rowid = fts.rowid
 		WHERE %s
-		ORDER BY rank
+		ORDER BY fts.rank
 		LIMIT ?
 	`, whereClause)
 
@@ -163,46 +108,17 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 	results := []SearchResult{}
 	for rows.Next() {
 		var r SearchResult
-		var reviewAfter sql.NullInt64
 		if err := rows.Scan(&r.ID, &r.Kind, &r.Title, &r.Learned, &r.TaskType, &r.CreatedAt, &r.Score,
-			&r.ExpandCount, &r.LastExpandedAt, &reviewAfter, &r.Pinned); err != nil {
+			&r.ExpandCount, &r.LastExpandedAt); err != nil {
 			return nil, fmt.Errorf("scan result: %w", err)
 		}
-		if reviewAfter.Valid {
-			r.ReviewAfter = &reviewAfter.Int64
-		}
-		r.NeedsReview = needsReview(r.ReviewAfter)
-		r.OverlapScore = TokenOverlap(req.Query, r.Title+" "+r.Learned)
 		results = append(results, r)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("search rows: %w", err)
 	}
 
-	// Re-rank by a composite that blends BM25 rank with token overlap (see
-	// CompositeScore). BM25 alone orders by fts.rank; blending overlap in lets a
-	// result at the tail of BM25 rank that shares significant literal token
-	// overlap with the query climb above loosely-matched noise, without
-	// discarding BM25's signal. This is why we fetch 3× the limit internally.
-	sort.SliceStable(results, func(i, j int) bool {
-		return CompositeScore(results[i]) < CompositeScore(results[j])
-	})
-
-	// Trim to requested limit
-	if len(results) > limit {
-		results = results[:limit]
-	}
-
 	return &SearchResponse{Results: results, Total: total}, nil
-}
-
-// CompositeScore blends a result's BM25 rank with its token overlap into a
-// single sort key; lower is better. Score is the FTS5 bm25 rank (negative,
-// more negative = better); OverlapScore is 0..1 (higher = better), so we
-// subtract it (weighted) to reward literal token overlap. This lets a
-// high-overlap result outrank a marginally-better BM25 match.
-func CompositeScore(r SearchResult) float64 {
-	return r.Score - overlapWeight*r.OverlapScore
 }
 
 // phraseFTSQuery converts arbitrary user text into a safe FTS5 MATCH expression.
@@ -223,22 +139,6 @@ func CompositeScore(r SearchResult) float64 {
 //
 // Returns "" when the input has no tokens (e.g. all punctuation); callers MUST
 // treat that as "no searchable terms" and skip the MATCH rather than run it on "".
-// hasSearchableText reports whether s holds at least one letter or digit.
-//
-// FTS5's tokenizer emits no tokens for pure punctuation, so a query like
-// ",,, :::" survives strings.Fields as real "words" and phraseFTSQuery turns it
-// into a non-empty MATCH expression of phrases that can never match anything.
-// Callers use this to tell "no query" from "a query FTS5 cannot use", which
-// look identical to the user and must behave identically.
-func hasSearchableText(s string) bool {
-	for _, r := range s {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			return true
-		}
-	}
-	return false
-}
-
 func phraseFTSQuery(q string) string {
 	parts := strings.Fields(q)
 	if len(parts) == 0 {
