@@ -521,11 +521,14 @@ func (m Model) graphQueryCmd(q string) tea.Cmd {
 	g := m.graphQ
 	repo := m.graphRepo
 	return func() tea.Msg {
-		ctx := context.Background()
+		// Bound the query so a slow/hung graph rebuild can't block this
+		// goroutine forever; the adapter propagates ctx to graph.Manager.
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
 		// Heuristic: if the query contains "/" or looks dotted, try symbol first.
 		// Otherwise start with package.
-		hasSlash := contains(q, "/")
-		hasDot := contains(q, ".")
+		hasSlash := strings.Contains(q, "/")
+		hasDot := strings.Contains(q, ".")
 
 		if hasSlash || !hasDot {
 			// Try as a package path first.
@@ -547,18 +550,6 @@ func (m Model) graphQueryCmd(q string) tea.Cmd {
 		}
 		return graphMsg{content: out}
 	}
-}
-
-// contains is a small helper to avoid importing strings in the hot path.
-func contains(s, substr string) bool { return len(s) >= len(substr) && findStr(s, substr) >= 0 }
-
-func findStr(s, sub string) int {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
 }
 
 // handleNav routes arrow/paging keys to the focused pane.

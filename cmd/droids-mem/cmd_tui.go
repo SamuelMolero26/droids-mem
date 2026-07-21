@@ -18,24 +18,24 @@ type graphAdapter struct {
 	repo string
 }
 
-func (a *graphAdapter) Package(_ context.Context, repo, pkg string) (string, error) {
+func (a *graphAdapter) Package(ctx context.Context, repo, pkg string) (string, error) {
 	r := a.repo
 	if repo != "" {
 		r = repo
 	}
-	resp, err := a.gm.Package(context.Background(), graph.PackageRequest{Repo: r, Package: pkg})
+	resp, err := a.gm.Package(ctx, graph.PackageRequest{Repo: r, Package: pkg})
 	if err != nil {
 		return "", err
 	}
 	return marshalJSON(resp)
 }
 
-func (a *graphAdapter) Symbol(_ context.Context, repo, symbol string) (string, error) {
+func (a *graphAdapter) Symbol(ctx context.Context, repo, symbol string) (string, error) {
 	r := a.repo
 	if repo != "" {
 		r = repo
 	}
-	resp, err := a.gm.Symbol(context.Background(), graph.SymbolRequest{Repo: r, Symbol: symbol})
+	resp, err := a.gm.Symbol(ctx, graph.SymbolRequest{Repo: r, Symbol: symbol})
 	if err != nil {
 		return "", err
 	}

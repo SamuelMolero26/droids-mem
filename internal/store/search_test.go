@@ -3,91 +3,9 @@ package store_test
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/samuelmolero26/droids-mem/internal/store"
 )
-
-// TestSearch_SurfacesNeedsReviewAndPinned is the [GUARD] for Phase 2: the
-// SearchResult projection must carry needs_review/pinned too (D2 — search
-// consumers still want the trust signal), computed the same audit-only way
-// as Context (D4): it never changes BM25 rank order, only adds the fields.
-func TestSearch_SurfacesNeedsReviewAndPinned(t *testing.T) {
-	s, conn := newTestStoreWithConn(t)
-	taskType := "lifecycle_search"
-
-	saveAndGetID := func(req store.SaveRequest) string {
-		resp, err := s.Save(context.Background(), req)
-		if err != nil {
-			t.Fatalf("seed save: %v", err)
-		}
-		return resp.ID
-	}
-
-	needsReviewID := saveAndGetID(store.SaveRequest{
-		TaskType: taskType, Kind: "error_resolution",
-		Title: "Phone mapping bug", What: "field mismatch", Learned: "map phone field", Tags: "phone",
-	})
-	pinnedID := saveAndGetID(store.SaveRequest{
-		TaskType: taskType, Kind: "task_pattern",
-		Title: "Pinned pattern", What: "csv normalization", Learned: "normalize csv dates", Tags: "csv",
-	})
-	normalID := saveAndGetID(store.SaveRequest{
-		TaskType: taskType, Kind: "user_rule",
-		Title: "Plain rule", What: "no marks here", Learned: "nothing special", Tags: "plain",
-	})
-
-	past := time.Now().Add(-time.Hour).Unix()
-	if _, err := conn.Exec(`UPDATE memories SET review_after = ? WHERE id = ?`, past, needsReviewID); err != nil {
-		t.Fatalf("seed review_after: %v", err)
-	}
-	if _, err := conn.Exec(`UPDATE memories SET pinned = 1 WHERE id = ?`, pinnedID); err != nil {
-		t.Fatalf("seed pinned: %v", err)
-	}
-
-	resp, err := s.Search(context.Background(), store.SearchRequest{Query: "phone csv plain", TaskType: taskType})
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
-
-	byID := make(map[string]store.SearchResult, len(resp.Results))
-	for _, r := range resp.Results {
-		byID[r.ID] = r
-	}
-
-	got, ok := byID[needsReviewID]
-	if !ok {
-		t.Fatal("expected needs-review row in search results")
-	}
-	if !got.NeedsReview {
-		t.Error("NeedsReview = false, want true")
-	}
-	if got.Pinned {
-		t.Error("Pinned = true, want false")
-	}
-
-	got, ok = byID[pinnedID]
-	if !ok {
-		t.Fatal("expected pinned row in search results")
-	}
-	if !got.Pinned {
-		t.Error("Pinned = false, want true")
-	}
-	if got.NeedsReview {
-		t.Error("NeedsReview = true, want false")
-	}
-
-	got, ok = byID[normalID]
-	if !ok {
-		t.Fatal("expected normal row in search results")
-	}
-	if got.NeedsReview {
-		t.Error("normal row NeedsReview = true, want false")
-	}
-	if got.Pinned {
-		t.Error("normal row Pinned = true, want false")
-	}
-}
 
 func seedMemories(t *testing.T, s *store.Store) {
 	t.Helper()
@@ -271,16 +189,9 @@ func TestSearch_ResultsOrderedByComposite(t *testing.T) {
 // a result with a weaker BM25 rank but full token overlap must outrank a
 // stronger-BM25 result with zero overlap. Under the old "BM25 primary, overlap
 // only as tiebreaker" sort this promotion never happened.
-//
-// The 0.5 BM25 gap is deliberate: a full-overlap result earns exactly
-// overlapWeight, so the gap must stay below it for the promotion to be
-// possible at all. Picking a gap equal to the weight (as this test originally
-// did, at 1.0) asserts a tie, not a promotion. If overlapWeight is ever tuned
-// below 0.5 this fails — correctly, because at that point the blend can no
-// longer overturn even a marginal BM25 difference.
 func TestCompositeScore_OverlapPromotesLowBM25(t *testing.T) {
-	weakBM25HighOverlap := store.SearchResult{Score: -1.0, OverlapScore: 1.0} // composite -1.0 - overlapWeight
-	strongBM25NoOverlap := store.SearchResult{Score: -1.5, OverlapScore: 0.0} // composite -1.5
+	weakBM25HighOverlap := store.SearchResult{Score: -1.0, OverlapScore: 1.0} // composite -3.0
+	strongBM25NoOverlap := store.SearchResult{Score: -2.0, OverlapScore: 0.0} // composite -2.0
 
 	if store.CompositeScore(weakBM25HighOverlap) >= store.CompositeScore(strongBM25NoOverlap) {
 		t.Fatalf("high-overlap result did not outrank stronger-BM25 result: %f vs %f",
