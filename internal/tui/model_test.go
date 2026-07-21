@@ -169,7 +169,7 @@ func TestInit_LoadsListAndCounts(t *testing.T) {
 		listResp:   &store.ListResponse{Memories: []store.Memory{{ID: "mem_a"}, {ID: "mem_b"}}},
 		countsResp: &store.CountsResponse{ByKind: map[string]int{"user_rule": 3}, Total: 3},
 	}
-	m := New(fs)
+	m := New(fs, nil, "")
 	msgs := collect(m.Init())
 	items, ok := firstOf[itemsMsg](msgs)
 	if !ok || items.gen != 0 || len(items.items) != 2 {
@@ -184,7 +184,7 @@ func TestInit_LoadsListAndCounts(t *testing.T) {
 }
 
 func TestCountsMsg_StoredForSidebar(t *testing.T) {
-	m := New(&fakeStore{})
+	m := New(&fakeStore{}, nil, "")
 	m, _ = upd(t, m, countsMsg{counts: map[string]int{"task_pattern": 7}, total: 12})
 	if m.total != 12 || m.counts["task_pattern"] != 7 {
 		t.Errorf("counts not stored: total=%d task_pattern=%d", m.total, m.counts["task_pattern"])
@@ -192,7 +192,7 @@ func TestCountsMsg_StoredForSidebar(t *testing.T) {
 }
 
 func TestItemsMsg_StaleGenDropped(t *testing.T) {
-	m := New(&fakeStore{})
+	m := New(&fakeStore{}, nil, "")
 	m.gen = 5
 	m, _ = upd(t, m, itemsMsg{gen: 5, items: listOf("a", "b")})
 	if len(m.list.Items()) != 2 {
@@ -206,7 +206,7 @@ func TestItemsMsg_StaleGenDropped(t *testing.T) {
 
 func TestLoadCmd_BelowMinUsesList(t *testing.T) {
 	fs := &fakeStore{}
-	m := New(fs)
+	m := New(fs, nil, "")
 	runCmd(m.loadCmd(0, queryDesc{search: "cr"})) // 2 runes
 	if fs.listCalls != 1 || fs.searchCalls != 0 {
 		t.Errorf("2-rune query used search; want list. list=%d search=%d", fs.listCalls, fs.searchCalls)
@@ -215,7 +215,7 @@ func TestLoadCmd_BelowMinUsesList(t *testing.T) {
 
 func TestLoadCmd_AtMinUsesSearch(t *testing.T) {
 	fs := &fakeStore{}
-	m := New(fs)
+	m := New(fs, nil, "")
 	runCmd(m.loadCmd(0, queryDesc{search: "crm"})) // 3 runes
 	if fs.searchCalls != 1 || fs.lastSearch.Query != "crm" {
 		t.Errorf("3-rune query did not search: search=%d q=%q", fs.searchCalls, fs.lastSearch.Query)
@@ -223,7 +223,7 @@ func TestLoadCmd_AtMinUsesSearch(t *testing.T) {
 }
 
 func TestTick_FiresOnlyForCurrentGen(t *testing.T) {
-	m := New(&fakeStore{})
+	m := New(&fakeStore{}, nil, "")
 	m.gen = 3
 	if _, cmd := upd(t, m, tickMsg{gen: 2}); cmd != nil {
 		t.Error("stale tick fired a load")
@@ -238,7 +238,7 @@ func TestTick_FiresOnlyForCurrentGen(t *testing.T) {
 }
 
 func TestTyping_BumpsGenAndDebounces(t *testing.T) {
-	m := New(&fakeStore{})
+	m := New(&fakeStore{}, nil, "")
 	startGen := m.gen
 	m, _ = upd(t, m, key("c"))
 	m, _ = upd(t, m, key("r"))
@@ -252,7 +252,7 @@ func TestTyping_BumpsGenAndDebounces(t *testing.T) {
 }
 
 func TestTab_CyclesPaneFocus(t *testing.T) {
-	m := New(&fakeStore{}) // starts focusList
+	m := New(&fakeStore{}, nil, "") // starts focusList
 	m, _ = upd(t, m, key("tab"))
 	if m.focus != focusDetail {
 		t.Errorf("tab from list → %v, want detail", m.focus)
@@ -269,7 +269,7 @@ func TestTab_CyclesPaneFocus(t *testing.T) {
 
 func TestSidebarNav_ChangesKindAndReloads(t *testing.T) {
 	fs := &fakeStore{}
-	m := New(fs)
+	m := New(fs, nil, "")
 	m.focus = focusSidebar
 	m, cmd := upd(t, m, key("down")) // all → session_summary
 	if m.query.kind != "session_summary" {
@@ -283,7 +283,7 @@ func TestSidebarNav_ChangesKindAndReloads(t *testing.T) {
 
 func TestListNav_DetailFollowsCursor(t *testing.T) {
 	fs := &fakeStore{getResp: &store.Memory{ID: "mem_b", Title: "T"}}
-	m := New(fs)
+	m := New(fs, nil, "")
 	m.focus = focusList
 	m.list.SetItems(listOf("mem_a", "mem_b"))
 	m, cmd := upd(t, m, key("down")) // move to mem_b → detail should load it
@@ -302,7 +302,7 @@ func TestDetailLoad_FetchesNeighbors(t *testing.T) {
 		getResp:       &store.Memory{ID: "mem_b", Title: "T"},
 		neighborsResp: []store.Neighbor{{ID: "mem_c", Title: "near", Score: 0.5}},
 	}
-	m := New(fs)
+	m := New(fs, nil, "")
 	m.focus = focusList
 	m.list.SetItems(listOf("mem_a", "mem_b"))
 	_, cmd := upd(t, m, key("down")) // move to mem_b → detail loads it + neighbors
@@ -319,7 +319,7 @@ func TestDetailLoad_FetchesNeighbors(t *testing.T) {
 }
 
 func TestEnter_FocusesDetailPane(t *testing.T) {
-	m := New(&fakeStore{})
+	m := New(&fakeStore{}, nil, "")
 	m.focus = focusList
 	m, _ = upd(t, m, key("enter"))
 	if m.focus != focusDetail {
@@ -329,7 +329,7 @@ func TestEnter_FocusesDetailPane(t *testing.T) {
 
 func TestDelete_ConfirmPruneReload(t *testing.T) {
 	fs := &fakeStore{}
-	m := New(fs)
+	m := New(fs, nil, "")
 	m.list.SetItems(listOf("mem_x"))
 
 	m, _ = upd(t, m, key("ctrl+d"))
@@ -361,7 +361,7 @@ func TestDelete_ConfirmPruneReload(t *testing.T) {
 
 func TestConfirm_CancelDoesNotPrune(t *testing.T) {
 	fs := &fakeStore{}
-	m := New(fs)
+	m := New(fs, nil, "")
 	m.list.SetItems(listOf("mem_x"))
 	m, _ = upd(t, m, key("ctrl+d"))
 	m, _ = upd(t, m, key("n"))
@@ -375,7 +375,7 @@ func TestConfirm_CancelDoesNotPrune(t *testing.T) {
 
 func TestScopeCycle_FiltersAndReloads(t *testing.T) {
 	fs := &fakeStore{}
-	m := New(fs) // empty search box → `s` cycles scope
+	m := New(fs, nil, "") // empty search box → `s` cycles scope
 	m, cmd := upd(t, m, key("s"))
 	if m.query.scope != "personal" {
 		t.Fatalf("first `s` → scope %q, want personal", m.query.scope)
@@ -401,7 +401,7 @@ func TestScopeCycle_FiltersAndReloads(t *testing.T) {
 }
 
 func TestScopeKey_IsLiteralWhenSearching(t *testing.T) {
-	m := New(&fakeStore{})
+	m := New(&fakeStore{}, nil, "")
 	m, _ = upd(t, m, key("c")) // search box now non-empty
 	m, _ = upd(t, m, key("s")) // `s` must type, not cycle scope
 	if m.query.scope != "" {
@@ -414,7 +414,7 @@ func TestScopeKey_IsLiteralWhenSearching(t *testing.T) {
 
 func TestShare_SelectionConfirmFlipsScope(t *testing.T) {
 	fs := &fakeStore{}
-	m := New(fs)
+	m := New(fs, nil, "")
 	m.list.SetItems([]list.Item{
 		listItem{id: "a", title: "A"}, listItem{id: "b", title: "B"},
 	})
@@ -448,7 +448,7 @@ func TestShare_SelectionConfirmFlipsScope(t *testing.T) {
 
 func TestShareRepo_RelativeInputResolvedAbsolute(t *testing.T) {
 	fs := &fakeStore{}
-	m := New(fs)
+	m := New(fs, nil, "")
 	m.list.SetItems([]list.Item{listItem{id: "a", title: "A"}})
 	m, _ = upd(t, m, key(" "))      // select cursor row "a"
 	m, _ = upd(t, m, key("ctrl+s")) // open share dialog
@@ -472,7 +472,7 @@ func TestShareRepo_RelativeInputResolvedAbsolute(t *testing.T) {
 func TestShareRepo_PersistedAbsolute_ReusedAcrossCwd(t *testing.T) {
 	t.Setenv("DROIDS_MEM_HOME", t.TempDir())
 	fs := &fakeStore{}
-	m := New(fs)
+	m := New(fs, nil, "")
 	m.list.SetItems([]list.Item{listItem{id: "a", title: "A"}})
 	m, _ = upd(t, m, key(" "))      // select cursor row "a"
 	m, _ = upd(t, m, key("ctrl+s")) // open share dialog
@@ -491,7 +491,7 @@ func TestShareRepo_PersistedAbsolute_ReusedAcrossCwd(t *testing.T) {
 }
 
 func TestQuit_BareQFromEmptySearch(t *testing.T) {
-	m := New(&fakeStore{})
+	m := New(&fakeStore{}, nil, "")
 	// q with an empty search box quits outright.
 	if _, cmd := upd(t, m, key("q")); cmd == nil || runCmd(cmd) != tea.Quit() {
 		t.Error("bare q did not quit")
@@ -509,7 +509,7 @@ func TestQuit_BareQFromEmptySearch(t *testing.T) {
 
 func TestUnshare_FlipsCursorRowToPersonal(t *testing.T) {
 	fs := &fakeStore{}
-	m := New(fs)
+	m := New(fs, nil, "")
 	m.list.SetItems([]list.Item{listItem{id: "a", title: "A", shared: true}})
 	m, cmd := upd(t, m, key("ctrl+x"))
 	if _, ok := runCmd(cmd).(scopeChangedMsg); !ok {
@@ -521,7 +521,7 @@ func TestUnshare_FlipsCursorRowToPersonal(t *testing.T) {
 }
 
 func TestItemsMsg_ClampsCursor(t *testing.T) {
-	m := New(&fakeStore{})
+	m := New(&fakeStore{}, nil, "")
 	m.list.SetItems(listOf("a", "b", "c"))
 	m.list.Select(2)
 	m, _ = upd(t, m, itemsMsg{gen: m.gen, items: listOf("a")})

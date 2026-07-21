@@ -12,7 +12,7 @@ import (
 // and asserts the chrome + sidebar + detail all appear — a no-TTY guard against
 // panics and missing panes (ADR-0021).
 func TestView_RendersThreePanes(t *testing.T) {
-	m := New(&fakeStore{})
+	m := New(&fakeStore{}, nil, "")
 	m, _ = upd(t, m, sizeMsg(120, 40))
 	m, _ = upd(t, m, countsMsg{counts: map[string]int{"user_rule": 4}, total: 9})
 	m, _ = upd(t, m, itemsMsg{gen: m.gen, items: listOf("mem_a")})
@@ -32,7 +32,7 @@ func TestView_RendersThreePanes(t *testing.T) {
 // TestView_ShareDialogAndToast drives the two share-flow overlays and asserts
 // their key copy renders without panicking (share-registry mockups).
 func TestView_ShareDialogAndToast(t *testing.T) {
-	m := New(&fakeStore{})
+	m := New(&fakeStore{}, nil, "")
 	m, _ = upd(t, m, sizeMsg(120, 40))
 	m, _ = upd(t, m, itemsMsg{gen: m.gen, items: []list.Item{
 		listItem{id: "a", title: "CI-red but local-green", kind: "error_resolution"},

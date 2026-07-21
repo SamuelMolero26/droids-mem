@@ -35,8 +35,8 @@ type SearchResult struct {
 	Learned        string  `json:"learned"`
 	TaskType       string  `json:"task_type"`
 	CreatedAt      int64   `json:"created_at"`
-	Score          float64 `json:"score"`          // BM25 rank — more negative = better match
-	OverlapScore   float64 `json:"overlap_score"`  // TokenOverlap(query, title+learned) — 0..1, higher = more literal token overlap
+	Score          float64 `json:"score"`         // BM25 rank — more negative = better match
+	OverlapScore   float64 `json:"overlap_score"` // TokenOverlap(query, title+learned) — 0..1, higher = more literal token overlap
 	ExpandCount    int     `json:"expand_count"`
 	LastExpandedAt int64   `json:"last_expanded_at,omitempty"`
 }
