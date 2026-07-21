@@ -91,37 +91,45 @@ func saveHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, sav
 // ---------- mem_search ----------
 
 type searchArgs struct {
-	Query    string `json:"query"`
-	TaskType string `json:"task_type,omitempty"`
-	Kind     string `json:"kind,omitempty"`
-	Limit    int    `json:"limit,omitempty"`
+	Query       string `json:"query"`
+	TaskType    string `json:"task_type,omitempty"`
+	Kind        string `json:"kind,omitempty"`
+	Limit       int    `json:"limit,omitempty"`
+	AllProjects bool   `json:"all_projects,omitempty"`
 }
 
 func searchToolDef() mcp.Tool {
 	return mcp.NewTool("mem_search",
-		mcp.WithDescription("Full-text search across stored memories ranked by BM25. Call this proactively at the start of a task and whenever the topic shifts — do not wait to be asked; prior fixes, decisions, and conventions live here. Ignore weak or unrelated results. For code-structure questions in Go repos, prefer graph_symbol/graph_package over text search."),
+		mcp.WithDescription(`Full-text search across stored memories ranked by BM25 with TokenOverlap re-ranking. Call this proactively at the start of a task and whenever the topic shifts — do not wait to be asked; prior fixes, decisions, and conventions live here.
+
+Each result includes an overlap_score (0-1): the fraction of query tokens that appear literally in the title+learned. Higher overlap means the memory is about the same concrete topic. Results with low overlap may still be relevant (synonyms, rewording) — use your judgment, or expand them with mem_get to read the full body.
+
+Pass all_projects=true to search across ALL task_types, not just the current project. Use this when investigating a problem that may span repos, or when you don't yet know which project owns the relevant memory. For code-structure questions in Go repos, prefer graph_symbol/graph_package over text search.`),
 		mcp.WithString("query", mcp.Required(),
 			mcp.Description("Free-text search phrase.")),
 		mcp.WithString("task_type",
-			mcp.Description("Optional task_type filter.")),
+			mcp.Description("Optional task_type filter. Ignored when all_projects=true.")),
 		mcp.WithString("kind",
 			mcp.Description("Optional kind filter."),
 			mcp.Enum("error_resolution", "task_pattern", "user_rule", "session_summary"),
 		),
 		mcp.WithNumber("limit",
-			mcp.Description("Max results (default 5, max 20)."),
+			mcp.Description("Max results to return (default 5, max 20). Internal fetch is 3× this for re-ranking."),
 			mcp.DefaultNumber(5), mcp.Min(1), mcp.Max(20),
 		),
+		mcp.WithBoolean("all_projects",
+			mcp.Description("Search every task_type instead of filtering by the current one (default false).")),
 	)
 }
 
 func searchHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, searchArgs) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, _ mcp.CallToolRequest, a searchArgs) (*mcp.CallToolResult, error) {
 		resp, err := st.Search(ctx, store.SearchRequest{
-			Query:    a.Query,
-			TaskType: a.TaskType,
-			Kind:     a.Kind,
-			Limit:    a.Limit,
+			Query:       a.Query,
+			TaskType:    a.TaskType,
+			Kind:        a.Kind,
+			Limit:       a.Limit,
+			AllProjects: a.AllProjects,
 		})
 		if err != nil {
 			return toolErr(err), nil
