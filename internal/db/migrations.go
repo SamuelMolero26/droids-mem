@@ -7,7 +7,7 @@ import (
 
 // CurrentSchemaVersion is the user_version that a fully-initialized
 // database reports. Bump when adding a new entry to the migrations ladder.
-const CurrentSchemaVersion = 5
+const CurrentSchemaVersion = 6
 
 // migration is one rung in the PRAGMA user_version ladder. Each rung runs
 // inside its own transaction; partial failure rolls back atomically.
@@ -35,6 +35,7 @@ var migrations = []migration{
 	{from: 2, to: 3, sql: migrationV2ToV3},
 	{from: 3, to: 4, sql: migrationV3ToV4},
 	{from: 4, to: 5, sql: migrationV4ToV5},
+	{from: 5, to: 6, sql: migrationV5ToV6},
 }
 
 const migrationV0ToV1 = `
@@ -106,6 +107,51 @@ CREATE TABLE IF NOT EXISTS memory_files (
 // Purely a data rewrite of one column; no FTS, boot-gate, or scrub interaction.
 const migrationV4ToV5 = `
 UPDATE memories SET scope = 'personal';
+`
+
+// migrationV5ToV6 adds the memory lifecycle layer (ADR-0031/ADR-0030):
+// decay/review (`review_after`), task_type-scoped pinning (`pinned`), and a
+// soft-delete archive table (`archived_memories`) for supersede.
+//
+// review_after is deliberately NOT backfilled (D1) — every pre-v6 row lands
+// on NULL, not `created_at + horizon[kind]`. Backfilling would mass-flag the
+// entire legacy corpus `needs_review` on day one, which is pure noise; rows
+// pick up a horizon the next time they are written (force-save, supersede)
+// or explicitly reviewed (`mark_reviewed`). pinned defaults to 0 — no
+// pre-migration row was ever pinned.
+//
+// archived_memories (D3) is an explicit 1:1 column mirror of memories plus
+// archived_at — no FTS, no triggers. `SELECT *` was rejected because it
+// silently drops any future ALTER'd column from the archive copy; the
+// explicit list is checked at test time via a PRAGMA table_info parity test
+// (D5) so schema drift between the two tables fails loud in CI, not silently
+// at archive time.
+const migrationV5ToV6 = `
+ALTER TABLE memories ADD COLUMN review_after INTEGER;
+ALTER TABLE memories ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS archived_memories (
+    id                    TEXT    PRIMARY KEY,
+    session_id            TEXT    NOT NULL,
+    task_type             TEXT    NOT NULL,
+    kind                  TEXT    NOT NULL,
+    title                 TEXT    NOT NULL,
+    what                  TEXT    NOT NULL,
+    learned               TEXT    NOT NULL,
+    tags                  TEXT    NOT NULL DEFAULT '',
+    fingerprint           TEXT    NOT NULL,
+    created_at            INTEGER NOT NULL,
+    updated_at            INTEGER NOT NULL,
+    scope                 TEXT    NOT NULL DEFAULT 'personal',
+    scrub_pattern_version INTEGER NOT NULL DEFAULT 1,
+    scrub_counts          TEXT,
+    expand_count          INTEGER NOT NULL DEFAULT 0,
+    last_expanded_at      INTEGER,
+    origin                TEXT    NOT NULL DEFAULT 'manual',
+    review_after          INTEGER,
+    pinned                INTEGER NOT NULL DEFAULT 0,
+    archived_at           INTEGER NOT NULL
+);
 `
 
 // Migrate advances db's schema from its current user_version up to

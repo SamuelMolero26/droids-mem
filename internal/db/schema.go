@@ -30,7 +30,39 @@ CREATE TABLE IF NOT EXISTS memories (
     expand_count          INTEGER NOT NULL DEFAULT 0,
     last_expanded_at      INTEGER,
     origin                TEXT    NOT NULL DEFAULT 'manual' CHECK(origin IN ('manual','auto')),
+    review_after          INTEGER,
+    pinned                INTEGER NOT NULL DEFAULT 0,
     CHECK(updated_at >= created_at)
+);
+
+-- archived_memories is the soft-delete destination for supersede (ADR-0030):
+-- an explicit 1:1 column mirror of memories plus archived_at. No FTS, no
+-- triggers -- archived rows are deliberately invisible to mem_context/
+-- mem_search/review list. The explicit column list (not SELECT-star at
+-- archive time) is checked against memories via a PRAGMA table_info parity
+-- test so future ALTERs on memories fail loud here instead of silently
+-- dropping a column from the archive copy.
+CREATE TABLE IF NOT EXISTS archived_memories (
+    id                    TEXT    PRIMARY KEY,
+    session_id            TEXT    NOT NULL,
+    task_type             TEXT    NOT NULL,
+    kind                  TEXT    NOT NULL,
+    title                 TEXT    NOT NULL,
+    what                  TEXT    NOT NULL,
+    learned               TEXT    NOT NULL,
+    tags                  TEXT    NOT NULL DEFAULT '',
+    fingerprint           TEXT    NOT NULL,
+    created_at            INTEGER NOT NULL,
+    updated_at            INTEGER NOT NULL,
+    scope                 TEXT    NOT NULL DEFAULT 'personal',
+    scrub_pattern_version INTEGER NOT NULL DEFAULT 1,
+    scrub_counts          TEXT,
+    expand_count          INTEGER NOT NULL DEFAULT 0,
+    last_expanded_at      INTEGER,
+    origin                TEXT    NOT NULL DEFAULT 'manual',
+    review_after          INTEGER,
+    pinned                INTEGER NOT NULL DEFAULT 0,
+    archived_at           INTEGER NOT NULL
 );
 
 -- meta holds singleton key/value markers (e.g. scrub_baseline_complete).
