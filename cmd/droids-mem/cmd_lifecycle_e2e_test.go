@@ -84,3 +84,26 @@ func TestE2E_ReviewMarkReviewedExemptRejected(t *testing.T) {
 	}
 	mustParseJSON(t, out, &lst)
 }
+
+// TestE2E_ArchiveList covers the archive CLI wiring + JSON contract. Supersede
+// (which populates the archive) is MCP-only, so via the CLI the archive is
+// empty; the store-level supersede test covers population.
+func TestE2E_ArchiveList(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "mem.db")
+	saveCLI(t, dbPath, "e2e_arch", "error_resolution", "Some lesson", "a detailed lesson body about something")
+
+	out := cli(t, dbPath, nil, "archive", "list")
+	var resp struct {
+		Total    int `json:"total"`
+		Memories []struct {
+			ID         string `json:"id"`
+			ArchivedAt int64  `json:"archived_at"`
+		} `json:"memories"`
+	}
+	mustParseJSON(t, out, &resp)
+	if resp.Total != 0 {
+		t.Errorf("expected empty archive (no CLI supersede path), got total=%d", resp.Total)
+	}
+	// --task-type filter also runs cleanly.
+	cli(t, dbPath, nil, "archive", "list", "--task-type", "e2e_arch")
+}

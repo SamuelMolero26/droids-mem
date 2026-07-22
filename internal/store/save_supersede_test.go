@@ -38,9 +38,11 @@ func containsID(results []store.SearchResult, id string) bool {
 	return false
 }
 
-// TestSave_Supersede_DeletesTarget: a save naming supersedes=<id> hard-deletes
-// the target on successful insert and echoes the deleted id (ADR-0018).
-func TestSave_Supersede_DeletesTarget(t *testing.T) {
+// TestSave_Supersede_ArchivesTarget: a save naming supersedes=<id> ARCHIVES the
+// target on successful insert (ADR-0030, superseding ADR-0018's hard delete),
+// echoes the id, removes it from memories/FTS, and lands it in the archive with
+// an archived_at stamp.
+func TestSave_Supersede_ArchivesTarget(t *testing.T) {
 	s := newTestStore(t)
 	old, err := s.Save(context.Background(), userRule("indent rule", "use tabs for indentation in go"))
 	if err != nil {
@@ -62,6 +64,53 @@ func TestSave_Supersede_DeletesTarget(t *testing.T) {
 	// "tabs" lived only in the old rule — it must be gone from the index.
 	if hits := searchHits(t, s, "tabs"); containsID(hits, old.ID) {
 		t.Errorf("superseded row %q still present in search", old.ID)
+	}
+	// The target is not deleted — it is archived, recoverable/auditable.
+	arch, err := s.ArchiveList(context.Background(), "go_style")
+	if err != nil {
+		t.Fatalf("archive list: %v", err)
+	}
+	var found *store.ArchivedMemory
+	for i := range arch.Memories {
+		if arch.Memories[i].ID == old.ID {
+			found = &arch.Memories[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("superseded row %q not found in archive", old.ID)
+	}
+	if found.ArchivedAt == 0 {
+		t.Error("archived row has zero archived_at, want a timestamp")
+	}
+	if found.Learned != "use tabs for indentation in go" {
+		t.Errorf("archived body not preserved: %q", found.Learned)
+	}
+}
+
+// TestSave_Supersede_DryRunDoesNotArchive: a dry-run supersede rolls the whole
+// txn back, so the target stays live and the archive stays empty.
+func TestSave_Supersede_DryRunDoesNotArchive(t *testing.T) {
+	s := newTestStore(t)
+	old, err := s.Save(context.Background(), userRule("indent rule", "use tabs for indentation in go"))
+	if err != nil {
+		t.Fatalf("save target: %v", err)
+	}
+	req := userRule("indent rule v2", "use four spaces and never hard tabs")
+	req.Supersedes = old.ID
+	req.DryRun = true
+	if _, err := s.Save(context.Background(), req); err != nil {
+		t.Fatalf("dry-run supersede: %v", err)
+	}
+	if hits := searchHits(t, s, "tabs"); !containsID(hits, old.ID) {
+		t.Error("dry-run supersede should NOT remove the target from search")
+	}
+	arch, err := s.ArchiveList(context.Background(), "go_style")
+	if err != nil {
+		t.Fatalf("archive list: %v", err)
+	}
+	if arch.Total != 0 {
+		t.Errorf("dry-run supersede should archive nothing, got %d archived", arch.Total)
 	}
 }
 
@@ -120,7 +169,7 @@ func TestSave_Supersede_TargetExemptFromDedupe(t *testing.T) {
 		t.Fatalf("control precondition failed: expected near_duplicate skip, got status=%q reason=%q (test fixture no longer near-dup)", cResp.Status, cResp.Reason)
 	}
 
-	// Real path: naming the target as supersedes exempts it -> save lands, target deleted.
+	// Real path: naming the target as supersedes exempts it -> save lands, target archived.
 	s := newTestStore(t)
 	old, err := s.Save(context.Background(), base)
 	if err != nil {
