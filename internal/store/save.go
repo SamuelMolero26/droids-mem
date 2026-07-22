@@ -84,6 +84,29 @@ var (
 	reTaskType = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
 )
 
+// decayHorizon is the per-kind review horizon (ADR-0031): how long a memory's
+// content is trusted before it becomes needs_review. session_summary is
+// intentionally absent — no horizon, decay-exempt, permanent (spec: "session_summary
+// save is exempt"). review_after is always computed relative to the save's own
+// `now`, never backfilled or inherited across kinds.
+var decayHorizon = map[string]time.Duration{
+	"error_resolution": 90 * 24 * time.Hour,
+	"task_pattern":     90 * 24 * time.Hour,
+	"user_rule":        365 * 24 * time.Hour,
+}
+
+// reviewAfterParam computes the review_after column value for a save at unix
+// time `now`: now+horizon[kind] for a decaying kind, SQL NULL (Valid: false)
+// for an exempt or unknown kind. sql.NullInt64 (not *int64) matches the
+// existing scrubCountsJSON nullable-param convention for this INSERT.
+func reviewAfterParam(kind string, now int64) sql.NullInt64 {
+	h, ok := decayHorizon[kind]
+	if !ok {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: now + int64(h.Seconds()), Valid: true}
+}
+
 // jaccardDupeThreshold: token-set Jaccard similarity above this value
 // classifies a candidate as a near-duplicate. Tuned for short jargon-dense
 // memory text; revisit once corpora exceed ~10k memories.
@@ -276,8 +299,8 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 	_, err = conn.ExecContext(ctx, `
 		INSERT INTO memories
 			(id, session_id, task_type, kind, title, what, learned, tags, fingerprint,
-			 created_at, updated_at, scope, scrub_pattern_version, scrub_counts, origin)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 created_at, updated_at, scope, scrub_pattern_version, scrub_counts, origin, review_after)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(fingerprint) DO UPDATE SET
 			title                 = excluded.title,
 			what                  = excluded.what,
@@ -287,9 +310,10 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 			updated_at            = excluded.updated_at,
 			scope                 = excluded.scope,
 			scrub_pattern_version = excluded.scrub_pattern_version,
-			scrub_counts          = excluded.scrub_counts
+			scrub_counts          = excluded.scrub_counts,
+			review_after          = excluded.review_after
 	`, id, sessionID, req.TaskType, req.Kind, req.Title, req.What, req.Learned, req.Tags, fp,
-		now, now, req.Scope, scrub.Version, scrubCountsJSON, req.Origin)
+		now, now, req.Scope, scrub.Version, scrubCountsJSON, req.Origin, reviewAfterParam(req.Kind, now))
 	if err != nil {
 		return nil, fmt.Errorf("insert memory: %w", err)
 	}
@@ -453,14 +477,18 @@ func pruneAutoSummariesConn(ctx context.Context, conn *sql.Conn) error {
 	return err
 }
 
+// forceUpdateConn overwrites an existing row's content on a fingerprint/
+// near-duplicate hit with Force=true. This is a content write (ADR-0031
+// "content write resets the clock"), so review_after is recomputed fresh from
+// this call's `now` — never inherited from the row being overwritten.
 func forceUpdateConn(ctx context.Context, conn *sql.Conn, existingID, sessionID string, req SaveRequest, fp string, now int64, scrubCountsJSON sql.NullString) (*SaveResponse, error) {
 	_, err := conn.ExecContext(ctx, `
 		UPDATE memories
 		SET title=?, what=?, learned=?, tags=?, fingerprint=?, updated_at=?,
-		    scope=?, scrub_pattern_version=?, scrub_counts=?
+		    scope=?, scrub_pattern_version=?, scrub_counts=?, review_after=?
 		WHERE id=?
 	`, req.Title, req.What, req.Learned, req.Tags, fp, now,
-		req.Scope, scrub.Version, scrubCountsJSON, existingID)
+		req.Scope, scrub.Version, scrubCountsJSON, reviewAfterParam(req.Kind, now), existingID)
 	if err != nil {
 		return nil, fmt.Errorf("force update: %w", err)
 	}
