@@ -42,21 +42,33 @@ func (m Model) searchView() string {
 	return chromeRow(m.width).Render(left + strings.Repeat(" ", gap) + pill)
 }
 
-// bodyView composes the three borderless columns separated by vertical rules.
+// bodyView composes the three panes as bordered boxes. The focused pane gets a
+// cyan border; the others get a dim border. Borders replace the old vrule
+// dividers between panes (ADR-0021 update).
 func (m Model) bodyView(bodyH int) string {
-	inner := max(20, m.width-sidebarWidth-2)
+	inner := max(20, m.width-sidebarWidth)
 	detailW := inner * 34 / 100
 	listW := inner - detailW
 
-	sidebar := lipgloss.NewStyle().Width(sidebarWidth).Height(bodyH).Render(m.sidebarView())
-	list := lipgloss.NewStyle().Width(listW).Height(bodyH).Render(m.list.View())
-	detail := lipgloss.NewStyle().Width(detailW).Height(bodyH).Render(m.detail.View())
+	sidebar := m.paneStyle(focusSidebar, sidebarWidth-2, bodyH-2).Render(m.sidebarView())
+	list := m.paneStyle(focusList, listW-2, bodyH-2).Render(m.list.View())
+	detail := m.paneStyle(focusDetail, detailW-2, bodyH-2).Render(m.detail.View())
 
-	row := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, vrule(bodyH), list, vrule(bodyH), detail)
+	row := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, list, detail)
 	if m.mode == modeConfirm {
 		return row + "\n" + dangerStyle.Render(fmt.Sprintf("Delete %q?  [y/N]", m.confirmTarget.title))
 	}
 	return row
+}
+
+// paneStyle builds a rounded-border box for one of the three panes. The border
+// is highlighted (cyan) when the pane owns keyboard focus, dim otherwise.
+func (m Model) paneStyle(pane focus, w, h int) lipgloss.Style {
+	s := lipgloss.NewStyle().Width(w).Height(h).Border(lipgloss.RoundedBorder()).BorderForeground(paneBorderColor)
+	if m.focus == pane {
+		s = s.BorderForeground(paneBorderHighlight)
+	}
+	return s
 }
 
 // sidebarView renders the KINDS census.

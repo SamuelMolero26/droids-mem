@@ -71,6 +71,10 @@ var (
 	footerStyle = lipgloss.NewStyle().Foreground(colDim)
 	footerKey   = lipgloss.NewStyle().Foreground(colMeta)
 	dangerStyle = lipgloss.NewStyle().Bold(true).Foreground(colDanger)
+
+	// Pane border colors — dim when unfocused, bright on focus.
+	paneBorderColor     = lipgloss.Color("#3A3E49") // dim, same as connSpine
+	paneBorderHighlight = colSelect                  // cyan, same as search caret
 )
 
 // chromeRow lays out a full-width header/search/footer row. No background — the

@@ -374,14 +374,16 @@ func (m *Model) layout() {
 	if m.width <= 0 || m.height <= 0 {
 		return
 	}
-	// Borderless (ADR-0021 visual match). Fixed rows: header(1) + underline(1) +
-	// search(1) + top rule(1) + bottom rule(1) + footer(1) = 6.
+	// Bordered panes (ADR-0021 update). Fixed rows: header(1) + search(1) + top
+	// rule(1) + bottom rule(1) + footer(1) = 5 chrome rows; the 6th is the
+	// mobile-cta placeholder that's always empty.
 	bodyH := max(1, m.height-6)
-	// Two 1-col vertical dividers separate the three columns; sidebar is fixed,
-	// detail ~34% of the remainder, list takes the rest.
-	inner := max(20, m.width-sidebarWidth-2)
+	// Sidebar is fixed width; the rest splits into list + detail. No vrule
+	// columns needed — pane borders serve as separators.
+	inner := max(20, m.width-sidebarWidth)
 	detailW := inner * 34 / 100
 	listW := inner - detailW
-	m.list.SetSize(listW, bodyH)
-	m.detail = viewport.New(detailW, bodyH)
+	// Subtract 2 from each dimension for the border (left+right, top+bottom).
+	m.list.SetSize(listW-2, bodyH-2)
+	m.detail = viewport.New(detailW-2, bodyH-2)
 }
