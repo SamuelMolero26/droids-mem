@@ -61,7 +61,13 @@ type ContextMemory struct {
 }
 
 type ContextResponse struct {
-	TaskType    string          `json:"task_type"`
+	TaskType string `json:"task_type"`
+	// Pinned is the human-curated top section of the always tier (ADR-0031):
+	// full-body memories a human pinned for this task_type, outside the ordinary
+	// caps and chronological order, capped at maxPinnedPerTaskType. Present in
+	// every mode (always-tier), listed first so the agent sees load-bearing
+	// lessons before anything else.
+	Pinned      []ContextMemory `json:"pinned"`
 	LastSession *ContextMemory  `json:"last_session,omitempty"`
 	UserRules   []ContextMemory `json:"user_rules"`
 	// UserRulesTotal counts all user_rule rows for the task_type. When it
@@ -114,6 +120,7 @@ func (s *Store) Context(ctx context.Context, req ContextRequest) (*ContextRespon
 
 	resp := &ContextResponse{
 		TaskType:  taskType,
+		Pinned:    []ContextMemory{},
 		UserRules: []ContextMemory{},
 		Browse:    []ContextMemory{},
 	}
@@ -140,6 +147,15 @@ func (s *Store) Context(ctx context.Context, req ContextRequest) (*ContextRespon
 			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 		}
 	}()
+
+	// Pinned section leads the always tier in every mode — human-curated,
+	// task_type-scoped, full body, capped. Audit-only decay does not remove a
+	// pinned-but-overdue row; it still appears here, just carrying needs_review.
+	pinned, err := fetchPinnedConn(ctx, conn, taskType)
+	if err != nil {
+		return nil, err
+	}
+	resp.Pinned = pinned
 
 	last, err := fetchLastSessionConn(ctx, conn, taskType)
 	if err != nil {
@@ -263,6 +279,42 @@ func fetchUserRulesConn(ctx context.Context, conn *sql.Conn, taskType string, fu
 		}
 	}
 	return rules, stubs, total, rows.Err()
+}
+
+// fetchPinnedConn returns the pinned always-tier section: full-body memories
+// with pinned=1 for the task_type, newest first, capped at maxPinnedPerTaskType
+// (the same cap Pin enforces on write). Any kind may be pinned. needs_review is
+// still surfaced but never excludes a pinned row — pinning outranks decay.
+func fetchPinnedConn(ctx context.Context, conn *sql.Conn, taskType string) ([]ContextMemory, error) {
+	rows, err := conn.QueryContext(ctx, `
+		SELECT id, kind, title, learned, created_at,
+		       expand_count, COALESCE(last_expanded_at, 0), review_after, pinned
+		FROM memories
+		WHERE task_type = ? AND pinned = 1
+		ORDER BY created_at DESC
+		LIMIT ?
+	`, taskType, maxPinnedPerTaskType)
+	if err != nil {
+		return nil, fmt.Errorf("fetch pinned: %w", err)
+	}
+	defer rows.Close()
+	out := []ContextMemory{}
+	for rows.Next() {
+		var m ContextMemory
+		var learned string
+		var reviewAfter sql.NullInt64
+		if err := rows.Scan(&m.ID, &m.Kind, &m.Title, &learned, &m.CreatedAt, &m.ExpandCount, &m.LastExpandedAt, &reviewAfter, &m.Pinned); err != nil {
+			return nil, fmt.Errorf("scan pinned: %w", err)
+		}
+		if reviewAfter.Valid {
+			m.ReviewAfter = &reviewAfter.Int64
+		}
+		m.NeedsReview = needsReview(m.ReviewAfter)
+		m.Tier = "always"
+		m.Learned = learned
+		out = append(out, m)
+	}
+	return out, rows.Err()
 }
 
 // fetchBrowseTierConn returns top-N error_resolution and task_pattern memories

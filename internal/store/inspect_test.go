@@ -38,14 +38,20 @@ func TestGetRow_ExposesLifecycleFields(t *testing.T) {
 	}
 }
 
-// TestGetRow_NullReviewAfterStaysNil guards D1/D4: a row with no review_after
-// (the grandfathered/no-decay-yet state — decay-on-save is slice 3) must
-// scan to a nil *int64, not a COALESCEd zero, and NeedsReview must be false.
+// TestGetRow_NullReviewAfterStaysNil guards D1/D4: a grandfathered pre-v6-migration
+// row (review_after left NULL — never backfilled) must scan to a nil *int64, not
+// a COALESCEd zero, and NeedsReview must be false. Decay-on-save (Phase 3) now
+// stamps review_after for decaying kinds at Save time, so the NULL state is
+// simulated directly via SQL here rather than through Save — exactly what the
+// migration grandfathers for pre-existing rows (D1).
 func TestGetRow_NullReviewAfterStaysNil(t *testing.T) {
-	s := newTestStore(t)
+	s, conn := newTestStoreWithConn(t)
 	resp, err := s.Save(context.Background(), validReq())
 	if err != nil {
 		t.Fatalf("Save: %v", err)
+	}
+	if _, err := conn.Exec(`UPDATE memories SET review_after = NULL WHERE id = ?`, resp.ID); err != nil {
+		t.Fatalf("seed grandfathered NULL review_after: %v", err)
 	}
 	m, err := s.GetRow(context.Background(), resp.ID)
 	if err != nil {
