@@ -101,12 +101,12 @@ func newInstallCmd() *cobra.Command {
 			}
 			stdioResult := installClaudeMCPStdio(self)
 			result := map[string]any{
-				"status":        "installed",
-				"settings":      settingsPath,
-				"events_added":  added,
-				"command":       hookCmd,
-				"mcp_stdio":     stepStatus(stdioResult),
-				"mcp_config":    claudeMCPStdioPath(),
+				"status":       "installed",
+				"settings":     settingsPath,
+				"events_added": added,
+				"command":      hookCmd,
+				"mcp_stdio":    stepStatus(stdioResult),
+				"mcp_config":   claudeMCPStdioPath(),
 			}
 
 			if !all {
@@ -165,7 +165,7 @@ func installClaudeMCPStdio(self string) error {
 		return errors.New("resolve home dir")
 	}
 
-	existing, err := os.ReadFile(path)
+	existing, err := os.ReadFile(path) // #nosec G304 -- fixed config location (~/.claude/mcp/), not user input
 	if err == nil {
 		var cfg struct {
 			Command string   `json:"command"`
