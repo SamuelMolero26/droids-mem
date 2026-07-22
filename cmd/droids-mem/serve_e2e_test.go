@@ -315,7 +315,9 @@ func TestServeE2E_InitializeExposesInstructions(t *testing.T) {
 		t.Fatalf("initialize: missing result; resp=%v", resp)
 	}
 	instr, _ := result["instructions"].(string)
-	for _, want := range []string{"mem_search", "mem_context", "mem_save"} {
+	// Core tool nudge + the AI-first lifecycle read-side signals (ADR-0031):
+	// pinned/needs_review/supersedes must reach the client or the flags are dead.
+	for _, want := range []string{"mem_search", "mem_context", "mem_save", "pinned", "needs_review", "supersedes"} {
 		if !strings.Contains(instr, want) {
 			t.Errorf("initialize instructions missing %q; got %q", want, instr)
 		}
