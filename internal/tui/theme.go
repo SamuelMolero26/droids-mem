@@ -79,6 +79,10 @@ var (
 	footerKey   = lipgloss.NewStyle().Foreground(colMeta)
 	dangerStyle = lipgloss.NewStyle().Bold(true).Foreground(colDanger)
 
+	// Pane border colors — dim when unfocused, bright on focus.
+	paneBorderColor     = lipgloss.Color("#3A3E49") // dim, same as connSpine
+	paneBorderHighlight = colSelect                 // cyan, same as search caret
+
 	// Scope filter + sharing (share-registry mockups).
 	sharedChip  = lipgloss.NewStyle().Foreground(colSelect)            // ◇ SHARED row/detail chip (cyan)
 	selectDot   = lipgloss.NewStyle().Foreground(colAmber)             // ● multi-select marker
@@ -100,12 +104,7 @@ func chromeRow(width int) lipgloss.Style {
 	return lipgloss.NewStyle().Width(width)
 }
 
-// hrule / vrule are the faint dividers that replace pane borders.
+// hrule is the faint horizontal divider between chrome rows.
 func hrule(width int) string {
 	return lipgloss.NewStyle().Foreground(colDiv).Render(strings.Repeat("─", max(0, width)))
-}
-
-func vrule(height int) string {
-	col := lipgloss.NewStyle().Foreground(colDiv).Render("│")
-	return strings.Repeat(col+"\n", max(1, height)-1) + col
 }
