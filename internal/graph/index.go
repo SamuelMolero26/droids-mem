@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"go/ast"
 	"go/token"
+	"go/types"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"golang.org/x/tools/go/callgraph"
 	"golang.org/x/tools/go/callgraph/cha"
@@ -98,8 +101,9 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	if err != nil {
 		return err
 	}
+	impls := implementsEdges(pkgs, byPos)
 
-	return writeGraphDB(dbPath, repo, module, stampVal, symbols, edges)
+	return writeGraphDB(ctx, dbPath, repo, module, stampVal, symbols, edges, impls)
 }
 
 func shortPkgPath(pkgPath, module string) string {
@@ -193,8 +197,17 @@ func appendDeclSymbols(out []*symRow, byPos map[string]*symRow, fset *token.File
 					doc = sp.Doc.Text()
 				}
 				src := slice(sp.Pos(), sp.End())
-				out = append(out, add(sp.Name.Pos(), sp.Name.Name, "type",
-					firstLine("type "+collapseWS(slice(sp.Pos(), sp.Type.Pos()))+"…"), doc, src))
+				kind := "type"
+				if _, isIface := sp.Type.(*ast.InterfaceType); isIface {
+					kind = "interface" // issue #48: interface vs concrete drives implements
+				}
+				row := add(sp.Name.Pos(), sp.Name.Name, kind,
+					firstLine("type "+collapseWS(slice(sp.Pos(), sp.Type.Pos()))+"…"), doc, src)
+				out = append(out, row)
+				// Register the type's position so implementsEdges can map a
+				// types.Object back to this row (same file:line key SSA uses).
+				tp := fset.Position(sp.Name.Pos())
+				byPos[fmt.Sprintf("%s:%d", tp.Filename, tp.Line)] = row
 			case *ast.ValueSpec:
 				if sp.Doc != nil {
 					doc = sp.Doc.Text()
@@ -260,13 +273,91 @@ func callEdges(pkgs []*packages.Package, byPos map[string]*symRow) (map[[2]int64
 	return edges, nil
 }
 
+// implementsEdges computes exact interface-satisfaction relations (issue #48):
+// for every repo-local interface, the concrete repo types whose method set
+// satisfies it. Uses types.Implements over the POINTER method set, so a type
+// that satisfies an interface only through pointer-receiver methods (the common
+// Go idiom) is still captured. Zero-method interfaces (any, interface{}) are
+// skipped — every type satisfies them, so the edge is noise, not signal. Both
+// endpoints map back to symbol rows by declaration position via byPos (which
+// appendDeclSymbols now registers for types too); an endpoint that does not map
+// (a dep type reachable through NeedDeps) is dropped, keeping the graph
+// repo-local — the same boundary callEdges draws at a dependency.
+func implementsEdges(pkgs []*packages.Package, byPos map[string]*symRow) map[[2]int64]bool {
+	fset := pkgs[0].Fset
+	resolve := func(obj types.Object) (*symRow, bool) {
+		if obj == nil || !obj.Pos().IsValid() {
+			return nil, false
+		}
+		p := fset.Position(obj.Pos())
+		row, ok := byPos[fmt.Sprintf("%s:%d", p.Filename, p.Line)]
+		return row, ok
+	}
+
+	type namedType struct {
+		row *symRow
+		typ *types.Named
+	}
+	var ifaces, concretes []namedType
+	for _, p := range pkgs {
+		scope := p.Types.Scope()
+		for _, name := range scope.Names() {
+			tn, ok := scope.Lookup(name).(*types.TypeName)
+			if !ok || tn.IsAlias() {
+				continue
+			}
+			named, ok := tn.Type().(*types.Named)
+			if !ok {
+				continue
+			}
+			if named.TypeParams().Len() > 0 {
+				continue // generic type: constraint satisfaction is out of v1 scope (#48)
+			}
+			row, ok := resolve(tn)
+			if !ok {
+				continue // not a repo-local symbol (or unmappable position)
+			}
+			if iface, ok := named.Underlying().(*types.Interface); ok {
+				if iface.NumMethods() == 0 {
+					continue // any/interface{}: universal satisfaction = noise
+				}
+				ifaces = append(ifaces, namedType{row, named})
+			} else {
+				concretes = append(concretes, namedType{row, named})
+			}
+		}
+	}
+
+	edges := map[[2]int64]bool{}
+	for _, iface := range ifaces {
+		it, _ := iface.typ.Underlying().(*types.Interface)
+		for _, c := range concretes {
+			// Pointer method set is the superset (value + pointer receivers), so
+			// this catches types satisfying the interface only via *T methods.
+			if types.Implements(types.NewPointer(c.typ), it) {
+				edges[[2]int64{iface.row.id, c.row.id}] = true
+			}
+		}
+	}
+	return edges
+}
+
 // writeGraphDB builds the new db at dbPath+".tmp" and renames it into place,
 // so readers never observe a half-built graph.
-func writeGraphDB(dbPath, repo, module, stampVal string, symbols []*symRow, edges map[[2]int64]bool) error {
+func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges, impls map[[2]int64]bool) error {
+	if err := ctx.Err(); err != nil {
+		return err // cancelled before work started
+	}
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o750); err != nil {
 		return fmt.Errorf("create graph dir: %w", err)
 	}
-	tmp := dbPath + ".tmp"
+	removeStaleTemps(dbPath)
+	// Per-build temp name: async rebuilds run concurrently in the same process
+	// (ensureFresh releases repoLock before launching the goroutine, and a
+	// superseding build starts before the old one exits), so pid alone is not
+	// unique. pid keeps cross-process builds distinct; the nonce keeps in-process
+	// ones distinct. The rename is atomic — last writer wins.
+	tmp := fmt.Sprintf("%s.tmp.%d.%d", dbPath, os.Getpid(), buildNonce.Add(1))
 	_ = os.Remove(tmp)
 	db, err := sql.Open("sqlite", "file:"+tmp)
 	if err != nil {
@@ -305,6 +396,16 @@ func writeGraphDB(dbPath, repo, module, stampVal string, symbols []*symRow, edge
 				return err
 			}
 		}
+		implIns, err := tx.Prepare(`INSERT OR IGNORE INTO implements (iface, impl) VALUES (?,?)`)
+		if err != nil {
+			return err
+		}
+		defer implIns.Close()
+		for e := range impls {
+			if _, err := implIns.Exec(e[0], e[1]); err != nil {
+				return err
+			}
+		}
 		// FTS mirror for the search fallback; rowid == symbols.id for the join back.
 		if _, err := tx.Exec(`INSERT INTO symbols_fts(rowid, qname, name, doc, signature)
 			SELECT id, qname, name, doc, signature FROM symbols`); err != nil {
@@ -328,7 +429,39 @@ func writeGraphDB(dbPath, repo, module, stampVal string, symbols []*symRow, edge
 		_ = os.Remove(tmp)
 		return fmt.Errorf("close graph db: %w", cerr)
 	}
+	// A superseded async build was cancelled (ensureFresh: bs.cancel()); its
+	// result is stale, so discard it rather than renaming it over the graph.
+	if err := ctx.Err(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
 	return os.Rename(tmp, dbPath)
+}
+
+// buildNonce makes concurrent same-process graph builds write distinct temp
+// files. See writeGraphDB.
+var buildNonce atomic.Uint64
+
+// staleTempAge bounds how long a graph build may plausibly run. buildIndex
+// measures ~2.5s; an hour is far past any real build, so anything older is
+// orphaned litter from a builder that was SIGKILLed/crashed before its rename.
+// ponytail: an age guard, not a lockfile — good enough for a local tool, and it
+// never touches a concurrently-live sibling's in-progress temp (that one is young).
+const staleTempAge = time.Hour
+
+// removeStaleTemps deletes leftover <db>.tmp.<pid> files from builders that died
+// before renaming. Age-guarded so a live build on another pid is never removed;
+// best-effort, so any glob/remove error is ignored (the build proceeds regardless).
+func removeStaleTemps(dbPath string) {
+	matches, err := filepath.Glob(dbPath + ".tmp.*")
+	if err != nil {
+		return
+	}
+	for _, p := range matches {
+		if info, err := os.Stat(p); err == nil && time.Since(info.ModTime()) > staleTempAge {
+			_ = os.Remove(p)
+		}
+	}
 }
 
 // ---------- small text helpers ----------

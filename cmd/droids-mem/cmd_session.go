@@ -26,8 +26,8 @@ func newSessionCmd(a *app) *cobra.Command {
 	}
 	cmd.AddCommand(
 		newSessionStageCmd(),
+		newSessionDeclineCmd(),
 		newSessionMarkChangeCmd(),
-		newSessionCheckCmd(),
 		newSessionFlushCmd(a),
 		newSessionRecoverCmd(a),
 		newSessionPullCmd(a),
@@ -114,6 +114,31 @@ func newSessionPullCmd(a *app) *cobra.Command {
 // filtering trims to relevancePullLimit.
 const maxRelevanceCandidates = 10
 
+// pullTuningRecord is one line of the threshold-tuning dataset (ADR-0026) for
+// the relevance floor. kept means the hit passed the floor (overlap >= floor) —
+// the floor decision alone, independent of the per-session injected-once dedupe.
+// One record per candidate evaluated, rejected ones included: their overlaps
+// are half the distribution the floor is tuned against.
+type pullTuningRecord struct {
+	Ev      string  `json:"ev"`
+	Ts      int64   `json:"ts"`
+	Floor   float64 `json:"floor"`
+	Hit     string  `json:"hit"`
+	Overlap float64 `json:"overlap"`
+	Kept    bool    `json:"kept"`
+}
+
+func logPullOutcome(floor float64, hit string, overlap float64, kept bool) {
+	state.AppendTuningLog(pullTuningRecord{
+		Ev:      "pull",
+		Ts:      time.Now().Unix(),
+		Floor:   floor,
+		Hit:     hit,
+		Overlap: overlap,
+		Kept:    kept,
+	})
+}
+
 // relevancePull runs the relevance-gated recall (ADR-0016 pt 8): search the
 // prompt, keep hits whose prompt-token overlap meets the floor, drop ones
 // already injected this session, cap to relevancePullLimit, and record the
@@ -131,7 +156,10 @@ func relevancePull(ctx context.Context, s *store.Store, ccID, query string, floo
 		if len(picked) >= relevancePullLimit {
 			break
 		}
-		if store.TokenOverlap(query, r.Title+" "+r.Learned) < floor || injected[r.ID] { // weaker than floor, or already shown
+		overlap := store.TokenOverlap(query, r.Title+" "+r.Learned)
+		passed := overlap >= floor
+		logPullOutcome(floor, r.ID, overlap, passed)
+		if !passed || injected[r.ID] { // weaker than floor, or already shown
 			continue
 		}
 		picked = append(picked, r)
@@ -219,6 +247,28 @@ func newSessionStageCmd() *cobra.Command {
 	return cmd
 }
 
+// newSessionDeclineCmd records a deliberate "nothing worth recalling" decision.
+// It writes a declined staged marker so the Stop-hook gate stops re-blocking
+// (until IntakeThreshold further changes land), while flush skips it entirely.
+func newSessionDeclineCmd() *cobra.Command {
+	var ccID string
+	cmd := &cobra.Command{
+		Use:   "decline",
+		Short: "Mark the session as having nothing worth staging (silences the Stop checkpoint)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := state.StageSummary(ccID, state.StagedSummary{Declined: true}); err != nil {
+				writeError("decline_failed", err.Error(), true)
+				exitWith(ExitError)
+			}
+			writeJSON(map[string]any{"declined": true, "session": ccID})
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&ccID, "session", "", "Claude Code session id (required)")
+	_ = cmd.MarkFlagRequired("session")
+	return cmd
+}
+
 func newSessionMarkChangeCmd() *cobra.Command {
 	var ccID string
 	cmd := &cobra.Command{
@@ -231,37 +281,6 @@ func newSessionMarkChangeCmd() *cobra.Command {
 				exitWith(ExitError)
 			}
 			writeJSON(map[string]any{"count": n})
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&ccID, "session", "", "Claude Code session id (required)")
-	_ = cmd.MarkFlagRequired("session")
-	return cmd
-}
-
-func newSessionCheckCmd() *cobra.Command {
-	var ccID string
-	cmd := &cobra.Command{
-		Use:   "check",
-		Short: "Report whether the session should stage now (Stop hook)",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			count, err := state.ChangeCount(ccID)
-			if err != nil {
-				writeError("check_failed", err.Error(), true)
-				exitWith(ExitError)
-			}
-			_, hasStaged, err := state.StagedModTime(ccID)
-			if err != nil {
-				writeError("check_failed", err.Error(), true)
-				exitWith(ExitError)
-			}
-			writeJSON(map[string]any{
-				"count":         count,
-				"threshold":     state.IntakeThreshold,
-				"threshold_met": count >= state.IntakeThreshold,
-				"has_staged":    hasStaged,
-				"needs_stage":   sessionNeedsStage(ccID),
-			})
 			return nil
 		},
 	}
@@ -375,6 +394,9 @@ func flushSession(ctx context.Context, s *store.Store, ccID string) flushResult 
 	}
 	if staged == nil {
 		return flushResult{reason: "no_staged"}
+	}
+	if staged.Declined {
+		return flushResult{reason: "declined"}
 	}
 	// File provenance (ADR-0021 Phase 2) is independent of the intake gate: the
 	// files a run touched are worth recording even when the summary is too thin

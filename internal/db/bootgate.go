@@ -19,13 +19,6 @@ func (e *BootGateError) Error() string {
 	return fmt.Sprintf("%s — %s", e.Reason, e.Migration)
 }
 
-// IsBootGateError unwraps err looking for a *BootGateError. Convenience for
-// callers that want to format the message differently from a generic failure.
-func IsBootGateError(err error) bool {
-	var bg *BootGateError
-	return errors.As(err, &bg)
-}
-
 // AssertBootReady refuses startup against a database that has not been
 // upgraded to the current schema version AND had its scrub baseline
 // established. Fresh DBs stamp the sentinel in DDL; migrated DBs need an

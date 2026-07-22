@@ -7,7 +7,7 @@ import (
 
 // CurrentSchemaVersion is the user_version that a fully-initialized
 // database reports. Bump when adding a new entry to the migrations ladder.
-const CurrentSchemaVersion = 4
+const CurrentSchemaVersion = 5
 
 // migration is one rung in the PRAGMA user_version ladder. Each rung runs
 // inside its own transaction; partial failure rolls back atomically.
@@ -34,6 +34,7 @@ var migrations = []migration{
 	{from: 1, to: 2, sql: migrationV1ToV2},
 	{from: 2, to: 3, sql: migrationV2ToV3},
 	{from: 3, to: 4, sql: migrationV3ToV4},
+	{from: 4, to: 5, sql: migrationV4ToV5},
 }
 
 const migrationV0ToV1 = `
@@ -95,6 +96,16 @@ CREATE TABLE IF NOT EXISTS memory_files (
     created_at INTEGER NOT NULL,
     PRIMARY KEY (session_id, file_path)
 );
+`
+
+// migrationV4ToV5 flips the shared-context default (ADR-0028): scope now
+// defaults to 'personal' so nothing leaves the local store implicitly. The
+// backfill reinterprets every pre-v5 row as personal — correct because scope
+// was never read before ADR-0028, so no historical 'shared' value was ever a
+// deliberate share. Sharing becomes explicit via `share`/`--scope shared`.
+// Purely a data rewrite of one column; no FTS, boot-gate, or scrub interaction.
+const migrationV4ToV5 = `
+UPDATE memories SET scope = 'personal';
 `
 
 // Migrate advances db's schema from its current user_version up to

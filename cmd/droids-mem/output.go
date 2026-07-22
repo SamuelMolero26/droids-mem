@@ -20,6 +20,12 @@ func writeJSON(v any) {
 	fmt.Fprintln(os.Stdout, string(b))
 }
 
+// writeString prints a pre-rendered payload (e.g. the graph surface's TOON) to
+// stdout as-is.
+func writeString(s string) {
+	fmt.Fprintln(os.Stdout, s)
+}
+
 type errResponse struct {
 	Status     string `json:"status"`
 	Code       string `json:"code"`

@@ -18,6 +18,7 @@ type listItem struct {
 	title     string
 	taskType  string
 	createdAt int64
+	shared    bool // scope=='shared' — drives the SHARED row chip (List only; search omits it)
 }
 
 func (i listItem) FilterValue() string { return i.title }
@@ -29,7 +30,7 @@ func (i listItem) Description() string {
 func itemsFromList(resp *store.ListResponse) []list.Item {
 	out := make([]list.Item, 0, len(resp.Memories))
 	for _, m := range resp.Memories {
-		out = append(out, listItem{id: m.ID, kind: m.Kind, title: m.Title, taskType: m.TaskType, createdAt: m.CreatedAt})
+		out = append(out, listItem{id: m.ID, kind: m.Kind, title: m.Title, taskType: m.TaskType, createdAt: m.CreatedAt, shared: m.Scope == "shared"})
 	}
 	return out
 }

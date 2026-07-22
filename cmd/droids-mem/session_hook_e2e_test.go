@@ -2,6 +2,7 @@ package main_test
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,13 +48,12 @@ func TestE2E_HookPostToolUseCountsMeaningfulOnly(t *testing.T) {
 	sessStdin(t, home, db, `{"hook_event_name":"PostToolUse","session_id":"cc-h","tool_name":"Read"}`, "session", "hook")
 	sessStdin(t, home, db, `{"hook_event_name":"PostToolUse","session_id":"cc-h","tool_name":"Bash"}`, "session", "hook")
 
-	var chk struct {
-		Count        int  `json:"count"`
-		ThresholdMet bool `json:"threshold_met"`
+	b, err := os.ReadFile(filepath.Join(home, "sessions", "cc-h.count"))
+	if err != nil {
+		t.Fatalf("read count file: %v", err)
 	}
-	mustParseJSON(t, sess(t, home, db, "session", "check", "--session", "cc-h"), &chk)
-	if chk.Count != state.IntakeThreshold || !chk.ThresholdMet {
-		t.Fatalf("expected count %d (Read and Bash ignored), got %+v", state.IntakeThreshold, chk)
+	if got := strings.TrimSpace(string(b)); got != fmt.Sprint(state.IntakeThreshold) {
+		t.Fatalf("expected count %d (Read and Bash ignored), got %s", state.IntakeThreshold, got)
 	}
 }
 

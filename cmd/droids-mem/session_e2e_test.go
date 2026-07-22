@@ -102,6 +102,33 @@ func TestE2E_SessionFlushBelowThreshold(t *testing.T) {
 	}
 }
 
+// Decline: a declined session satisfies the gate (no Stop re-block) but flush
+// persists nothing, even with the change threshold met.
+func TestE2E_SessionDeclineSkipsFlush(t *testing.T) {
+	home := t.TempDir()
+	db := filepath.Join(t.TempDir(), "mem.db")
+
+	for range state.IntakeThreshold {
+		sess(t, home, db, "session", "mark-change", "--session", "cc-declined")
+	}
+	sess(t, home, db, "session", "decline", "--session", "cc-declined")
+
+	var fl struct {
+		Flushed bool   `json:"flushed"`
+		Reason  string `json:"reason"`
+	}
+	mustParseJSON(t, sess(t, home, db, "session", "flush", "--session", "cc-declined"), &fl)
+	if fl.Flushed || fl.Reason != "declined" {
+		t.Fatalf("expected declined no-flush, got %+v", fl)
+	}
+
+	var rs recentResp
+	mustParseJSON(t, sess(t, home, db, "recent-sessions"), &rs)
+	if rs.Total != 0 {
+		t.Errorf("declined session must not persist: total=%d", rs.Total)
+	}
+}
+
 type pullResp struct {
 	Results []struct {
 		ID    string `json:"id"`
