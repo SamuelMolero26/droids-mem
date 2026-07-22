@@ -9,19 +9,6 @@ package db
 // FTS5 external-content sync (memories_fts) keys on this rowid. Do NOT use
 // INSERT OR REPLACE or REPLACE INTO on memories — those reassign rowid and
 // silently desync the FTS index. Use ON CONFLICT DO UPDATE for upserts.
-//
-// authored_at is when the lesson was WRITTEN; created_at is when it entered
-// THIS store. They are equal for a locally-authored row and diverge on
-// import, where ImportShared re-stamps created_at to the local import time
-// but carries the peer's authored_at forward. Pure provenance: it is never an
-// ORDER BY key and never drives review_after — an old peer lesson must not
-// jump the newest-first queue, and there is no decay clock in this change.
-//
-// Column comments live HERE, not inside the CREATE TABLE body: SQLite stores
-// the statement text verbatim in sqlite_master, but a column added later by
-// ALTER TABLE carries no comment. An inline comment therefore makes a fresh
-// DB permanently unequal to a migrated one and breaks
-// TestInit_FreshMatchesMigratedShape.
 const ddl = ddlTables + FTSSchema + ddlMeta
 
 const ddlTables = `
@@ -45,7 +32,6 @@ CREATE TABLE IF NOT EXISTS memories (
     origin                TEXT    NOT NULL DEFAULT 'manual' CHECK(origin IN ('manual','auto')),
     review_after          INTEGER,
     pinned                INTEGER NOT NULL DEFAULT 0,
-    authored_at           INTEGER NOT NULL DEFAULT 0,
     CHECK(updated_at >= created_at)
 );
 
@@ -56,10 +42,6 @@ CREATE TABLE IF NOT EXISTS memories (
 -- archive time) is checked against memories via a PRAGMA table_info parity
 -- test so future ALTERs on memories fail loud here instead of silently
 -- dropping a column from the archive copy.
---
--- authored_at sits LAST here, after archived_at, because rung 8→9 adds it via
--- ALTER TABLE and ALTER can only append. Fresh has to match the order a
--- migrated DB ends up with, not the mirror order of memories.
 CREATE TABLE IF NOT EXISTS archived_memories (
     id                    TEXT    PRIMARY KEY,
     session_id            TEXT    NOT NULL,
@@ -80,8 +62,7 @@ CREATE TABLE IF NOT EXISTS archived_memories (
     origin                TEXT    NOT NULL DEFAULT 'manual',
     review_after          INTEGER,
     pinned                INTEGER NOT NULL DEFAULT 0,
-    archived_at           INTEGER NOT NULL,
-    authored_at           INTEGER NOT NULL DEFAULT 0
+    archived_at           INTEGER NOT NULL
 );
 
 -- meta holds singleton key/value markers (e.g. scrub_baseline_complete).
@@ -94,34 +75,19 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_fingerprint ON memories(fingerprint);
--- idx_memories_kind stands alone because kind is the SECOND column of the
--- composite below, so no leftmost prefix covers a kind-only lookup. There is
--- deliberately no idx_memories_task_type: task_type IS the composite's leftmost
--- column, so the composite already serves every task_type-only lookup on the
--- same access path. Verified on EXPLAIN QUERY PLAN — with the standalone index
--- dropped, "WHERE task_type=?" plans as
--- "SEARCH USING INDEX idx_memories_task_kind_created (task_type=?)" and
--- "GROUP BY task_type" still takes a covering scan of the composite.
+CREATE INDEX IF NOT EXISTS idx_memories_task_type         ON memories(task_type);
 CREATE INDEX IF NOT EXISTS idx_memories_kind              ON memories(kind);
 -- idx_memories_task_kind_created composite covers leftmost-prefix (task_type)
--- and (task_type, kind) lookups AND eliminates the ORDER BY sort step for the
--- session_summary prune (save.go), fetchLastSession, fetchAllUserRules.
--- (Prior idx_memories_task_kind dropped in earlier migration — DROP line
--- removed v1.0 per perf-engineer rec #5.)
---
--- The trailing "id DESC" is load-bearing, not cosmetic. Those queries order by
--- "created_at DESC, id DESC" (ADR-0033); without id in the index SQLite adds
--- "USE TEMP B-TREE FOR LAST TERM OF ORDER BY", which sorts each same-second
--- tie group. That costs nothing when rows have distinct seconds, but it makes
--- LIMIT stop being an early exit inside a tie group — and a bulk ImportShared
--- re-stamps every row to the same second, so the retention prune degrades from
--- O(1) to O(tie-group). Measured 13µs flat vs 720µs at a 2000-row tie group.
-CREATE INDEX IF NOT EXISTS idx_memories_task_kind_created ON memories(task_type, kind, created_at DESC, id DESC);
-CREATE INDEX IF NOT EXISTS idx_memories_created_at        ON memories(created_at DESC, id DESC);
+-- and (task_type, kind) lookups AND eliminates the ORDER BY created_at DESC
+-- sort step for the session_summary prune (save.go), fetchLastSession,
+-- fetchAllUserRules. (Prior idx_memories_task_kind dropped in earlier
+-- migration — DROP line removed v1.0 per perf-engineer rec #5.)
+CREATE INDEX IF NOT EXISTS idx_memories_task_kind_created ON memories(task_type, kind, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_created_at        ON memories(created_at DESC);
 -- idx_memories_origin_created serves the auto-summary recency read
 -- (recent-sessions: WHERE origin='auto' ORDER BY created_at DESC LIMIT N) and
 -- the origin-keyed eviction scan (ADR-0016). Never joined on FTS.
-CREATE INDEX IF NOT EXISTS idx_memories_origin_created    ON memories(origin, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_origin_created    ON memories(origin, created_at DESC);
 
 -- memory_files is the file-provenance relation (ADR-0021 Phase 2): the files a
 -- Claude Code session read or changed, keyed by the droids-mem session_id the
@@ -136,16 +102,10 @@ CREATE TABLE IF NOT EXISTS memory_files (
 );
 `
 
-// FTSSchema is the FTS5 virtual table + the three sync triggers (AI/AD/AU)
-// for a FRESH database. It is the current shape only — it is NOT shared with
-// the migration ladder. Rung 7→8 carries its own frozen copy (ftsSchemaV8 in
-// migrations.go) because a rung is history: a change here must never rewrite
-// what an already-shipped user_version transition executes.
-//
-// So a tokenizer or column change here does NOT reach existing databases on
-// its own. It needs a new ladder rung as well, or migrated DBs silently keep
-// the old shape while fresh DBs get the new one — same user_version, no error.
-// TestInit_FreshMatchesMigratedShape fails when that rung is missing.
+// FTSSchema is the FTS5 virtual table + the three sync triggers (AI/AD/AU).
+// Single source of truth: the fresh-DB ddl embeds it, and `migrate --rescrub`
+// re-executes it verbatim after dropping the old index (internal/store/migrate.go),
+// so a tokenizer change here propagates to migrated DBs automatically.
 //
 // FTS5 tokenizer (decision #17, + porter ADR-0018-era retrieval pass): the
 // porter stemmer wraps unicode61, folding morphological variants (cancel /
@@ -155,8 +115,8 @@ CREATE TABLE IF NOT EXISTS memory_files (
 // porter does NOT bridge true synonyms (panic <-> nil pointer) — that gap is
 // left to write-time canonical tags, not retrieval-side machinery (embeddings
 // rejected: local-first, pure-Go, no CGO).
-// Existing databases pick up the stemmer via the boot ladder rung 7→8 on
-// first open after an upgrade (once per DB, before the boot gate runs).
+// Existing databases pick up the stemmer by running 'droids-mem migrate'
+// (either mode drops + recreates this table from FTSSchema and reindexes).
 const FTSSchema = `
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     title,
