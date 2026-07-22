@@ -97,6 +97,62 @@ func (s *Store) ReviewList(ctx context.Context) (*ReviewListResponse, error) {
 	return &ReviewListResponse{Memories: memories, Total: len(memories)}, nil
 }
 
+// ArchivedMemory is a retired row from the Memory archive: the full memory plus
+// the unix second it was archived (ADR-0030). Recoverable/auditable but invisible
+// to every retrieval path.
+type ArchivedMemory struct {
+	Memory
+	ArchivedAt int64 `json:"archived_at"`
+}
+
+// ArchiveListResponse is the `archive list` payload, most-recently-archived first.
+type ArchiveListResponse struct {
+	Memories []ArchivedMemory `json:"memories"`
+	Total    int              `json:"total"`
+}
+
+// ArchiveList returns archived (superseded) memories, optionally filtered by
+// task_type — the operator audit view over the soft-delete archive. Never joined
+// to memories_fts and never returned by any agent-facing read, so archived rows
+// stay out of mem_context/mem_search/review list.
+func (s *Store) ArchiveList(ctx context.Context, taskType string) (*ArchiveListResponse, error) {
+	query := `
+		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at,
+		       expand_count, COALESCE(last_expanded_at, 0), scope, review_after, pinned, archived_at
+		FROM archived_memories
+	`
+	var args []any
+	if tt := strings.TrimSpace(taskType); tt != "" {
+		query += " WHERE task_type = ?"
+		args = append(args, tt)
+	}
+	query += " ORDER BY archived_at DESC"
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("archive list query: %w", err)
+	}
+	defer rows.Close()
+
+	memories := []ArchivedMemory{}
+	for rows.Next() {
+		var am ArchivedMemory
+		var reviewAfter sql.NullInt64
+		if err := rows.Scan(&am.ID, &am.SessionID, &am.TaskType, &am.Kind, &am.Title, &am.What, &am.Learned, &am.Tags, &am.Fingerprint, &am.CreatedAt, &am.UpdatedAt, &am.ExpandCount, &am.LastExpandedAt, &am.Scope, &reviewAfter, &am.Pinned, &am.ArchivedAt); err != nil {
+			return nil, fmt.Errorf("scan archived row: %w", err)
+		}
+		if reviewAfter.Valid {
+			am.ReviewAfter = &reviewAfter.Int64
+		}
+		am.NeedsReview = needsReview(am.ReviewAfter)
+		memories = append(memories, am)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("archive list rows: %w", err)
+	}
+	return &ArchiveListResponse{Memories: memories, Total: len(memories)}, nil
+}
+
 // maxPinnedPerTaskType caps how many memories a single task_type may pin
 // (spec: "Pin Assignment and Per-Task-Type Cap"). Enforced race-free by the
 // single-writer connection pool (db.go SetMaxOpenConns(1)).

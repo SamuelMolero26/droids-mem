@@ -318,14 +318,31 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 		return nil, fmt.Errorf("insert memory: %w", err)
 	}
 
-	// Supersede (ADR-0018): hard-delete the named target in the same txn, only
-	// after a successful insert. The WHERE is scope-bound to the NEW memory's
-	// kind/task_type/scope, so a mismatched or missing target matches 0 rows —
-	// cross-boundary deletion is impossible by construction, no validate branch
-	// needed. Runs on the INSERT path only; a force-update (fingerprint twin)
-	// returns earlier and is its own replacement.
+	// Supersede (ADR-0030, superseding ADR-0018's hard delete): archive the
+	// named target into archived_memories, then delete it from memories — both
+	// in this same IMMEDIATE txn, only after a successful insert. The scope-bound
+	// WHERE (the NEW memory's kind/task_type/scope) means a mismatched or missing
+	// target matches 0 rows in BOTH statements, so cross-boundary archival is
+	// impossible by construction — no validate branch needed. The explicit column
+	// list (not SELECT *) keeps the archive copy honest against future ALTERs on
+	// memories, guarded by the table_info parity test. Runs on the INSERT path
+	// only; a force-update (fingerprint twin) returns earlier and is its own
+	// replacement. memories_ad keeps FTS synced on the delete; archived_memories
+	// has no triggers so its insert is inert.
 	var supersededID string
 	if req.Supersedes != "" {
+		if _, err := conn.ExecContext(ctx, `
+			INSERT INTO archived_memories
+				(id, session_id, task_type, kind, title, what, learned, tags, fingerprint,
+				 created_at, updated_at, scope, scrub_pattern_version, scrub_counts,
+				 expand_count, last_expanded_at, origin, review_after, pinned, archived_at)
+			SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint,
+				 created_at, updated_at, scope, scrub_pattern_version, scrub_counts,
+				 expand_count, last_expanded_at, origin, review_after, pinned, ?
+			FROM memories WHERE id=? AND kind=? AND task_type=? AND scope=?
+		`, now, req.Supersedes, req.Kind, req.TaskType, req.Scope); err != nil {
+			return nil, fmt.Errorf("supersede archive: %w", err)
+		}
 		res, err := conn.ExecContext(ctx,
 			`DELETE FROM memories WHERE id=? AND kind=? AND task_type=? AND scope=?`,
 			req.Supersedes, req.Kind, req.TaskType, req.Scope)
