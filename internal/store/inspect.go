@@ -153,7 +153,7 @@ func (s *Store) RecentSessions(ctx context.Context, req RecentSessionsRequest) (
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at,
-		       expand_count, COALESCE(last_expanded_at, 0)
+		       expand_count, COALESCE(last_expanded_at, 0), review_after, pinned
 		FROM memories
 		WHERE origin = 'auto'
 		ORDER BY created_at DESC
@@ -167,9 +167,14 @@ func (s *Store) RecentSessions(ctx context.Context, req RecentSessionsRequest) (
 	sessions := []Memory{}
 	for rows.Next() {
 		var m Memory
-		if err := rows.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt); err != nil {
+		var reviewAfter sql.NullInt64
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &reviewAfter, &m.Pinned); err != nil {
 			return nil, fmt.Errorf("scan session: %w", err)
 		}
+		if reviewAfter.Valid {
+			m.ReviewAfter = &reviewAfter.Int64
+		}
+		m.NeedsReview = needsReview(m.ReviewAfter)
 		sessions = append(sessions, m)
 	}
 	if err := rows.Err(); err != nil {
