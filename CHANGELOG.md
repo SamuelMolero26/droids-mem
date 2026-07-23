@@ -7,6 +7,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **README rewritten** as a landing page — problem-first structure, no ASCII
+  art, concise sections for quick scan, clearer positioning for new users.
+  Adds a "For whom?" section, a "Contributing" call-to-action, and a compact
+  CLI reference table.
+
 ### Added
 - **Opt-in shared context** (ADR-0028 / ADR-0029): memories carry a
   `scope` (`personal` | `shared`); `scope` now defaults to `personal` (v4→v5
