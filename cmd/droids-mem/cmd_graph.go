@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -10,6 +11,22 @@ import (
 	"github.com/samuelmolero26/droids-mem/internal/graph"
 	"github.com/samuelmolero26/droids-mem/internal/state"
 )
+
+// graphTarget resolves a graph subcommand's target from either the positional
+// arg or its name-matched flag (--symbol/--package), enforcing exactly one so
+// the MCP arg names work on the CLI without a second, conflicting source.
+func graphTarget(args []string, flagVal, kind string) (string, error) {
+	switch {
+	case len(args) == 1 && flagVal != "":
+		return "", fmt.Errorf("pass the %s once: as an argument or via --%s, not both", kind, kind)
+	case len(args) == 1:
+		return args[0], nil
+	case flagVal != "":
+		return flagVal, nil
+	default:
+		return "", fmt.Errorf("provide a %s: as an argument (`graph %s <%s>`) or via --%s", kind, kind, kind, kind)
+	}
+}
 
 // graphManager builds the code-graph manager rooted at <state dir>/graphs.
 // Shared by `graph` subcommands and `serve` (ADR-0020).
@@ -66,14 +83,20 @@ automatically when the repo changes. See docs/adr/0020-native-code-graph.md.`,
 		},
 	}
 
-	var direction, to string
+	var direction, to, symbolFlag string
 	var depth int
 	symbolCmd := &cobra.Command{
-		Use:         "symbol <name>",
-		Short:       "Show a symbol's source + callers/callees as signature stubs",
-		Args:        cobra.ExactArgs(1),
+		Use:   "symbol <name>",
+		Short: "Show a symbol's source + callers/callees as signature stubs",
+		// Accept the target positionally OR via --symbol, so the MCP graph_symbol
+		// arg name works verbatim on the CLI (surface parity).
+		Args:        cobra.MaximumNArgs(1),
 		Annotations: bypass,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			target, err := graphTarget(args, symbolFlag, "symbol")
+			if err != nil {
+				return err
+			}
 			gm, err := graphManager()
 			if err != nil {
 				return err
@@ -81,7 +104,7 @@ automatically when the repo changes. See docs/adr/0020-native-code-graph.md.`,
 			defer gm.Close()
 			resp, err := gm.Symbol(cmd.Context(), graph.SymbolRequest{
 				Repo:      resolveRepo(),
-				Symbol:    args[0],
+				Symbol:    target,
 				Direction: direction,
 				Depth:     depth,
 				To:        to,
@@ -97,13 +120,19 @@ automatically when the repo changes. See docs/adr/0020-native-code-graph.md.`,
 	symbolCmd.Flags().StringVar(&direction, "direction", "both", "edges to follow: up | down | both")
 	symbolCmd.Flags().IntVar(&depth, "depth", 1, "transitive hops (max 5); up + depth>1 = blast radius")
 	symbolCmd.Flags().StringVar(&to, "to", "", "target symbol: return the call path instead of neighbors")
+	symbolCmd.Flags().StringVar(&symbolFlag, "symbol", "", "symbol name (alias for the positional arg; matches MCP graph_symbol)")
 
+	var packageFlag string
 	packageCmd := &cobra.Command{
 		Use:         "package <path>",
 		Short:       "Show a package's exported surface (signatures only)",
-		Args:        cobra.ExactArgs(1),
+		Args:        cobra.MaximumNArgs(1),
 		Annotations: bypass,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			target, err := graphTarget(args, packageFlag, "package")
+			if err != nil {
+				return err
+			}
 			gm, err := graphManager()
 			if err != nil {
 				return err
@@ -111,7 +140,7 @@ automatically when the repo changes. See docs/adr/0020-native-code-graph.md.`,
 			defer gm.Close()
 			resp, err := gm.Package(cmd.Context(), graph.PackageRequest{
 				Repo:    resolveRepo(),
-				Package: args[0],
+				Package: target,
 			})
 			if err != nil {
 				writeGraphErr(err)
@@ -121,6 +150,7 @@ automatically when the repo changes. See docs/adr/0020-native-code-graph.md.`,
 			return nil
 		},
 	}
+	packageCmd.Flags().StringVar(&packageFlag, "package", "", "package path (alias for the positional arg; matches MCP graph_package)")
 
 	cmd.AddCommand(indexCmd, symbolCmd, packageCmd)
 	return cmd
