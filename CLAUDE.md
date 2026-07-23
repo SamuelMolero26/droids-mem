@@ -48,15 +48,14 @@ to verify a listener actually holds the token before reporting `already_running`
 Single binary, layered. Don't bypass layers:
 
 1. **`cmd/droids-mem/`** — cobra subcommands. One `cmd_*.go` per command; delegates to store, emits JSON via `output.go`. No business logic.
-2. **`internal/mcpserver/`** — MCP bridge (`server.go` wires HTTP + auth, `stdio.go` the stdio transport for host-spawned servers (`serve --stdio`, ADR-0019 — no port/token; instructions string forks one summary sentence per transport), `tools.go` defines the 4 memory tools, `graph_tools.go` the 2 code-graph tools). Operator commands (`list`, `schema`, `doctor`, `prune`) intentionally not exposed here.
+2. **`internal/mcpserver/`** — MCP bridge (`server.go` wires HTTP + auth, `stdio.go` the stdio transport for host-spawned servers (`serve --stdio`, ADR-0024 — no port/token; instructions string forks one summary sentence per transport), `tools.go` defines the 4 memory tools, `graph_tools.go` the 2 code-graph tools). Operator commands (`list`, `schema`, `doctor`, `prune`) intentionally not exposed here.
 3. **`internal/store/`** — all business logic shared by CLI and MCP. Key files:
    - `save.go` — validate → scrub → fingerprint → dedupe (2 layers) → insert; owns scrub *policy* (which fields, tag + identifier strict-reject, empty-after-scrub)
    - `search.go` — FTS5 MATCH queries
    - `context.go` — two-tier context bundle assembly (always + browse)
    - `doctor.go` / `inspect.go` — health checks (incl. ADR-0010 growth warnings), introspection
    - `prune.go` — manual deletion + `--suggest-dupes` cluster discovery (ADR-0010); never automatic
-   - `scrub.go` — thin aliases re-exporting the engine from `internal/scrub`
-   - `eval.go` — recall eval engine (ADR-0025): scores paraphrase→memory fixture pairs against `mem_search`/`mem_context`; driven by `recall_benchmark_test.go`
+   - `eval_engine_test.go` — recall eval engine (ADR-0025), test-only: scores paraphrase→memory fixture pairs against `mem_search`/`mem_context`; driven by `recall_benchmark_test.go`. Store code imports `internal/scrub` directly (no alias layer).
 4. **`internal/scrub/`** — the scrub *engine* (ADR-0008): `spec.yaml` (embedded declarative detector spec, single source of truth, pinned-hash version enforcement), `scrub.go` (single-pass collect → overlap-resolve → splice, windowed scanning), `entropy.go` (deterministic gate for usage-class detectors), `corpus.go` + `testdata/` (fixture corpus, `[CUT]` defang convention). No store imports.
 5. **`internal/db/`** — `db.go` opens connection + applies pragmas; `schema.go` holds raw DDL string.
 6. **`internal/state/`** — `LoadOrCreateToken()` is the canonical bearer-token resolver. Owns all `~/.droids-mem/` file ops.
@@ -107,13 +106,13 @@ Session retention: on `session_summary` save, delete oldest if > 5 for that `tas
 6 tools: `mem_save`, `mem_search`, `mem_context`, `mem_get` (memory) + `graph_symbol`, `graph_package` (code graph, ADR-0020 — signatures-first, agent passes `repo` = absolute project root).
 
 - `mem_context` mints `session_id` (stateless server — agent stores and reuses it).
-- Auth: `Authorization: Bearer <token>` on every `/mcp` request. Stdio transport (`serve --stdio`, ADR-0019) has no port/token — the pipe is private to the spawning host; same tool surface, only the instructions string's summary sentence differs (stdio hosts self-save a `session_summary`).
+- Auth: `Authorization: Bearer <token>` on every `/mcp` request. Stdio transport (`serve --stdio`, ADR-0024) has no port/token — the pipe is private to the spawning host; same tool surface, only the instructions string's summary sentence differs (stdio hosts self-save a `session_summary`).
 - `*store.ValidationError` → MCP tool error `{error, field, message}`; other runtime errors → structured envelope `{status, error, message, retryable, suggestion}` (dominant case: transient `BEGIN IMMEDIATE` write-lock timeout, ADR-0024).
 - SIGTERM → `http.Server.Shutdown` (10 s grace) → `db.Close`.
 
-## Consumer pattern (ADR 0004)
+## Consumer pattern (convention, not enforced)
 
-Only Root agent writes to `droids-mem`. Sub-agents get no MCP tools — they consume the context Bundle injected by Root. Root runs `mem_context` first, threads `session_id` through the run, then fans out `mem_save` calls in Rollup. The 4-kind enum (`session_summary`, `task_pattern`, `error_resolution`, `user_rule`) is frozen — no `observation` kind.
+Intended flow: only the Root agent writes to `droids-mem` — sub-agents get no MCP tools and consume the context Bundle injected by Root, which runs `mem_context` first, threads `session_id` through the run, then fans out `mem_save` calls in Rollup. This is a *convention*, not a runtime control: nothing gates writes by caller. `internal/mcpserver/tools.go` instructs every connected agent to save proactively, and `install --all` registers the bridge at `claude mcp add --scope user`. The 4-kind enum (`session_summary`, `task_pattern`, `error_resolution`, `user_rule`) is frozen — no `observation` kind.
 
 ## Dependencies (locked)
 
@@ -124,26 +123,15 @@ Only Root agent writes to `droids-mem`. Sub-agents get no MCP tools — they con
 
 ## Reference docs
 
-- `files/Droids-mem-PRD.md` — full product spec, data model, response shapes.
-- `M0-decisions.md` — locked pre-impl decisions. Read before changing any design assumption.
-- `files/CLI-GUIDE.md` + `files/CHECKLIST.md` — CLI design rules.
-- `CONTEXT.md` — domain language and term aliases.
-- `docs/adr/0001` — fingerprint scope decisions.
-- `docs/adr/0002` — context bundle tier model.
-- `docs/adr/0003` — MCP transport, bearer auth, session ownership.
-- `docs/adr/0004` — parent-as-memory-broker pattern (why sub-agents don't write to droids-mem).
-- `docs/adr/0005` — three-layer workspace model.
-- `docs/adr/0006` — git JSONL sync for project workspaces.
-- `docs/adr/0007` — PII scrub pipeline.
-- `docs/adr/0008` — layered scrub detectors.
-- `docs/adr/0009` — store owns error serialization.
-- `docs/adr/0010` — no automatic retention; doctor warnings + manual prune with dupe-cluster suggestions.
-- `docs/adr/0011` — user_rule overflow surfaces as browse-tier stubs + `user_rules_total`.
-- `docs/adr/0019` — MCP server instructions + stdio transport for cross-host proactive integration (multi-host install).
-- `docs/adr/0020` — native code graph (Go-only, per-repo graph.db, signatures-first tools).
-- `docs/adr/0024` — MCP runtime errors return a structured `{status, error, message, retryable, suggestion}` envelope.
-- `docs/adr/0025` — recall eval engine (paraphrase→memory benchmark, no CI threshold).
-- `Future.md` — deferred / post-V1 ideas.
+Architecture decisions live in `docs/adr/` — read the relevant ADR before
+changing a design assumption; that directory is the index, not this file.
+Historical `(ADR-00XX)` parentheticals below `0020` in code comments annotate
+real decisions whose files were removed; their rationale now lives inline here
+and in code.
+
+- `future.todo` — deferred / post-V1 ideas and shipping-audit backlog.
+- `CONTEXT.md` — domain language and term aliases (gitignored, local only).
+- `files/shared-context-sync-PRD.md` — shared-pool git-transport spec.
 
 ## Engineering practices
 
@@ -151,3 +139,18 @@ Only Root agent writes to `droids-mem`. Sub-agents get no MCP tools — they con
 - We try to only add new functionality that is small (that is, simple and few lines of code) or absolutely necessary. If a change is not small or absolutely necessary, don't make it.
 
 - Use cc-skills-golang for best go practices
+
+- **Before calling a change done, run `golangci-lint run --timeout 5m`** — not
+  just `go test ./...` + `go vet ./...`. Linters catch what the compiler and
+  tests don't: `nilerr` (returning `nil` in a block guarded by a non-nil error
+  — note it fires even when the error isn't bound to a named var, and even on
+  the direct `if json.Unmarshal(x) != nil { return nil }` shape), `gosec`
+  (G304 file-inclusion, G301/G306 perms), etc. An intentional `return nil` on
+  an error path (e.g. skip-and-count a bad row) needs `//nolint:nilerr` with a
+  reason, never a silent suppression.
+- **Streaming a line-delimited input with a "skip bad rows, never abort"
+  contract → use `bufio.Reader.ReadBytes('\n')`, not `bufio.Scanner`.**
+  Scanner aborts the whole stream via `sc.Err()` on any line over its 64KB
+  token cap, which a crafted/oversized line can trigger to defeat exactly that
+  per-line resilience guarantee; Reader grows to any line length so a bad line
+  stays a per-line failure. (Learned building `import`, ADR-0028.)

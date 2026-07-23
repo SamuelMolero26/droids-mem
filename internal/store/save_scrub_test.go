@@ -9,20 +9,21 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/samuelmolero26/droids-mem/internal/scrub"
 	"github.com/samuelmolero26/droids-mem/internal/store"
 )
 
 // ---------- scope ----------
 
-func TestSave_DefaultsScopeToShared(t *testing.T) {
+func TestSave_DefaultsScopeToPersonal(t *testing.T) {
 	s := newTestStore(t)
 	resp, err := s.Save(context.Background(), validReq())
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	scope := readScope(t, s, resp.ID)
-	if scope != "shared" {
-		t.Errorf("default scope = %q, want 'shared'", scope)
+	if scope != "personal" {
+		t.Errorf("default scope = %q, want 'personal' (ADR-0028)", scope)
 	}
 }
 
@@ -208,8 +209,8 @@ func TestSave_ScrubsEmailFromLearned(t *testing.T) {
 	if !contains(resp.Scrub.FieldsRedacted, "learned") {
 		t.Errorf("fields_redacted = %v, want to contain 'learned'", resp.Scrub.FieldsRedacted)
 	}
-	if resp.Scrub.PatternVersion != store.ScrubPatternVersion {
-		t.Errorf("pattern_version = %d, want %d", resp.Scrub.PatternVersion, store.ScrubPatternVersion)
+	if resp.Scrub.PatternVersion != scrub.Version {
+		t.Errorf("pattern_version = %d, want %d", resp.Scrub.PatternVersion, scrub.Version)
 	}
 
 	stored := readLearned(t, s, resp.ID)
@@ -244,7 +245,7 @@ func TestSave_ScrubCountsJSONPersisted(t *testing.T) {
 	if !raw.Valid {
 		t.Fatal("expected scrub_counts JSON to be non-NULL")
 	}
-	var stored store.ScrubReport
+	var stored scrub.ScrubReport
 	if err := json.Unmarshal([]byte(raw.String), &stored); err != nil {
 		t.Fatalf("unmarshal scrub_counts: %v", err)
 	}

@@ -11,6 +11,103 @@ import (
 	"github.com/samuelmolero26/droids-mem/internal/store"
 )
 
+// TestContext_SurfacesNeedsReviewAndPinned is the [GUARD] for Phase 2: the
+// lifecycle flags must reach every ContextMemory-producing site —
+// fetchLastSessionConn, fetchUserRulesConn (always tier), and
+// fetchBrowseKindConn (browse tier). needs_review/pinned are audit-only
+// (D4) — they never change which rows are returned or their order, only add
+// the two fields.
+func TestContext_SurfacesNeedsReviewAndPinned(t *testing.T) {
+	s, conn := newTestStoreWithConn(t)
+	taskType := "lifecycle_ctx"
+
+	saveAndGetID := func(req store.SaveRequest) string {
+		resp, err := s.Save(context.Background(), req)
+		if err != nil {
+			t.Fatalf("seed save: %v", err)
+		}
+		return resp.ID
+	}
+
+	sessID := saveAndGetID(store.SaveRequest{
+		TaskType: taskType, Kind: "session_summary",
+		Title: "Last run summary", What: "Ran sync", Learned: "Sync completed", Tags: "sync",
+	})
+	ruleID := saveAndGetID(store.SaveRequest{
+		TaskType: taskType, Kind: "user_rule",
+		Title: "Pinned rule", What: "user corrected format", Learned: "Always pin important rules", Tags: "rules",
+	})
+	errID := saveAndGetID(store.SaveRequest{
+		TaskType: taskType, Kind: "error_resolution",
+		Title: "Phone mapping bug", What: "field mismatch", Learned: "map phone field", Tags: "phone",
+	})
+	patternID := saveAndGetID(store.SaveRequest{
+		TaskType: taskType, Kind: "task_pattern",
+		Title: "Plain pattern", What: "no lifecycle marks here", Learned: "nothing special", Tags: "plain",
+	})
+
+	past := time.Now().Add(-time.Hour).Unix()
+	if _, err := conn.Exec(`UPDATE memories SET review_after = ? WHERE id IN (?, ?)`, past, sessID, errID); err != nil {
+		t.Fatalf("seed review_after: %v", err)
+	}
+	if _, err := conn.Exec(`UPDATE memories SET pinned = 1 WHERE id = ?`, ruleID); err != nil {
+		t.Fatalf("seed pinned: %v", err)
+	}
+
+	resp, err := s.Context(context.Background(), store.ContextRequest{TaskType: taskType, Query: "phone plain"})
+	if err != nil {
+		t.Fatalf("Context: %v", err)
+	}
+
+	if resp.LastSession == nil {
+		t.Fatal("expected last_session")
+	}
+	if !resp.LastSession.NeedsReview {
+		t.Error("last_session.NeedsReview = false, want true (review_after in the past)")
+	}
+	if resp.LastSession.Pinned {
+		t.Error("last_session.Pinned = true, want false")
+	}
+
+	if len(resp.UserRules) != 1 {
+		t.Fatalf("expected 1 user_rule, got %d", len(resp.UserRules))
+	}
+	if !resp.UserRules[0].Pinned {
+		t.Error("user_rules[0].Pinned = false, want true")
+	}
+	if resp.UserRules[0].NeedsReview {
+		t.Error("user_rules[0].NeedsReview = true, want false")
+	}
+
+	var errItem, patternItem *store.ContextMemory
+	for i := range resp.Browse {
+		switch resp.Browse[i].ID {
+		case errID:
+			errItem = &resp.Browse[i]
+		case patternID:
+			patternItem = &resp.Browse[i]
+		}
+	}
+	if errItem == nil {
+		t.Fatal("expected error_resolution row in browse tier")
+	}
+	if !errItem.NeedsReview {
+		t.Error("browse error_resolution.NeedsReview = false, want true")
+	}
+	if errItem.Pinned {
+		t.Error("browse error_resolution.Pinned = true, want false")
+	}
+	if patternItem == nil {
+		t.Fatal("expected task_pattern row in browse tier")
+	}
+	if patternItem.NeedsReview {
+		t.Error("browse task_pattern.NeedsReview = true, want false")
+	}
+	if patternItem.Pinned {
+		t.Error("browse task_pattern.Pinned = true, want false")
+	}
+}
+
 func openProdDB(t *testing.T) (*sql.DB, error) {
 	t.Helper()
 	return db.Open()

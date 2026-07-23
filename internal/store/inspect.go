@@ -6,25 +6,50 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 type Memory struct {
-	ID          string `json:"id"`
-	SessionID   string `json:"session_id"`
-	TaskType    string `json:"task_type"`
-	Kind        string `json:"kind"`
-	Title       string `json:"title"`
-	What        string `json:"what"`
-	Learned     string `json:"learned"`
-	Tags        string `json:"tags"`
-	Fingerprint string `json:"fingerprint"`
-	CreatedAt   int64  `json:"created_at"`
-	UpdatedAt   int64  `json:"updated_at"`
+	ID             string `json:"id"`
+	SessionID      string `json:"session_id"`
+	TaskType       string `json:"task_type"`
+	Kind           string `json:"kind"`
+	Title          string `json:"title"`
+	What           string `json:"what"`
+	Learned        string `json:"learned"`
+	Tags           string `json:"tags"`
+	Fingerprint    string `json:"fingerprint"`
+	CreatedAt      int64  `json:"created_at"`
+	UpdatedAt      int64  `json:"updated_at"`
+	ExpandCount    int    `json:"expand_count"`
+	LastExpandedAt int64  `json:"last_expanded_at,omitempty"`
+	// Scope ('personal'|'shared') is populated by List and GetRow — the in-process
+	// TUI sharing surface renders it. RecentSessions leaves it "".
+	Scope string `json:"scope,omitempty"`
+	// ReviewAfter is nil until a decay horizon is assigned (save/force-save/
+	// supersede in slice 3, or mark_reviewed in slice 2) — scanned as
+	// sql.NullInt64, never COALESCEd, so a grandfathered NULL row stays nil
+	// here (ADR-0031 D1).
+	ReviewAfter *int64 `json:"review_after,omitempty"`
+	Pinned      bool   `json:"pinned"`
+	// NeedsReview is derived in Go at read time, never stored or SQL-filtered
+	// (D4): ReviewAfter != nil && *ReviewAfter < now. Audit-only — it never
+	// changes which rows are returned or their order.
+	NeedsReview bool `json:"needs_review"`
+}
+
+// needsReview computes the audit-only decay flag (D4): a memory needs review
+// when it carries a review_after horizon that has already passed. nil (no
+// horizon assigned yet, or an exempt kind like session_summary) is never
+// needs_review.
+func needsReview(reviewAfter *int64) bool {
+	return reviewAfter != nil && *reviewAfter < time.Now().Unix()
 }
 
 type ListRequest struct {
 	TaskType string
 	Kind     string
+	Scope    string // "" = any; "personal"|"shared" narrows to that scope (TUI scope filter)
 	Limit    int
 }
 
@@ -57,6 +82,10 @@ func (s *Store) List(ctx context.Context, req ListRequest) (*ListResponse, error
 		conditions = append(conditions, "kind = ?")
 		args = append(args, req.Kind)
 	}
+	if req.Scope != "" {
+		conditions = append(conditions, "scope = ?")
+		args = append(args, req.Scope)
+	}
 
 	where := ""
 	if len(conditions) > 0 {
@@ -65,7 +94,8 @@ func (s *Store) List(ctx context.Context, req ListRequest) (*ListResponse, error
 	args = append(args, limit)
 
 	stmt := fmt.Sprintf(`
-		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at
+		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at,
+		       expand_count, COALESCE(last_expanded_at, 0), scope, review_after, pinned
 		FROM memories %s
 		ORDER BY created_at DESC
 		LIMIT ?
@@ -80,9 +110,14 @@ func (s *Store) List(ctx context.Context, req ListRequest) (*ListResponse, error
 	memories := []Memory{}
 	for rows.Next() {
 		var m Memory
-		if err := rows.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		var reviewAfter sql.NullInt64
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &m.Scope, &reviewAfter, &m.Pinned); err != nil {
 			return nil, fmt.Errorf("scan memory: %w", err)
 		}
+		if reviewAfter.Valid {
+			m.ReviewAfter = &reviewAfter.Int64
+		}
+		m.NeedsReview = needsReview(m.ReviewAfter)
 		memories = append(memories, m)
 	}
 	if err := rows.Err(); err != nil {
@@ -117,7 +152,8 @@ func (s *Store) RecentSessions(ctx context.Context, req RecentSessionsRequest) (
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at
+		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at,
+		       expand_count, COALESCE(last_expanded_at, 0), review_after, pinned
 		FROM memories
 		WHERE origin = 'auto'
 		ORDER BY created_at DESC
@@ -131,9 +167,14 @@ func (s *Store) RecentSessions(ctx context.Context, req RecentSessionsRequest) (
 	sessions := []Memory{}
 	for rows.Next() {
 		var m Memory
-		if err := rows.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		var reviewAfter sql.NullInt64
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &reviewAfter, &m.Pinned); err != nil {
 			return nil, fmt.Errorf("scan session: %w", err)
 		}
+		if reviewAfter.Valid {
+			m.ReviewAfter = &reviewAfter.Int64
+		}
+		m.NeedsReview = needsReview(m.ReviewAfter)
 		sessions = append(sessions, m)
 	}
 	if err := rows.Err(); err != nil {
@@ -153,16 +194,22 @@ func (s *Store) GetRow(ctx context.Context, id string) (*Memory, error) {
 	}
 
 	var m Memory
+	var reviewAfter sql.NullInt64
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at
+		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at,
+		       expand_count, COALESCE(last_expanded_at, 0), scope, review_after, pinned
 		FROM memories WHERE id = ?
-	`, id).Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt)
+	`, id).Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &m.Scope, &reviewAfter, &m.Pinned)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get memory: %w", err)
 	}
+	if reviewAfter.Valid {
+		m.ReviewAfter = &reviewAfter.Int64
+	}
+	m.NeedsReview = needsReview(m.ReviewAfter)
 	return &m, nil
 }
 
@@ -206,11 +253,15 @@ func (s *Store) Counts(ctx context.Context) (*CountsResponse, error) {
 // best-effort telemetry — a hit returns the Memory whether or not the signal
 // could be written (see recordExpansion). Operator/TUI reads must use GetRow so
 // browsing does not pollute the signal.
+//
+// Get re-reads after recording so the response includes the updated expand
+// signal (expand_count and last_expanded_at reflect the just-made increment).
 func (s *Store) Get(ctx context.Context, id string) (*Memory, error) {
 	m, err := s.GetRow(ctx, id)
 	if err != nil || m == nil {
 		return m, err
 	}
 	s.recordExpansion(ctx, m.ID)
-	return m, nil
+	// Re-read to include the updated expand signal. Cheap: single-row pk lookup.
+	return s.GetRow(ctx, id)
 }

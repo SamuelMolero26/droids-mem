@@ -326,8 +326,11 @@ func TestMigrate_PreservesRows(t *testing.T) {
 	).Scan(&scope, &version, &scrubCounts); err != nil {
 		t.Fatalf("read migrated row: %v", err)
 	}
-	if scope != "shared" {
-		t.Errorf("scope default = %q, want 'shared'", scope)
+	// The v4→v5 backfill (ADR-0028) reinterprets every pre-v5 row as personal,
+	// so a fully-migrated legacy row lands on 'personal' regardless of the
+	// v0→v1 column default it first received.
+	if scope != "personal" {
+		t.Errorf("migrated scope = %q, want 'personal' (ADR-0028 backfill)", scope)
 	}
 	if version != 1 {
 		t.Errorf("scrub_pattern_version default = %d, want 1", version)
@@ -475,6 +478,113 @@ func TestOrigin_CheckConstraint(t *testing.T) {
 		VALUES ('mem_auto', 'sess', 'claude_session', 'session_summary', 't', 'w', 'l', '', 'fp_auto', 1, 1, 'auto')`,
 	); err != nil {
 		t.Errorf("insert origin='auto' should succeed: %v", err)
+	}
+}
+
+// hasLifecycleColumns reports whether cols contains the v6 lifecycle columns
+// (ADR-0031: decay/review + pin).
+func hasLifecycleColumns(cols []string) (hasReview, hasPinned bool) {
+	for _, c := range cols {
+		switch c {
+		case "review_after":
+			hasReview = true
+		case "pinned":
+			hasPinned = true
+		}
+	}
+	return
+}
+
+func TestInit_FreshDBHasLifecycleColumns(t *testing.T) {
+	conn := newTestDB(t)
+	hasReview, hasPinned := hasLifecycleColumns(tableColumns(t, conn, "memories"))
+	if !hasReview {
+		t.Error("fresh DB missing memories.review_after")
+	}
+	if !hasPinned {
+		t.Error("fresh DB missing memories.pinned")
+	}
+}
+
+func TestInit_FreshDBHasArchivedMemoriesTable(t *testing.T) {
+	conn := newTestDB(t)
+	if !tableExists(t, conn, "archived_memories") {
+		t.Error("fresh DB missing archived_memories table")
+	}
+}
+
+// v5→v6 adds review_after (nullable) + pinned (default 0) without backfilling
+// review_after on existing rows (D1 — grandfather NULL, never mass-flag
+// legacy rows needs_review on day one).
+func TestMigrate_V5toV6AddsLifecycleColumnsGrandfathersRows(t *testing.T) {
+	conn := newPreV1DB(t)
+	now := int64(1000000)
+	if _, err := conn.Exec(`
+		INSERT INTO memories (id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at)
+		VALUES ('mem_lc', 'sess_lc', 'crm', 'task_pattern', 't', 'w', 'l', '', 'fp_lc', ?, ?)`,
+		now, now); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+	if err := db.Migrate(conn); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	hasReview, hasPinned := hasLifecycleColumns(tableColumns(t, conn, "memories"))
+	if !hasReview {
+		t.Fatal("migrated DB missing memories.review_after")
+	}
+	if !hasPinned {
+		t.Fatal("migrated DB missing memories.pinned")
+	}
+
+	var reviewAfter sql.NullInt64
+	var pinned int
+	if err := conn.QueryRow(`SELECT review_after, pinned FROM memories WHERE id = 'mem_lc'`).Scan(&reviewAfter, &pinned); err != nil {
+		t.Fatalf("read migrated row: %v", err)
+	}
+	if reviewAfter.Valid {
+		t.Errorf("migrated review_after = %v, want NULL (D1 — no backfill)", reviewAfter)
+	}
+	if pinned != 0 {
+		t.Errorf("migrated pinned = %d, want 0", pinned)
+	}
+	if !tableExists(t, conn, "archived_memories") {
+		t.Error("migrated DB missing archived_memories table")
+	}
+	if got, want := userVersion(t, conn), db.CurrentSchemaVersion; got != want {
+		t.Errorf("post-migrate user_version = %d, want %d", got, want)
+	}
+}
+
+// PRAGMA table_info parity guard (D5): archived_memories must carry exactly
+// the memories column set plus archived_at. This is a lazy-safe drift guard —
+// no shared column-const in prod, just a test-time comparison — so a future
+// ALTER on memories that forgets its archived_memories mirror fails loud here
+// instead of silently dropping a column at archive time.
+func TestArchivedMemories_ColumnParityWithMemories(t *testing.T) {
+	conn := newTestDB(t)
+	memCols := tableColumns(t, conn, "memories")
+	archCols := tableColumns(t, conn, "archived_memories")
+
+	want := make(map[string]bool, len(memCols)+1)
+	for _, c := range memCols {
+		want[c] = true
+	}
+	want["archived_at"] = true
+
+	got := make(map[string]bool, len(archCols))
+	for _, c := range archCols {
+		got[c] = true
+	}
+
+	for c := range want {
+		if !got[c] {
+			t.Errorf("archived_memories missing column %q (present in memories ∪ {archived_at})", c)
+		}
+	}
+	for c := range got {
+		if !want[c] {
+			t.Errorf("archived_memories has extra column %q not in memories ∪ {archived_at}", c)
+		}
 	}
 }
 

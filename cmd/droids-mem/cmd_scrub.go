@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/samuelmolero26/droids-mem/internal/store"
+	"github.com/samuelmolero26/droids-mem/internal/scrub"
 	"github.com/spf13/cobra"
 )
 
@@ -76,7 +76,7 @@ func runScrubCheck(path string) error {
 		)
 		exitWith(ExitError)
 	}
-	scrubbed, report := store.Scrub(string(raw))
+	scrubbed, report := scrub.Scrub(string(raw))
 	perPattern := report.PerPatternCounts
 	if perPattern == nil {
 		perPattern = map[string]int{}
@@ -92,7 +92,7 @@ func runScrubCheck(path string) error {
 }
 
 func runScrubTests() error {
-	rep, err := store.RunCorpus()
+	rep, err := scrub.RunCorpus()
 	if err != nil {
 		writeError("corpus_load_failed", err.Error(), false)
 		exitWith(ExitError)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/samuelmolero26/droids-mem/internal/db"
+	"github.com/samuelmolero26/droids-mem/internal/scrub"
 )
 
 // MigrateOptions controls the v1.0 baseline migration. Exactly one mode is
@@ -31,7 +32,7 @@ type MigrateSummary struct {
 	TotalRedactions    int    `json:"total_redactions"`            // sum across all fields
 	FTSRebuilt         bool   `json:"fts_rebuilt"`                 // true once the tokenizer flip lands
 	BaselineSet        bool   `json:"scrub_baseline_complete_set"` // sentinel persisted
-	PatternVersion     int    `json:"pattern_version"`             // ScrubPatternVersion used
+	PatternVersion     int    `json:"pattern_version"`             // scrub.Version used
 }
 
 // Migrate establishes the v1.0 scrub baseline on s.DB(). It is intended to
@@ -41,7 +42,7 @@ type MigrateSummary struct {
 // can read it back via db.AssertBootReady afterward.
 func Migrate(s *Store, opts MigrateOptions) (*MigrateSummary, error) {
 	summary := &MigrateSummary{
-		PatternVersion: ScrubPatternVersion,
+		PatternVersion: scrub.Version,
 	}
 	if opts.Rescrub {
 		summary.Mode = "rescrub"
@@ -133,7 +134,7 @@ func rewriteAllRows(ctx context.Context, conn *sql.Conn, summary *MigrateSummary
 		title    string
 		what     string
 		learned  string
-		report   ScrubReport
+		report   scrub.ScrubReport
 		fp       string
 		changed  bool
 	}
@@ -166,9 +167,9 @@ func rewriteAllRows(ctx context.Context, conn *sql.Conn, summary *MigrateSummary
 
 	for i := range states {
 		st := &states[i]
-		titleOut, titleRep := Scrub(st.title)
-		whatOut, whatRep := Scrub(st.what)
-		learnedOut, learnedRep := Scrub(st.learned)
+		titleOut, titleRep := scrub.Scrub(st.title)
+		whatOut, whatRep := scrub.Scrub(st.what)
+		learnedOut, learnedRep := scrub.Scrub(st.learned)
 
 		st.report = aggregateScrubReports(titleRep, whatRep, learnedRep)
 		st.changed = titleOut != st.title || whatOut != st.what || learnedOut != st.learned
@@ -205,7 +206,7 @@ func rewriteAllRows(ctx context.Context, conn *sql.Conn, summary *MigrateSummary
 		}
 		if _, err := updateStmt.ExecContext(ctx,
 			st.title, st.what, st.learned, st.fp,
-			ScrubPatternVersion, counts, st.id,
+			scrub.Version, counts, st.id,
 		); err != nil {
 			return fmt.Errorf("update %s: %w", st.id, err)
 		}

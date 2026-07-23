@@ -13,37 +13,49 @@ import (
 // memDelegate renders one memory as two lines — a bright title and a dim
 // `kind · task_type · date` meta — matching the Paper mockup: no borders, a
 // full-width subtle fill on the selected row with a magenta→indigo accent bar
-// down its left edge (ADR-0021).
-type memDelegate struct{}
+// down its left edge (ADR-0021). Shared rows carry a trailing ◇ SHARED chip and
+// multi-selected rows a leading amber dot (share-registry mockups); the delegate
+// reads the live selection set by reference from the model.
+type memDelegate struct {
+	selected map[string]bool
+}
 
 func (memDelegate) Height() int                         { return 2 }
 func (memDelegate) Spacing() int                        { return 1 }
 func (memDelegate) Update(tea.Msg, *list.Model) tea.Cmd { return nil }
 
-func (memDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
+func (d memDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
 	it, ok := item.(listItem)
 	if !ok {
 		return
 	}
 	width := m.Width()
-	selected := index == m.Index()
+	cursor := index == m.Index()
 
-	// 2-cell gutter: accent bar + space when selected, blank otherwise.
+	// 2-cell gutter: accent bar (cursor) or amber select-dot, else blank.
 	gutter := "  "
-	if selected {
+	switch {
+	case cursor:
 		gutter = lipgloss.NewStyle().Foreground(colAccent).Render("▌") + " "
+	case d.selected[it.id]:
+		gutter = selectDot.Render("●") + " "
 	}
-	textW := max(1, width-2)
+
+	chip := ""
+	if it.shared {
+		chip = " " + sharedChip.Render("◇ SHARED")
+	}
+	textW := max(1, width-2-lipgloss.Width(chip))
 
 	title := truncate(it.Title(), textW)
-	meta := truncate(it.Description(), textW)
+	meta := truncate(it.Description(), max(1, width-2))
 
 	titleStyleN, metaStyleN := rowTitle, rowMeta
-	if selected {
+	if cursor {
 		titleStyleN, metaStyleN = rowTitleSel, rowMeta
 	}
 
-	line1 := gutter + titleStyleN.Render(title)
+	line1 := gutter + titleStyleN.Render(title) + chip
 	line2 := "  " + metaStyleN.Render(meta)
 
 	// No background fill — selection is the magenta bar + bright bold title only

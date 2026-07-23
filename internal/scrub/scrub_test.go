@@ -93,7 +93,7 @@ func TestSpecHashPinsVersion(t *testing.T) {
 	const pinnedVersion = 3
 	const pinnedHash = "37ab2971f3f9b5a407b9c47932a93538088a45f9608d3c70cd2960af7662a5bb"
 
-	sum := sha256.Sum256(SpecBytes())
+	sum := sha256.Sum256(specYAML)
 	got := hex.EncodeToString(sum[:])
 	if Version != pinnedVersion || got != pinnedHash {
 		t.Fatalf("spec.yaml changed (version=%d hash=%s).\n"+

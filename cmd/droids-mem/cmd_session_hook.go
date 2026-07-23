@@ -151,7 +151,8 @@ func emitStopBlock(ccID string) {
 	reason := fmt.Sprintf("Before stopping, record session progress: compose a concise summary "+
 		"(title, what happened, what to remember next time) and stage it with "+
 		"`droids-mem session stage --session %s --title ... --what ... --learned ...`. "+
-		"Skip only if nothing this session is worth recalling.", ccID)
+		"If nothing this session is worth recalling, run "+
+		"`droids-mem session decline --session %s` instead.", ccID, ccID)
 	b, _ := json.Marshal(map[string]any{"decision": "block", "reason": reason})
 	fmt.Println(string(b))
 }

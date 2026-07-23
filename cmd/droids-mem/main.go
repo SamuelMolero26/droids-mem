@@ -3,7 +3,6 @@ package main
 import (
 	"database/sql"
 	"errors"
-	"fmt"
 	"log"
 	"os"
 	"sync"
@@ -83,7 +82,8 @@ start of each run — all via a local binary with zero external dependencies.`,
 				return err
 			}
 			err = db.AssertBootReady(a.db)
-			if err == nil || !db.IsBootGateError(err) {
+			var bgErr *db.BootGateError
+			if err == nil || !errors.As(err, &bgErr) {
 				return err // ready, or a failure migrating can't fix — surface as-is
 			}
 			// Auto-remediate rather than take down all memory tools until a
@@ -109,6 +109,24 @@ start of each run — all via a local binary with zero external dependencies.`,
 				summary.RowsRewritten, summary.TotalRedactions)
 			return nil
 		},
+		// Content-first (AXI §8): a bare `droids-mem` shows live corpus state and
+		// next steps, not the usage banner. Subcommands take over as usual.
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			s, err := a.store()
+			if err != nil {
+				// Runtime failure, not a usage error — don't let it fall through
+				// to the cobra usage_error branch (wrong exit code + --help hint).
+				writeError("home_failed", err.Error(), true)
+				exitWith(ExitError)
+			}
+			view, err := homeView(cmd.Context(), s)
+			if err != nil {
+				writeError("home_failed", err.Error(), true)
+				exitWith(ExitError)
+			}
+			writeJSON(view)
+			return nil
+		},
 	}
 
 	root.AddCommand(
@@ -119,6 +137,7 @@ start of each run — all via a local binary with zero external dependencies.`,
 		newRecentSessionsCmd(a),
 		newSessionCmd(a),
 		newInstallCmd(),
+		newUninstallCmd(),
 		newGetCmd(a),
 		newDoctorCmd(a),
 		newPruneCmd(a),
@@ -146,7 +165,12 @@ start of each run — all via a local binary with zero external dependencies.`,
 			)
 			os.Exit(ExitError)
 		}
-		fmt.Fprintln(os.Stderr, err.Error())
+		// Everything reaching here is a cobra usage error (unknown flag, unknown
+		// command, missing required flag). Emit the structured envelope instead
+		// of raw text so an agent can read the failure (AXI §6).
+		writeError("usage_error", err.Error(), false,
+			withSuggestion("run `droids-mem <command> --help` for the command's valid flags and arguments"),
+		)
 		os.Exit(ExitUsage)
 	}
 }

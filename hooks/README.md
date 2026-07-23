@@ -14,7 +14,7 @@ cat hooks/session-memory.md >> ~/.claude/CLAUDE.md   # compose guidance for the 
 `install` is idempotent and preserves your existing settings. Use `--project`
 for `./.claude/settings.json`, or `--print` to preview the block. (To also give
 the agent the `mem_*` tools, register the MCP bridge — see the main
-[README](../README.md#use-with-claude-code).)
+[README](../README.md#session-memory-claude-code).)
 
 ## How it works
 

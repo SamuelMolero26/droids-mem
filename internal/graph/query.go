@@ -10,19 +10,47 @@ import (
 )
 
 const (
-	maxDepth        = 5
-	maxPathDepth    = 10
-	maxNeighbors    = 50 // per direction, across all depths
-	maxMatches      = 20
-	maxPkgSymbols   = 200
-	expandHint      = "neighbors are signatures only; call graph_symbol with a neighbor's exact qname to see its body"
+	maxDepth      = 5
+	maxPathDepth  = 10
+	maxMatches    = 20
+	maxPkgSymbols = 200
+	// Hints are surface-neutral (ADR-0027): they name the action + the qname to
+	// re-query with, never a specific invocation ("graph_symbol" vs
+	// "droids-mem graph symbol"). The agent already holds the surface it just
+	// called; the qname is the only missing payload and it is in the rows.
+	expandHint      = "neighbors are signatures only; re-query a neighbor's exact qname to see its body"
 	ambiguousHint   = "multiple symbols share that name; re-query with one of the qnames in matches"
-	searchHint      = "no exact symbol match; these are the closest by relevance — re-query graph_symbol with one qname from matches for its full body, callers, and callees"
+	searchHint      = "no exact symbol match; these are the closest by relevance — re-query with one qname from matches for its full body, callers, and callees"
 	maxSeeds        = 10  // search-fallback menu size
 	blastCap        = 500 // transitive-caller count sentinel (compute + number guard)
 	staleGraphHint  = "graph is stale: the repo changed but no longer type-checks, serving the last good index"
-	pkgSymbolsLimit = "exported symbols only; query an unexported symbol by name via graph_symbol"
+	pkgSymbolsLimit = "exported symbols only; re-query an unexported symbol by its name"
+	// blast radius rides entirely on call edges, and only func/method symbols are
+	// edge endpoints (byPos maps FuncDecls only). So transitive_callers is a
+	// structural 0 for a type/const/var — omitting it (issue #47) stops an agent
+	// reading 0 as "safe to change, nothing uses it". The hint redirects to the
+	// path that does carry the answer: a type WITH methods points at them
+	// (blastTypeHint); a const/var or a method-less type has no call-graph handle
+	// at all, so its uses are reference-level and unindexed (blastRefHint).
+	blastTypeHint = "transitive_callers is a call-edge metric (func/method); for a type, query its methods with direction=up to gauge dependents"
+	blastRefHint  = "transitive_callers is a call-edge metric (func/method); this symbol has no call edges, and reference-level usage is not indexed"
+	// implementers ARE the blast radius of a method-signature change on an
+	// interface — the exact must-update set (issue #48), not the call-edge
+	// closure. Scoped so implementers_total:0 reads as "no REPO implementer",
+	// never "implements nothing" (a repo type may still satisfy a stdlib iface).
+	implementersHint = "implementers are the concrete types satisfying this interface — the exact set a method-signature change must update (repo-defined types only; stdlib/dependency implementers are not indexed); re-query one by its qname for its body"
+	// truncatedHint fires when a neighbor list hit maxNeighbors (issue #49). The
+	// retained slice is same-package-first then alphabetical — a partial slice,
+	// NOT the closest callers. callers_total/callees_total carry the real count
+	// (depth=1 only). Redirect: narrow with direction+depth=1 or graph_package.
+	truncatedHint  = "neighbor list is a partial slice at the cap (see *_total), not the closest — narrow with a single direction at depth=1, or graph_package"
+	rebuildingHint = "graph is being rebuilt asynchronously — use graph_build_wait to block until ready, or retry"
 )
+
+// maxNeighbors caps neighbors per direction across all depths. A var, not a
+// const, purely so tests can shrink the cap and exercise truncation against a
+// small fixture instead of a 51-caller one.
+var maxNeighbors = 50
 
 // SymbolRequest is a symbol-anchored query (ADR-0020 tool 1): point lookup,
 // blast radius (direction=up, depth>1), or call path (To set).
@@ -65,12 +93,30 @@ type SymbolResponse struct {
 	Path      []Neighbor  `json:"path,omitempty"`
 	Matches   []Neighbor  `json:"matches,omitempty"`
 	Truncated bool        `json:"truncated,omitempty"`
+	// CallersTotal/CalleesTotal report the true neighbor count when the list was
+	// truncated at maxNeighbors (issue #49) — depth=1 only (a multi-level total
+	// means walking the whole closure, defeating the cap). Plain int, not a
+	// pointer: set only on truncation, so the value is always ≥ maxNeighbors+1
+	// and 0 (omitted) unambiguously means "not truncated".
+	CallersTotal int `json:"callers_total,omitempty"`
+	CalleesTotal int `json:"callees_total,omitempty"`
 	// TransitiveCallers is the blast size: distinct symbols that transitively
 	// call this one (up-closure, capped). A pointer so 0 ("safe to change,
 	// nothing calls it") is distinct from absent (a search-menu response, no
 	// single symbol to score). Set only on an exact match.
-	TransitiveCallers *int   `json:"transitive_callers,omitempty"`
-	Hint              string `json:"hint,omitempty"`
+	TransitiveCallers *int `json:"transitive_callers,omitempty"`
+	// Implementers lists the concrete types satisfying this interface (issue
+	// #48) — set only when the symbol is an interface. ImplementersTotal is the
+	// true count even when Implementers is capped, and a pointer so 0 ("nobody
+	// implements it — a dead interface, safe to change") is definitive, distinct
+	// from absent ("not an interface").
+	Implementers      []Neighbor `json:"implementers,omitempty"`
+	ImplementersTotal *int       `json:"implementers_total,omitempty"`
+	// Satisfies lists the repo-defined interfaces a concrete type implements.
+	// Absent means it satisfies none (no *_total: a concrete type satisfies few
+	// interfaces, never near the neighbor cap, so the list is its own count).
+	Satisfies []Neighbor `json:"satisfies,omitempty"`
+	Hint      string     `json:"hint,omitempty"`
 }
 
 // Symbol resolves and answers a symbol-anchored query against repo's graph.
@@ -79,6 +125,7 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	if err != nil {
 		return nil, err
 	}
+	m.bump(req.Repo, "symbol")
 	resp := &SymbolResponse{Repo: req.Repo, Freshness: fresh, Hint: expandHint}
 	if fresh.Stale {
 		resp.Hint = staleGraphHint + "; " + expandHint
@@ -119,11 +166,64 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	}
 	resp.Symbol = &info
 
-	tc, err := transitiveCallers(conn, id)
-	if err != nil {
-		return nil, err
+	var blastHint string // see blastTypeHint/blastRefHint above for the why
+	switch info.Kind {
+	case "func", "method":
+		tc, err := transitiveCallers(conn, id)
+		if err != nil {
+			return nil, err
+		}
+		resp.TransitiveCallers = &tc
+	case "interface":
+		// implementers ARE the interface's blast radius — the exact, not
+		// CHA-approximate, set a method-signature change must update (issue #48).
+		impls, total, trunc, err := implementers(conn, id)
+		if err != nil {
+			return nil, err
+		}
+		resp.Implementers = impls
+		resp.ImplementersTotal = &total
+		resp.Truncated = resp.Truncated || trunc
+		blastHint = implementersHint
+	case "type":
+		// A concrete type: list the interfaces it satisfies, then redirect the
+		// (call-edge) blast question to its methods — or to reference-level when
+		// it has none, which has no call-graph handle at all (issue #47).
+		sat, trunc, err := satisfies(conn, id)
+		if err != nil {
+			return nil, err
+		}
+		resp.Satisfies = sat
+		resp.Truncated = resp.Truncated || trunc
+		hasMethods, err := typeHasMethods(conn, info.QName)
+		if err != nil {
+			return nil, err
+		}
+		if hasMethods {
+			blastHint = blastTypeHint
+		} else {
+			blastHint = blastRefHint
+		}
+	case "const", "var":
+		blastHint = blastRefHint
+	default:
+		// Unknown future kind: assert nothing about its blast semantics — leave
+		// the generic neighbor hint rather than guess. Revisit if a kind is added.
 	}
-	resp.TransitiveCallers = &tc
+	if blastHint != "" {
+		resp.Hint = blastHint
+		if fresh.Stale {
+			resp.Hint = staleGraphHint + "; " + blastHint
+		}
+	}
+	// Append rebuilding hint when async rebuild is in progress.
+	if fresh.Rebuilding {
+		if resp.Hint != "" {
+			resp.Hint += "; " + rebuildingHint
+		} else {
+			resp.Hint = rebuildingHint
+		}
+	}
 
 	depth := req.Depth
 	if depth < 1 {
@@ -156,21 +256,48 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 		return resp, nil
 	}
 
+	var upTrunc, downTrunc bool
 	if dir == "up" || dir == "both" {
-		resp.Callers, resp.Truncated, err = bfsNeighbors(conn, id, "up", depth)
+		resp.Callers, upTrunc, err = bfsNeighbors(conn, id, "up", depth, info.Package)
 		if err != nil {
 			return nil, err
 		}
 	}
 	if dir == "down" || dir == "both" {
-		var trunc bool
-		resp.Callees, trunc, err = bfsNeighbors(conn, id, "down", depth)
+		resp.Callees, downTrunc, err = bfsNeighbors(conn, id, "down", depth, info.Package)
 		if err != nil {
 			return nil, err
 		}
-		resp.Truncated = resp.Truncated || trunc
+	}
+	// True neighbor totals only when a list was capped, and only at depth=1 (a
+	// deeper total = full-closure walk, defeating the cap). See issue #49.
+	if upTrunc && depth == 1 {
+		if resp.CallersTotal, err = edgeCount(conn, "up", id); err != nil {
+			return nil, err
+		}
+	}
+	if downTrunc && depth == 1 {
+		if resp.CalleesTotal, err = edgeCount(conn, "down", id); err != nil {
+			return nil, err
+		}
+	}
+	if upTrunc || downTrunc {
+		resp.Truncated = true
+		resp.Hint += "; " + truncatedHint
 	}
 	return resp, nil
+}
+
+// edgeCount is the true neighbor total behind a truncated depth=1 list: distinct
+// callers of id ("up") or distinct callees of id ("down").
+func edgeCount(conn *sql.DB, dir string, id int64) (int, error) {
+	q := `SELECT COUNT(DISTINCT caller) FROM edges WHERE callee = ?` // up: who calls me
+	if dir == "down" {
+		q = `SELECT COUNT(DISTINCT callee) FROM edges WHERE caller = ?`
+	}
+	var n int
+	err := conn.QueryRow(q, id).Scan(&n)
+	return n, err
 }
 
 // findSymbol resolves a name to symbol stubs: exact qname first, then short
@@ -252,6 +379,65 @@ func transitiveCallers(conn *sql.DB, id int64) (int, error) {
 	return n, err
 }
 
+// typeHasMethods reports whether the type named by qname has any indexed
+// methods, so a blast-radius query on it can point at them (a method's qname is
+// the type's qname + "." + method). A method-less type has no call-graph handle.
+// ponytail: LIKE prefix left unescaped — a '_' in the qname is a LIKE wildcard,
+// but a false match only swaps in the method-redirect hint (the agent finds no
+// methods and self-corrects), never a wrong answer, so no ESCAPE clause.
+func typeHasMethods(conn *sql.DB, qname string) (bool, error) {
+	var exists int
+	err := conn.QueryRow(`SELECT EXISTS(SELECT 1 FROM symbols
+		WHERE kind = 'method' AND qname LIKE ?)`, qname+".%").Scan(&exists)
+	return exists == 1, err
+}
+
+// implementers lists concrete types satisfying interface id, capped at
+// maxNeighbors, plus the true total so a god-interface's capped list still
+// reports its real size (AXI §4 — spares the agent a re-count call).
+func implementers(conn *sql.DB, id int64) (rows []Neighbor, total int, truncated bool, err error) {
+	if err = conn.QueryRow(`SELECT COUNT(*) FROM implements WHERE iface = ?`, id).Scan(&total); err != nil {
+		return nil, 0, false, err
+	}
+	r, err := conn.Query(`SELECT s.qname, s.signature, s.file, s.line
+		FROM implements i JOIN symbols s ON s.id = i.impl
+		WHERE i.iface = ? ORDER BY s.qname LIMIT ?`, id, maxNeighbors+1)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	rows, err = scanNeighbors(r, 0)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	if len(rows) > maxNeighbors {
+		rows = rows[:maxNeighbors]
+		truncated = true
+	}
+	return rows, total, truncated, nil
+}
+
+// satisfies lists the repo-defined interfaces concrete type id implements
+// (reverse of implementers, served by idx_implements_impl). Capped at
+// maxNeighbors with a truncation flag; no total (a type satisfies few
+// interfaces, never near the cap, so the shown list is its own count).
+func satisfies(conn *sql.DB, id int64) (rows []Neighbor, truncated bool, err error) {
+	r, err := conn.Query(`SELECT s.qname, s.signature, s.file, s.line
+		FROM implements i JOIN symbols s ON s.id = i.iface
+		WHERE i.impl = ? ORDER BY s.qname LIMIT ?`, id, maxNeighbors+1)
+	if err != nil {
+		return nil, false, err
+	}
+	rows, err = scanNeighbors(r, 0)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(rows) > maxNeighbors {
+		rows = rows[:maxNeighbors]
+		truncated = true
+	}
+	return rows, truncated, nil
+}
+
 func scanNeighbors(rows *sql.Rows, depth int) ([]Neighbor, error) {
 	defer rows.Close()
 	var out []Neighbor
@@ -268,7 +454,9 @@ func scanNeighbors(rows *sql.Rows, depth int) ([]Neighbor, error) {
 
 // bfsNeighbors walks call edges breadth-first up to depth, returning
 // signature stubs, capped at maxNeighbors (truncated=true past the cap).
-func bfsNeighbors(conn *sql.DB, start int64, dir string, depth int) ([]Neighbor, bool, error) {
+// startPkg biases the within-level ordering so same-package neighbors survive
+// the cap first (issue #49) — a partial slice is less arbitrary that way.
+func bfsNeighbors(conn *sql.DB, start int64, dir string, depth int, startPkg string) ([]Neighbor, bool, error) {
 	from, to := "callee", "caller" // up: who calls me
 	if dir == "down" {
 		from, to = "caller", "callee"
@@ -277,7 +465,7 @@ func bfsNeighbors(conn *sql.DB, start int64, dir string, depth int) ([]Neighbor,
 	frontier := []int64{start}
 	var out []Neighbor
 	for d := 1; d <= depth && len(frontier) > 0; d++ {
-		next, truncated, err := neighborLevel(conn, from, to, frontier, seen, &out, d)
+		next, truncated, err := neighborLevel(conn, from, to, frontier, seen, &out, d, startPkg)
 		if err != nil {
 			return nil, false, err
 		}
@@ -292,11 +480,15 @@ func bfsNeighbors(conn *sql.DB, start int64, dir string, depth int) ([]Neighbor,
 // neighborLevel expands one BFS level, appending stubs to out. truncated is
 // true once out hits maxNeighbors.
 func neighborLevel(conn *sql.DB, from, to string, frontier []int64, seen map[int64]bool,
-	out *[]Neighbor, depth int) (next []int64, truncated bool, err error) {
+	out *[]Neighbor, depth int, startPkg string) (next []int64, truncated bool, err error) {
 
+	// ORDER BY (s.package != ?) puts same-package neighbors first (0 < 1), so the
+	// cap keeps the closest, then qname. The startPkg arg trails the frontier IN
+	// placeholders — positional order must match (issue #49).
 	rows, err := conn.Query(fmt.Sprintf(`SELECT DISTINCT s.id, s.qname, s.signature, s.file, s.line
 		FROM edges e JOIN symbols s ON s.id = e.%s
-		WHERE e.%s IN (%s) ORDER BY s.qname`, to, from, placeholders(len(frontier))), idArgs(frontier)...)
+		WHERE e.%s IN (%s) ORDER BY (s.package != ?), s.qname`, to, from, placeholders(len(frontier))),
+		append(idArgs(frontier), startPkg)...)
 	if err != nil {
 		return nil, false, err
 	}
@@ -432,6 +624,7 @@ func (m *Manager) Package(ctx context.Context, req PackageRequest) (*PackageResp
 	if err != nil {
 		return nil, err
 	}
+	m.bump(req.Repo, "package")
 	pkg := strings.Trim(req.Package, "/")
 	var resolved string
 	err = conn.QueryRow(`SELECT package FROM symbols
@@ -445,8 +638,17 @@ func (m *Manager) Package(ctx context.Context, req PackageRequest) (*PackageResp
 	}
 
 	resp := &PackageResponse{Repo: req.Repo, Freshness: fresh, Package: resolved, Hint: pkgSymbolsLimit}
+
+	var hints []string
 	if fresh.Stale {
-		resp.Hint = staleGraphHint + "; " + pkgSymbolsLimit
+		hints = append(hints, staleGraphHint)
+	}
+	if fresh.Rebuilding {
+		hints = append(hints, rebuildingHint)
+	}
+	if len(hints) > 0 {
+		hints = append(hints, pkgSymbolsLimit)
+		resp.Hint = strings.Join(hints, "; ")
 	}
 	if err := conn.QueryRow(`SELECT COUNT(*) FROM symbols WHERE package = ? AND exported = 0`,
 		resolved).Scan(&resp.Unexported); err != nil {

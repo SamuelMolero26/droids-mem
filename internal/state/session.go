@@ -60,6 +60,11 @@ type StagedSummary struct {
 	// an mtime comparison can't work, because the staging command itself runs
 	// through a counted tool (Bash) and would mark every fresh stage stale.
 	CountAtStage int `json:"count_at_stage"`
+	// Declined marks a deliberate "nothing worth recalling" decision. It
+	// satisfies the Stop-hook gate exactly like a real stage (including the
+	// count-based staleness re-check) but flush skips it — without this, a
+	// model that skips per the instructions gets re-blocked on every Stop.
+	Declined bool `json:"declined,omitempty"`
 }
 
 func sessionsDir() (string, error) {
