@@ -35,6 +35,7 @@ type saveArgs struct {
 	SessionID  string `json:"session_id,omitempty"`
 	Force      bool   `json:"force,omitempty"`
 	Supersedes string `json:"supersedes,omitempty"`
+	DryRun     bool   `json:"dry_run,omitempty"`
 }
 
 func saveToolDef() mcp.Tool {
@@ -64,6 +65,8 @@ func saveToolDef() mcp.Tool {
 			mcp.Description("HITL correction: overwrite an existing memory matched by fingerprint instead of skipping.")),
 		mcp.WithString("supersedes",
 			mcp.Description("Id of a memory this save replaces. The target is hard-deleted on successful insert (same kind/task_type/scope required, else no-op). Response echoes 'superseded' with the deleted id.")),
+		mcp.WithBoolean("dry_run",
+			mcp.Description("Preview the outcome without persisting. Runs the full validate → scrub → dedupe pipeline under the real write lock, then rolls back. Response is {status:\"dry_run\", would, matched_id, reason}.")),
 	)
 }
 
@@ -80,9 +83,21 @@ func saveHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, sav
 			Scope:      a.Scope,
 			Force:      a.Force,
 			Supersedes: a.Supersedes,
+			DryRun:     a.DryRun,
 		})
 		if err != nil {
 			return toolErr(err), nil
+		}
+		if a.DryRun {
+			// Store rolled the txn back — resp.ID is a phantom. Mirror the CLI's
+			// dry_run envelope so the agent never mistakes a preview for a write.
+			return toolJSON(map[string]any{
+				"status":     "dry_run",
+				"would":      resp.Status,
+				"matched_id": resp.MatchedID,
+				"reason":     resp.Reason,
+				"session_id": resp.SessionID,
+			})
 		}
 		return toolJSON(resp)
 	}

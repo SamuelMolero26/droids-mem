@@ -16,12 +16,7 @@ import (
 func cliStderr(t *testing.T, dbPath string, args ...string) ([]byte, []byte, int) {
 	t.Helper()
 	cmd := exec.Command(binaryPath, args...)
-	// Isolate the state dir too: the graph subcommands below build a graph, and
-	// without this it lands in the developer's real ~/.droids-mem/graphs.
-	cmd.Env = append(os.Environ(),
-		"DROIDS_MEM_DB="+dbPath,
-		"DROIDS_MEM_HOME="+filepath.Dir(dbPath),
-	)
+	cmd.Env = append(os.Environ(), "DROIDS_MEM_DB="+dbPath)
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
