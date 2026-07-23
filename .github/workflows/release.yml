@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write   # needed for build provenance attestation (SLSA)
 
 jobs:
   build:
@@ -72,6 +73,12 @@ jobs:
           fi
           echo "Binary size: $SIZE bytes (limit: $MAX)"
 
+      - name: Attest build provenance (SLSA)
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: 'dist/droids-mem-${{ steps.version.outputs.tag }}-${{ matrix.goos }}-${{ matrix.goarch }}'
+          subject-name: droids-mem-${{ matrix.goos }}-${{ matrix.goarch }}
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -119,7 +126,18 @@ jobs:
             echo "go install github.com/samuelmolero26/droids-mem/cmd/droids-mem@$TAG"
             echo '```'
             echo
-            echo "Or download a prebuilt binary below. Each artifact ships with a \`.sha256\` checksum."
+            echo "Or download a prebuilt binary below."
+            echo
+            echo "### Verify provenance"
+            echo
+            echo "Every binary has a SLSA Level 2 attestation signed by GitHub Actions."
+            echo "\`gh attestation verify\` fetches it from GitHub automatically — no extra download:"
+            echo
+            echo '```'
+            echo "gh attestation verify droids-mem-$TAG-darwin-arm64 --repo SamuelMolero26/droids-mem"
+            echo '```'
+            echo
+            echo "Swap the filename for your platform (\`darwin-amd64\`, \`linux-arm64\`, \`linux-amd64\`)."
           } > release-notes.md
           cat release-notes.md
 
