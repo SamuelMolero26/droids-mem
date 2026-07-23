@@ -345,11 +345,10 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 
 	// Flag slug fragmentation: a task_type that collides with an existing one
 	// under separator/case normalization. Insert path only — a dedupe skip
-	// returns earlier, and this is orientation, not a gate.
-	hint, err := nearMissTaskType(ctx, conn, req.TaskType)
-	if err != nil {
-		return nil, fmt.Errorf("task_type hint: %w", err)
-	}
+	// returns earlier, and this is orientation, not a gate. Best-effort: the
+	// save is already committed above, so a hint-query failure (e.g. ctx
+	// canceled post-commit) must not turn a durable save into a returned error.
+	hint, _ := nearMissTaskType(ctx, conn, req.TaskType)
 
 	return &SaveResponse{
 		Status:       "saved",
