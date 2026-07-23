@@ -123,6 +123,11 @@ type SaveResponse struct {
 	Score          float64            `json:"score,omitempty"`           // Jaccard similarity for near_duplicate
 	Scrub          *scrub.ScrubReport `json:"scrub,omitempty"`           // present only when redactions occurred
 	Superseded     string             `json:"superseded,omitempty"`      // id deleted via supersedes (ADR-0018); absent when target didn't match
+	// TaskTypeHint names an existing task_type that differs from this save's only
+	// by separator/case (e.g. saved "droids_mem" while "droids-mem" exists). It
+	// flags silent slug fragmentation so the agent can re-anchor. Empty when the
+	// slug is already canonical or the project is genuinely new.
+	TaskTypeHint string `json:"task_type_hint,omitempty"`
 }
 
 // ValidationError is the structured error envelope returned for any save-path
@@ -338,13 +343,55 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 	}
 	logSaveOutcome(req, "inserted", similarity, nearMissID)
 
+	// Flag slug fragmentation: a task_type that collides with an existing one
+	// under separator/case normalization. Insert path only — a dedupe skip
+	// returns earlier, and this is orientation, not a gate. Best-effort: the
+	// save is already committed above, so a hint-query failure (e.g. ctx
+	// canceled post-commit) must not turn a durable save into a returned error.
+	hint, _ := nearMissTaskType(ctx, conn, req.TaskType)
+
 	return &SaveResponse{
-		Status:     "saved",
-		ID:         id,
-		SessionID:  sessionID,
-		Scrub:      responseScrub,
-		Superseded: supersededID,
+		Status:       "saved",
+		ID:           id,
+		SessionID:    sessionID,
+		Scrub:        responseScrub,
+		Superseded:   supersededID,
+		TaskTypeHint: hint,
 	}, nil
+}
+
+// nearMissTaskType returns an existing task_type that differs from want only by
+// separator or case (droids_mem vs droids-mem) — the silent fragmentation that
+// splits one project's memories across slugs. Empty when want is already
+// canonical or genuinely new. When several existing slugs collide, it points at
+// the one with the most memories (the established spelling).
+// ponytail: full GROUP BY scan per insert; memories is small, so cheap. Add an
+// index or cache only if a large corpus makes it measurably slow.
+func nearMissTaskType(ctx context.Context, conn *sql.Conn, want string) (string, error) {
+	rows, err := conn.QueryContext(ctx,
+		`SELECT task_type, COUNT(*) c FROM memories GROUP BY task_type ORDER BY c DESC`)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	wantNorm := normalizeSlug(want)
+	match := ""
+	for rows.Next() {
+		var tt string
+		var c int
+		if err := rows.Scan(&tt, &c); err != nil {
+			return "", err
+		}
+		if tt != want && normalizeSlug(tt) == wantNorm {
+			match = tt
+			break
+		}
+	}
+	return match, rows.Err()
+}
+
+func normalizeSlug(s string) string {
+	return strings.ReplaceAll(strings.ToLower(s), "_", "-")
 }
 
 // saveTuningRecord is one line of the threshold-tuning dataset (ADR-0026). ids
