@@ -114,7 +114,10 @@ start of each run — all via a local binary with zero external dependencies.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			s, err := a.store()
 			if err != nil {
-				return err
+				// Runtime failure, not a usage error — don't let it fall through
+				// to the cobra usage_error branch (wrong exit code + --help hint).
+				writeError("home_failed", err.Error(), true)
+				exitWith(ExitError)
 			}
 			view, err := homeView(cmd.Context(), s)
 			if err != nil {
