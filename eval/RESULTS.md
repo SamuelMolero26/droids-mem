@@ -10,8 +10,8 @@ Corpus: 24 memories, 7 clusters. Queries: 33.
 | morphological | 1 | 100% | 100% | 1.00 |
 | word-order | 7 | 100% | 100% | 1.00 |
 | reword | 10 | 100% | 100% | 1.00 |
-| synonym (zero overlap) | 12 | 58% | 75% | 0.69 |
-| overall | 33 | 85% | 91% | 0.89 |
+| synonym (zero overlap) | 12 | 67% | 75% | 0.73 |
+| overall | 33 | 88% | 91% | 0.90 |
 
 ## mem_context browse tier
 
