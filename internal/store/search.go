@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 const (
@@ -22,8 +23,21 @@ const (
 	// overlapWeight tunes how much literal token overlap (0..1) can promote a
 	// result above its raw BM25 rank in the composite sort. A full-overlap
 	// result gets a -overlapWeight bonus to its (negative, lower-is-better)
-	// BM25 score. Deliberately modest; tune against the recall eval (ADR-0025).
-	overlapWeight = 2.0
+	// BM25 score.
+	//
+	// Swept against the recall eval (ADR-0025): every value from 0 through 1.5
+	// scores identically (recall@1 88%, MRR 0.90); 1.75 and above drops to 85% /
+	// 0.89. The cliff is not gradual — adjacent BM25 scores on this corpus sit
+	// ~0.16 apart, so once overlapWeight exceeds ~1.6 a 0.10 overlap edge is
+	// enough to outvote a better BM25 match. Held at 1.0 to stay mid-plateau
+	// rather than one step from the cliff.
+	//
+	// The eval cannot currently justify a *non-zero* value either: 0 and 1.5
+	// score the same, because overlap only reorders ranks 6-9 here. That is a
+	// limit of the 24-memory eval corpus, where BM25's IDF term is degenerate —
+	// not evidence the blend is useless on a real store. Re-tune when the
+	// corpus grows.
+	overlapWeight = 1.0
 )
 
 type SearchRequest struct {
@@ -198,6 +212,22 @@ func CompositeScore(r SearchResult) float64 {
 //
 // Returns "" when the input has no tokens (e.g. all punctuation); callers MUST
 // treat that as "no searchable terms" and skip the MATCH rather than run it on "".
+// hasSearchableText reports whether s holds at least one letter or digit.
+//
+// FTS5's tokenizer emits no tokens for pure punctuation, so a query like
+// ",,, :::" survives strings.Fields as real "words" and phraseFTSQuery turns it
+// into a non-empty MATCH expression of phrases that can never match anything.
+// Callers use this to tell "no query" from "a query FTS5 cannot use", which
+// look identical to the user and must behave identically.
+func hasSearchableText(s string) bool {
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
+}
+
 func phraseFTSQuery(q string) string {
 	parts := strings.Fields(q)
 	if len(parts) == 0 {
