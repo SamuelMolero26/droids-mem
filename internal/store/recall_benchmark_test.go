@@ -19,6 +19,9 @@ import (
 //
 //	go test ./internal/store -run TestRecallBenchmark -v
 //	EVAL_WRITE_REPORT=1 go test ...   # rewrites eval/RESULTS.md
+//
+// Without EVAL_WRITE_REPORT the committed eval/RESULTS.md is asserted as a
+// golden, so ranking or corpus changes cannot land with a stale report.
 
 // benchCorpus is the fixed benchmark corpus. Clusters share vocabulary so a
 // query must rank its target above near-neighbours.
@@ -169,8 +172,8 @@ func TestRecallBenchmark(t *testing.T) {
 	md := renderBenchmark(rep, len(benchCorpus))
 	t.Log("\n" + md)
 
+	path := filepath.Join("..", "..", "eval", "RESULTS.md")
 	if os.Getenv("EVAL_WRITE_REPORT") != "" {
-		path := filepath.Join("..", "..", "eval", "RESULTS.md")
 		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 			t.Fatalf("mkdir eval: %v", err)
 		}
@@ -178,6 +181,21 @@ func TestRecallBenchmark(t *testing.T) {
 			t.Fatalf("write RESULTS.md: %v", err)
 		}
 		t.Logf("wrote %s", path)
+	} else {
+		// RESULTS.md is a committed artifact, so it silently rots: a change to
+		// ranking, the corpus, or the report shape leaves stale numbers in the
+		// repo that nobody notices until someone reads them as current. The
+		// render is deterministic on a fixed corpus, so treat the committed file
+		// as a golden — drift fails here, in the same run that caused it.
+		committed, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read RESULTS.md (regenerate with EVAL_WRITE_REPORT=1): %v", err)
+		}
+		if string(committed) != md {
+			t.Errorf("eval/RESULTS.md is stale — regenerate and commit it:\n"+
+				"\tEVAL_WRITE_REPORT=1 go test ./internal/store -run TestRecallBenchmark -count=1\n\n"+
+				"current run produced:\n%s", md)
+		}
 	}
 
 	// Regression floors — guard the marketed claim without asserting perfection.
