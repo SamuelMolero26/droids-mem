@@ -199,10 +199,14 @@ func TestRecallBenchmark(t *testing.T) {
 	}
 
 	// Regression floors — guard the marketed claim without asserting perfection.
-	// The honest weak spot (synonym_hard) is deliberately NOT floored high; these
-	// only catch a real collapse of the paraphrase capability.
-	assertFloor(t, "mem_search recall@5 overall", rep.MemSearch.RecallAt5, 0.75)
-	assertFloor(t, "mem_search MRR overall", rep.MemSearch.MRR, 0.65)
+	// These only catch a real collapse of the paraphrase capability.
+	assertFloor(t, "mem_search recall@5 overall", rep.MemSearch.RecallAt5, 0.95)
+	assertFloor(t, "mem_search MRR overall", rep.MemSearch.MRR, 0.85)
+	if tm := rep.ByType["synonym_hard"]; tm != nil {
+		// Weakest class by construction (zero surface overlap with the target).
+		// Floored only high enough to lock in the column-weighted BM25 gain.
+		assertFloor(t, "synonym_hard recall@5", tm.RecallAt5, 0.90)
+	}
 	if tm := rep.ByType["reorder"]; tm != nil {
 		assertFloor(t, "reorder recall@5", tm.RecallAt5, 0.95)
 	}
