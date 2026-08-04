@@ -6,11 +6,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// theme centralizes every color the inspector uses (ADR-0021). Values are lifted
-// from the Paper mockup; lipgloss + termenv auto-degrade truecolor to 256/16 on
-// limited terminals. The inspector is borderless and dark-only — panes are set
-// off by faint dividers and a selected-row fill, not boxes. Roles, not raw
-// hexes, are what the views reference; retheming is this file.
 var (
 	// Grounds. No app-wide fill — the terminal's own background shows through
 	// (full-width painted bands read as shadow strips on real terminals). Only

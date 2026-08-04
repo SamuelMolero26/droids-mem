@@ -40,8 +40,8 @@ EVAL_WRITE_REPORT=1 go test ./internal/store -run TestRecallBenchmark -count=1
 | morphological | 1 | 100% | 100% | 1.00 |
 | word-order | 7 | 100% | 100% | 1.00 |
 | reword | 10 | 100% | 100% | 1.00 |
-| synonym (zero overlap) | 12 | 67% | 75% | 0.73 |
-| overall | 33 | 88% | 91% | 0.90 |
+| synonym (zero overlap) | 12 | 58% | 92% | 0.70 |
+| overall | 33 | 85% | 97% | 0.89 |
 
 ## mem_context browse tier
 
@@ -62,5 +62,3 @@ A pair is **eligible** when its target is structurally reachable there: a browse
 | rank | overlap | class | query | target |
 |---|---|---|---|---|
 | 8 | 0.17 | synonym (zero overlap) | slow down and try again when the server says too many requests | Back off and retry on HTTP 429 with jitter |
-| 7 | 0.18 | synonym (zero overlap) | restoring shelved edits broke since the branch started too far back | Stash pop conflicts mean a wrong branch base, not a content merge |
-| 6 | 0.25 | synonym (zero overlap) | undo a clobbered branch using the ref history log | Recover a force-pushed branch with the reflog |
