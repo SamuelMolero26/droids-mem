@@ -6,7 +6,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-
 var (
 	// Grounds. No app-wide fill — the terminal's own background shows through
 	// (full-width painted bands read as shadow strips on real terminals). Only
