@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 const (
@@ -211,6 +212,22 @@ func CompositeScore(r SearchResult) float64 {
 //
 // Returns "" when the input has no tokens (e.g. all punctuation); callers MUST
 // treat that as "no searchable terms" and skip the MATCH rather than run it on "".
+// hasSearchableText reports whether s holds at least one letter or digit.
+//
+// FTS5's tokenizer emits no tokens for pure punctuation, so a query like
+// ",,, :::" survives strings.Fields as real "words" and phraseFTSQuery turns it
+// into a non-empty MATCH expression of phrases that can never match anything.
+// Callers use this to tell "no query" from "a query FTS5 cannot use", which
+// look identical to the user and must behave identically.
+func hasSearchableText(s string) bool {
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
+}
+
 func phraseFTSQuery(q string) string {
 	parts := strings.Fields(q)
 	if len(parts) == 0 {
