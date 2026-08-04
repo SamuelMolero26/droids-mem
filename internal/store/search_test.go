@@ -271,9 +271,16 @@ func TestSearch_ResultsOrderedByComposite(t *testing.T) {
 // a result with a weaker BM25 rank but full token overlap must outrank a
 // stronger-BM25 result with zero overlap. Under the old "BM25 primary, overlap
 // only as tiebreaker" sort this promotion never happened.
+//
+// The 0.5 BM25 gap is deliberate: a full-overlap result earns exactly
+// overlapWeight, so the gap must stay below it for the promotion to be
+// possible at all. Picking a gap equal to the weight (as this test originally
+// did, at 1.0) asserts a tie, not a promotion. If overlapWeight is ever tuned
+// below 0.5 this fails — correctly, because at that point the blend can no
+// longer overturn even a marginal BM25 difference.
 func TestCompositeScore_OverlapPromotesLowBM25(t *testing.T) {
-	weakBM25HighOverlap := store.SearchResult{Score: -1.0, OverlapScore: 1.0} // composite -3.0
-	strongBM25NoOverlap := store.SearchResult{Score: -2.0, OverlapScore: 0.0} // composite -2.0
+	weakBM25HighOverlap := store.SearchResult{Score: -1.0, OverlapScore: 1.0} // composite -1.0 - overlapWeight
+	strongBM25NoOverlap := store.SearchResult{Score: -1.5, OverlapScore: 0.0} // composite -1.5
 
 	if store.CompositeScore(weakBM25HighOverlap) >= store.CompositeScore(strongBM25NoOverlap) {
 		t.Fatalf("high-overlap result did not outrank stronger-BM25 result: %f vs %f",

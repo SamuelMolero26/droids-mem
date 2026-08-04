@@ -104,7 +104,15 @@ func (s *Store) Context(ctx context.Context, req ContextRequest) (*ContextRespon
 	// Empty (or punctuation-only) query routes the browse tier to its recency
 	// branch. The task_type is deliberately NOT substituted in as a stand-in
 	// search term: it is an identity key, not vocabulary (ADR-0032, issue #76).
-	ftsQuery := phraseFTSQuery(strings.TrimSpace(req.Query))
+	//
+	// The hasSearchableText gate is load-bearing, not defensive: phraseFTSQuery
+	// splits on strings.Fields, so punctuation-only input yields a non-empty
+	// MATCH expression whose phrases tokenize to nothing and match no row —
+	// silently reproducing the empty browse tier this branch exists to prevent.
+	ftsQuery := ""
+	if hasSearchableText(req.Query) {
+		ftsQuery = phraseFTSQuery(strings.TrimSpace(req.Query))
+	}
 
 	resp := &ContextResponse{
 		TaskType:  taskType,

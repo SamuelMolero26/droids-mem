@@ -12,7 +12,8 @@ on:
 
 permissions:
   contents: write
-  id-token: write   # needed for build provenance attestation (SLSA)
+  id-token: write        # OIDC token for build provenance attestation (SLSA)
+  attestations: write    # persist the attestation to the repo (actions/attest-build-provenance)
 
 jobs:
   build:
