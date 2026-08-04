@@ -129,17 +129,24 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 	// a relevant memory with low lexical overlap may rank below noise. By
 	// fetching 3× the limit internally and re-ranking, we promote results
 	// whose literal token set overlaps meaningfully with the query.
+	//
+	// The ORDER BY uses the project's column weights (title ×3, learned ×2 —
+	// same vector as save.go, context.go, prune.go, connections.go), not the
+	// bare fts.rank. This gates twice: it decides which rows enter the 3×
+	// window at all (a target missed here can never be re-ranked back in) and
+	// it feeds CompositeScore below.
 	internalLimit := min(limit*internalFetchMultiplier, maxInternalFetch)
 
 	pageArgs := append(args, internalLimit)
 	// #nosec G201 -- same as above: hardcoded conditions, parameterized values.
 	stmt := fmt.Sprintf(`
-		SELECT m.id, m.kind, m.title, m.learned, m.task_type, m.created_at, fts.rank,
+		SELECT m.id, m.kind, m.title, m.learned, m.task_type, m.created_at,
+		       bm25(memories_fts, 3, 1, 2, 1) AS rank,
 		       m.expand_count, COALESCE(m.last_expanded_at, 0), m.review_after, m.pinned
 		FROM memories_fts fts
 		JOIN memories m ON m.rowid = fts.rowid
 		WHERE %s
-		ORDER BY fts.rank
+		ORDER BY rank
 		LIMIT ?
 	`, whereClause)
 
