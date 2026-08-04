@@ -289,7 +289,15 @@ func fetchBrowseTierConn(ctx context.Context, conn *sql.Conn, ftsQuery, taskType
 }
 
 func fetchBrowseKindConn(ctx context.Context, conn *sql.Conn, ftsQuery, taskType, kind string, limit int, full bool) ([]ContextMemory, error) {
-	const browseCols = `m.id, m.kind, m.title, m.what, m.learned, m.created_at,
+	// Orient discards `learned` (it only renders a snippet of `what`), so the
+	// column is substituted with an empty literal rather than read — a browse
+	// tier of 20 rows would otherwise pull 20 full bodies off overflow pages on
+	// every session-start call just to throw them away.
+	learnedCol := `''`
+	if full {
+		learnedCol = `m.learned`
+	}
+	browseCols := `m.id, m.kind, m.title, m.what, ` + learnedCol + `, m.created_at,
 		       m.expand_count, COALESCE(m.last_expanded_at, 0), m.review_after, m.pinned`
 
 	var (

@@ -503,6 +503,10 @@ func TestContext_NoQueryFillsBrowseTierByRecency(t *testing.T) {
 		t.Fatalf("browse tier = %d rows %v, want all 4 seeded rows", len(resp.Browse), got)
 	}
 	for kind, w := range want {
+		if len(got[kind]) != len(w) {
+			t.Errorf("%s = %d rows %v, want %d %v", kind, len(got[kind]), got[kind], len(w), w)
+			continue
+		}
 		for i := range w {
 			if got[kind][i] != w[i] {
 				t.Errorf("%s[%d] = %q, want %q (newest first)", kind, i, got[kind][i], w[i])
