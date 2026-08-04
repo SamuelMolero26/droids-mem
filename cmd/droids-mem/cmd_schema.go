@@ -34,7 +34,7 @@ var schemaDefinitions = map[string]any{
 		"description": "Load start-of-run context bundle (two-tier: always + browse)",
 		"flags": []map[string]any{
 			{"name": "task-type", "type": "string", "required": true, "description": "Task type to load context for"},
-			{"name": "query", "type": "string", "required": false, "description": "FTS query for browse-tier ranking (defaults to task-type tokens); invalid with --mode refresh"},
+			{"name": "query", "type": "string", "required": false, "description": "FTS query for browse-tier ranking; absent or punctuation-only ranks the tier by recency instead; invalid with --mode refresh"},
 			{"name": "mode", "type": "enum", "required": false, "values": []string{"orient", "deep", "refresh"}, "default": "orient", "description": "Retrieval depth: orient = always tier + browse snippets; deep = always tier (all rules full) + browse full bodies; refresh = always tier only"},
 		},
 		"response": map[string]any{
