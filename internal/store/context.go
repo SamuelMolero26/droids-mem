@@ -34,7 +34,7 @@ const (
 
 type ContextRequest struct {
 	TaskType string      `json:"task_type"`
-	Query    string      `json:"query"`          // optional — falls back to task_type tokens
+	Query    string      `json:"query"`          // optional — absent or punctuation-only ranks browse by recency
 	Mode     ContextMode `json:"mode,omitempty"` // optional — defaults to orient
 }
 
@@ -101,16 +101,10 @@ func (s *Store) Context(ctx context.Context, req ContextRequest) (*ContextRespon
 		}
 	}
 
-	rawQuery := strings.TrimSpace(req.Query)
-	if rawQuery == "" {
-		rawQuery = taskType
-	}
-	ftsQuery := phraseFTSQuery(rawQuery)
-	if ftsQuery == "" {
-		// rawQuery was all punctuation/no tokens; fall back to the task_type
-		// (always a non-empty alphanumeric slug) so the browse tier still ranks.
-		ftsQuery = phraseFTSQuery(taskType)
-	}
+	// Empty (or punctuation-only) query routes the browse tier to its recency
+	// branch. The task_type is deliberately NOT substituted in as a stand-in
+	// search term: it is an identity key, not vocabulary (ADR-0032, issue #76).
+	ftsQuery := phraseFTSQuery(strings.TrimSpace(req.Query))
 
 	resp := &ContextResponse{
 		TaskType:  taskType,
@@ -295,17 +289,39 @@ func fetchBrowseTierConn(ctx context.Context, conn *sql.Conn, ftsQuery, taskType
 }
 
 func fetchBrowseKindConn(ctx context.Context, conn *sql.Conn, ftsQuery, taskType, kind string, limit int, full bool) ([]ContextMemory, error) {
-	rows, err := conn.QueryContext(ctx, `
-		SELECT m.id, m.kind, m.title, m.what, m.learned, m.created_at,
-		       m.expand_count, COALESCE(m.last_expanded_at, 0), m.review_after, m.pinned
-		FROM memories_fts fts
-		JOIN memories m ON m.rowid = fts.rowid
-		WHERE memories_fts MATCH ?
-		AND m.task_type = ?
-		AND m.kind = ?
-		ORDER BY bm25(memories_fts, 3, 1, 2, 1)
-		LIMIT ?
-	`, ftsQuery, taskType, kind, limit)
+	const browseCols = `m.id, m.kind, m.title, m.what, m.learned, m.created_at,
+		       m.expand_count, COALESCE(m.last_expanded_at, 0), m.review_after, m.pinned`
+
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if ftsQuery == "" {
+		// No query, no relevance signal: rank by recency. The FTS join is
+		// dropped rather than matched against a placeholder — task_type and
+		// kind already scope the rows, and bm25() is only legal alongside a
+		// MATCH. id DESC only breaks created_at ties (routine: a session-end
+		// rollup saves several memories in one second) so the sort is total.
+		rows, err = conn.QueryContext(ctx, `
+			SELECT `+browseCols+`
+			FROM memories m
+			WHERE m.task_type = ?
+			AND m.kind = ?
+			ORDER BY m.created_at DESC, m.id DESC
+			LIMIT ?
+		`, taskType, kind, limit)
+	} else {
+		rows, err = conn.QueryContext(ctx, `
+			SELECT `+browseCols+`
+			FROM memories_fts fts
+			JOIN memories m ON m.rowid = fts.rowid
+			WHERE memories_fts MATCH ?
+			AND m.task_type = ?
+			AND m.kind = ?
+			ORDER BY bm25(memories_fts, 3, 1, 2, 1)
+			LIMIT ?
+		`, ftsQuery, taskType, kind, limit)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("fetch browse (%s): %w", kind, err)
 	}

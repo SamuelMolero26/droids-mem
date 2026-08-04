@@ -201,8 +201,9 @@ func TestContext_QueryWithSpecialChars(t *testing.T) {
 	}
 }
 
-// TestContext_OnlyPunctuationQuery falls back to task_type tokens when the query
-// has no real terms, rather than running MATCH on an empty expression.
+// TestContext_OnlyPunctuationQuery covers a query that tokenizes to nothing.
+// It must not reach MATCH with an empty expression; it takes the same
+// recency branch as a genuinely absent query (issue #76).
 func TestContext_OnlyPunctuationQuery(t *testing.T) {
 	s := newTestStore(t)
 	seedContextFixture(t, s)
@@ -422,16 +423,143 @@ func TestContext_NoDuplicateIDsAcrossTiers(t *testing.T) {
 	}
 }
 
-func TestContext_QueryFallsBackToTaskType(t *testing.T) {
-	s := newTestStore(t)
-	seedContextFixture(t, s)
+// recencySeed describes one browse-kind memory to seed with a deterministic
+// created_at offset (now - ageSeconds) so recency order is testable. Bodies
+// must be dissimilar: near-identical text trips the Layer 2 near-duplicate
+// gate and the later saves are skipped.
+type recencySeed struct {
+	kind, title, what, learned string
+	ageSeconds                 int64
+}
 
-	// no query provided — should not error, falls back to task_type tokens
-	resp, err := s.Context(context.Background(), store.ContextRequest{TaskType: "crm_upload"})
+// seedRecencyFixture saves the given seeds under taskType and rewrites each
+// created_at to now-ageSeconds. Setting the same ageSeconds on every seed
+// forces a tie, which is what the id DESC tiebreak tests need.
+func seedRecencyFixture(t *testing.T, s *store.Store, conn *sql.DB, taskType string, seeds []recencySeed) {
+	t.Helper()
+	now := time.Now().Unix()
+	for _, sd := range seeds {
+		resp, err := s.Save(context.Background(), store.SaveRequest{
+			TaskType: taskType, Kind: sd.kind,
+			Title: sd.title, What: sd.what, Learned: sd.learned,
+		})
+		if err != nil {
+			t.Fatalf("seed save %q: %v", sd.title, err)
+		}
+		if resp.ID == "" {
+			t.Fatalf("seed %q was deduped away; make the fixture bodies more distinct", sd.title)
+		}
+		// created_at only moves backwards: CHECK(updated_at >= created_at).
+		if _, err := conn.Exec(`UPDATE memories SET created_at = ? WHERE id = ?`, now-sd.ageSeconds, resp.ID); err != nil {
+			t.Fatalf("seed created_at %q: %v", sd.title, err)
+		}
+	}
+}
+
+// TestContext_NoQueryFillsBrowseTierByRecency is the [GUARD] for issue #76:
+// with no Query the browse tier ranks by recency instead of substituting the
+// task_type into `memories_fts MATCH`. The slug shares no token with any
+// seeded body, so a returned row proves the MATCH is gone rather than
+// accidentally satisfied.
+func TestContext_NoQueryFillsBrowseTierByRecency(t *testing.T) {
+	s, conn := newTestStoreWithConn(t)
+	const taskType = "ledger_reconcile"
+
+	seedRecencyFixture(t, s, conn, taskType, []recencySeed{
+		{"task_pattern", "Retry budget exhausted on webhook delivery",
+			"Third-party endpoint returned 503 for eleven minutes straight",
+			"Cap retries at five and shed the overflow to a dead-letter queue", 300},
+		{"task_pattern", "Batch window collapses under midnight load",
+			"Scheduled job overlapped the nightly export and starved connections",
+			"Stagger the cron by ninety seconds so the export drains first", 200},
+		{"task_pattern", "Vendor clock skew breaks event ordering",
+			"Upstream timestamps drifted four seconds ahead of ours",
+			"Sort by ingestion sequence, never by the supplied timestamp", 100},
+		{"error_resolution", "Partial write left orphaned rows",
+			"Crash between the two statements stranded child records",
+			"Wrap both statements in one transaction and let the FK cascade", 150},
+	})
+
+	resp, err := s.Context(context.Background(), store.ContextRequest{TaskType: taskType})
 	if err != nil {
 		t.Fatalf("Context without query: %v", err)
 	}
-	_ = resp
+
+	// fetchBrowseTier concatenates error_resolution then task_pattern; assert
+	// recency within each kind rather than across the whole slice.
+	want := map[string][]string{
+		"error_resolution": {"Partial write left orphaned rows"},
+		"task_pattern": {
+			"Vendor clock skew breaks event ordering",    // 100s old
+			"Batch window collapses under midnight load", // 200s old
+			"Retry budget exhausted on webhook delivery", // 300s old
+		},
+	}
+	got := map[string][]string{}
+	for _, m := range resp.Browse {
+		got[m.Kind] = append(got[m.Kind], m.Title)
+	}
+	if len(resp.Browse) != 4 {
+		t.Fatalf("browse tier = %d rows %v, want all 4 seeded rows", len(resp.Browse), got)
+	}
+	for kind, w := range want {
+		for i := range w {
+			if got[kind][i] != w[i] {
+				t.Errorf("%s[%d] = %q, want %q (newest first)", kind, i, got[kind][i], w[i])
+			}
+		}
+	}
+}
+
+// TestContext_NoQueryTiebreakIsTotal is the [GUARD] for the `id DESC` second
+// sort key in fetchBrowseKindConn's recency branch (ADR-0032).
+//
+// A session-end rollup saves several Memories inside the same second, so
+// created_at ties are routine. Solely ordering by created_at DESC leaves the
+// tied group to scan/rowid order — an accident, not an order. The `id` tiebreak
+// (durable ULIDs, lexicographically sortable) makes the sort total so the same
+// corpus returns the same bundle on every call.
+//
+// Every seed is forced to the same ageSeconds, so all five created_at values
+// tie. The browse tier must come back strictly id DESC — any resurrection of a
+// rowid-order regression breaks the strictly-greater assertion, not a mere
+// order-equality check that SQLite's stable scan would satisfy either way.
+func TestContext_NoQueryTiebreakIsTotal(t *testing.T) {
+	s, conn := newTestStoreWithConn(t)
+	const taskType = "ledger_reconcile"
+
+	// Same ageSeconds -> identical created_at across all five rows.
+	seedRecencyFixture(t, s, conn, taskType, []recencySeed{
+		{"task_pattern", "Retry budget exhausted on webhook delivery",
+			"Third-party endpoint returned 503 for eleven minutes straight",
+			"Cap retries at five and shed the overflow to a dead-letter queue", 100},
+		{"task_pattern", "Batch window collapses under midnight load",
+			"Scheduled job overlapped the nightly export and starved connections",
+			"Stagger the cron by ninety seconds so the export drains first", 100},
+		{"task_pattern", "Vendor clock skew breaks event ordering",
+			"Upstream timestamps drifted four seconds ahead of ours",
+			"Sort by ingestion sequence, never by the supplied timestamp", 100},
+		{"task_pattern", "Partial write left orphaned rows",
+			"Crash between the two statements stranded child records",
+			"Wrap both statements in one transaction and let the FK cascade", 100},
+		{"task_pattern", "Connection pool starves under fan-out load",
+			"Concurrent graph fan-out exhausted the pool and stalled callers",
+			"Size the pool by fan-out breadth, not by steady-state concurrency", 100},
+	})
+
+	resp, err := s.Context(context.Background(), store.ContextRequest{TaskType: taskType})
+	if err != nil {
+		t.Fatalf("Context: %v", err)
+	}
+	if len(resp.Browse) != 5 {
+		t.Fatalf("browse = %d rows, want all 5 tied seeds", len(resp.Browse))
+	}
+	for i := 1; i < len(resp.Browse); i++ {
+		if resp.Browse[i-1].ID <= resp.Browse[i].ID {
+			t.Errorf("browse not strictly id DESC at %d: %q <= %q",
+				i, resp.Browse[i-1].ID, resp.Browse[i].ID)
+		}
+	}
 }
 
 func TestContext_Validation_MissingTaskType(t *testing.T) {

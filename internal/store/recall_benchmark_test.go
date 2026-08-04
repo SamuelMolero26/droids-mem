@@ -229,7 +229,9 @@ func renderBenchmark(rep *store.EvalReport, corpusSize int) string {
 		rep.MemSearch.Scored, pct(rep.MemSearch.RecallAt1), pct(rep.MemSearch.RecallAt5), dec(rep.MemSearch.MRR))
 
 	fmt.Fprintf(&b, "## mem_context browse tier\n\n")
-	fmt.Fprintf(&b, "browse_hit_rate: %s (%d eligible queries)\n\n", pct(rep.MemContext.BrowseHitRate), rep.MemContext.EligiblePairs)
+	fmt.Fprintf(&b, "browse_hit_rate: %s (%d eligible queries)\n", pct(rep.MemContext.BrowseHitRate), rep.MemContext.EligiblePairs)
+	fmt.Fprintf(&b, "browse_hit_rate (no query): %s (%d eligible queries)\n\n",
+		pct(rep.MemContext.BrowseHitRateNoQuery), rep.MemContext.EligiblePairs)
 
 	fmt.Fprintf(&b, "## misses (rank > 5)\n\n")
 	misses := searchMisses(rep)
