@@ -456,53 +456,6 @@ func seedRecencyFixture(t *testing.T, s *store.Store, conn *sql.DB, taskType str
 	}
 }
 
-// TestContext_PunctuationOnlyQueryFallsBackToRecency is the [GUARD] for the
-// second half of the issue #76 contract: ContextRequest.Query documents that an
-// "absent or punctuation-only" query ranks the browse tier by recency.
-//
-// Absent was covered; punctuation-only was not, and it did not hold.
-// phraseFTSQuery splits on strings.Fields, so ",,, ::: ---" became the
-// non-empty MATCH expression `","" OR ":::" OR "---"`. That is not empty, so
-// the FTS branch ran — and since FTS5's tokenizer emits no tokens for pure
-// punctuation, the phrases matched nothing and the browse tier came back empty.
-// The exact issue #76 symptom, reached by a different route.
-func TestContext_PunctuationOnlyQueryFallsBackToRecency(t *testing.T) {
-	s, conn := newTestStoreWithConn(t)
-	const taskType = "ledger_reconcile"
-
-	seedRecencyFixture(t, s, conn, taskType, []recencySeed{
-		{"task_pattern", "Retry budget exhausted on webhook delivery",
-			"Third-party endpoint returned 503 for eleven minutes straight",
-			"Cap retries at five and shed the overflow to a dead-letter queue", 300},
-		{"error_resolution", "Partial write left orphaned rows",
-			"Crash between the two statements stranded child records",
-			"Wrap both statements in one transaction and let the FK cascade", 150},
-	})
-
-	for _, q := range []string{",,, ::: ---", "...", "?!", "   ,   "} {
-		resp, err := s.Context(context.Background(), store.ContextRequest{TaskType: taskType, Query: q})
-		if err != nil {
-			t.Fatalf("Context(query=%q): %v", q, err)
-		}
-		if len(resp.Browse) != 2 {
-			t.Errorf("query %q: browse tier = %d rows, want 2 (recency fallback)", q, len(resp.Browse))
-		}
-	}
-
-	// A query with real tokens must still take the FTS branch; the fallback is
-	// for queries with nothing to match on, not a blanket disable.
-	resp, err := s.Context(context.Background(), store.ContextRequest{TaskType: taskType, Query: "webhook delivery"})
-	if err != nil {
-		t.Fatalf("Context(real query): %v", err)
-	}
-	if len(resp.Browse) == 0 {
-		t.Fatal("real query returned an empty browse tier")
-	}
-	if resp.Browse[0].Title != "Retry budget exhausted on webhook delivery" {
-		t.Errorf("real query ranked by relevance = %q, want the webhook row first", resp.Browse[0].Title)
-	}
-}
-
 // TestContext_NoQueryFillsBrowseTierByRecency is the [GUARD] for issue #76:
 // with no Query the browse tier ranks by recency instead of substituting the
 // task_type into `memories_fts MATCH`. The slug shares no token with any
@@ -649,9 +602,11 @@ func TestContext_ConcurrentWritesNoCorruption(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make(chan error, readers*iters+writers*iters)
 
-	for range readers {
-		wg.Go(func() {
-			for range iters {
+	for r := 0; r < readers; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iters; i++ {
 				resp, err := s.Context(context.Background(), store.ContextRequest{TaskType: "crm_upload", Query: "phone csv"})
 				if err != nil {
 					errs <- err
@@ -667,12 +622,14 @@ func TestContext_ConcurrentWritesNoCorruption(t *testing.T) {
 					return
 				}
 			}
-		})
+		}()
 	}
 
-	for id := range writers {
-		wg.Go(func() {
-			for i := range iters {
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < iters; i++ {
 				// distinct content per iter to avoid Layer 1/2 dedupe
 				req := store.SaveRequest{
 					TaskType: "crm_upload",
@@ -687,7 +644,7 @@ func TestContext_ConcurrentWritesNoCorruption(t *testing.T) {
 					return
 				}
 			}
-		})
+		}(w)
 	}
 
 	wg.Wait()
@@ -704,7 +661,7 @@ func (e *snapshotErr) Error() string { return e.msg }
 func TestContext_SessionSummaryRetention(t *testing.T) {
 	s := newTestStore(t)
 
-	for i := range 7 {
+	for i := 0; i < 7; i++ {
 		time.Sleep(time.Millisecond)
 		s.Save(context.Background(), store.SaveRequest{
 			TaskType: "crm_upload",

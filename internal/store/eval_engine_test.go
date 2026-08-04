@@ -49,6 +49,7 @@ type PairResult struct {
 	SearchHitAt10      bool    `json:"search_hit_at_10"`
 	ContextEligible    bool    `json:"context_eligible"`
 	ContextHit         bool    `json:"context_hit"`
+	ContextHitNoQuery  bool    `json:"context_hit_no_query"`
 	QueryTargetOverlap float64 `json:"query_target_overlap"`
 }
 
@@ -65,9 +66,18 @@ type SearchMetrics struct {
 
 // ContextMetrics scores mem_context's browse tier: a fixed bundle, so a binary
 // presence rate over the structurally-reachable pairs is the honest metric.
+//
+// Two call shapes are scored against the same eligible pairs. BrowseHitRate
+// passes the fixture's query, which is what an agent sends mid-run.
+// BrowseHitRateNoQuery passes none, which is what an agent sends at session
+// start — the default path, and the one that regressed to 0 in issue #76.
+// The no-query rate carries no per-paraphrase-type breakdown because the
+// paraphrase class is a property of a query that this call shape does not
+// send.
 type ContextMetrics struct {
-	BrowseHitRate float64 `json:"browse_hit_rate"`
-	EligiblePairs int     `json:"eligible_pairs"`
+	BrowseHitRate        float64 `json:"browse_hit_rate"`
+	BrowseHitRateNoQuery float64 `json:"browse_hit_rate_no_query"`
+	EligiblePairs        int     `json:"eligible_pairs"`
 }
 
 // TypeMetrics breaks recall down by paraphrase class — the only way to see that
@@ -113,7 +123,7 @@ func (s *Store) Eval(ctx context.Context, fixtures []Fixture) (*EvalReport, erro
 	}
 
 	// Running tallies (floats derived once at the end).
-	var searchHit1, searchHit5, searchHit10, contextHit, eligible int
+	var searchHit1, searchHit5, searchHit10, contextHit, contextHitNoQuery, eligible int
 	var mrrSum float64
 
 	for _, f := range fixtures {
@@ -187,6 +197,16 @@ func (s *Store) Eval(ctx context.Context, fixtures []Fixture) (*EvalReport, erro
 				contextHit++
 				tm.browseHits++
 			}
+
+			// Same target, default session-start call shape: no query.
+			hitNoQuery, err := s.contextBrowseHit(ctx, f.TaskType, "", target.ID)
+			if err != nil {
+				return nil, err
+			}
+			pr.ContextHitNoQuery = hitNoQuery
+			if hitNoQuery {
+				contextHitNoQuery++
+			}
 		}
 
 		rep.Pairs = append(rep.Pairs, pr)
@@ -200,6 +220,7 @@ func (s *Store) Eval(ctx context.Context, fixtures []Fixture) (*EvalReport, erro
 	}
 	rep.MemContext.EligiblePairs = eligible
 	rep.MemContext.BrowseHitRate = ratio(contextHit, eligible)
+	rep.MemContext.BrowseHitRateNoQuery = ratio(contextHitNoQuery, eligible)
 
 	for _, tm := range rep.ByType {
 		tm.RecallAt1 = ratio(tm.recallHit1, tm.N)
