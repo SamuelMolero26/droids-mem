@@ -60,7 +60,7 @@ func seedSummary(t *testing.T, conn *sql.DB, id, origin, taskType string, create
 		INSERT INTO memories
 			(id, session_id, task_type, kind, title, what, learned, tags, fingerprint,
 			 created_at, updated_at, scope, scrub_pattern_version, origin, expand_count, last_expanded_at)
-		VALUES (?, 'sess', ?, 'session_summary', ?, 'w', ?, '', ?, ?, ?, 'shared', 1, ?, ?, ?)`,
+		VALUES (?, 'sess', ?, 'session_summary', ?, 'w', ?, '', ?, ?, ?, 'personal', 1, ?, ?, ?)`,
 		id, taskType, "t_"+id, "l_"+id, "fp_"+id, createdAt, createdAt, origin, expandCount, last)
 	if err != nil {
 		t.Fatalf("seed %s summary %s: %v", origin, id, err)

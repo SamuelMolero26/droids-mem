@@ -451,6 +451,11 @@ const (
 // pruneSessionSummariesConn enforces the per-task_type newest-5 cap for MANUAL
 // session summaries. Scoped to origin='manual' so it never evicts an auto
 // summary that happens to share a task_type bucket.
+//
+// `id DESC` is the same-second tiebreak. created_at is 1-second resolution and
+// session-end rollups save several summaries inside one second, so without it
+// SQLite walks the tie group in index order — oldest-first — and LIMIT keeps
+// the OLDEST five, deleting newer rows (issue #58).
 func pruneSessionSummariesConn(ctx context.Context, conn *sql.Conn, taskType string) error {
 	_, err := conn.ExecContext(ctx, `
 		DELETE FROM memories
@@ -458,7 +463,7 @@ func pruneSessionSummariesConn(ctx context.Context, conn *sql.Conn, taskType str
 		AND id NOT IN (
 			SELECT id FROM memories
 			WHERE task_type = ? AND kind = 'session_summary' AND origin = 'manual'
-			ORDER BY created_at DESC
+			ORDER BY created_at DESC, id DESC
 			LIMIT ?
 		)
 	`, taskType, taskType, maxSessionSummaries)
@@ -488,12 +493,13 @@ func pruneAutoSummariesConn(ctx context.Context, conn *sql.Conn) error {
 				(CASE WHEN id IN (
 					SELECT id FROM memories
 					WHERE kind = 'session_summary' AND origin = 'auto'
-					ORDER BY created_at DESC
+					ORDER BY created_at DESC, id DESC
 					LIMIT ?
 				) THEN 1 ELSE 0 END) DESC,
 				(CASE WHEN expand_count > 0 THEN 1 ELSE 0 END) DESC,
 				last_expanded_at DESC,
-				created_at DESC
+				created_at DESC,
+				id DESC
 			LIMIT ?
 		)
 	`, autoSummaryGrace, maxAutoSummaries)

@@ -78,16 +78,24 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_fingerprint ON memories(fingerpri
 CREATE INDEX IF NOT EXISTS idx_memories_task_type         ON memories(task_type);
 CREATE INDEX IF NOT EXISTS idx_memories_kind              ON memories(kind);
 -- idx_memories_task_kind_created composite covers leftmost-prefix (task_type)
--- and (task_type, kind) lookups AND eliminates the ORDER BY created_at DESC
--- sort step for the session_summary prune (save.go), fetchLastSession,
--- fetchAllUserRules. (Prior idx_memories_task_kind dropped in earlier
--- migration — DROP line removed v1.0 per perf-engineer rec #5.)
-CREATE INDEX IF NOT EXISTS idx_memories_task_kind_created ON memories(task_type, kind, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_memories_created_at        ON memories(created_at DESC);
+-- and (task_type, kind) lookups AND eliminates the ORDER BY sort step for the
+-- session_summary prune (save.go), fetchLastSession, fetchAllUserRules.
+-- (Prior idx_memories_task_kind dropped in earlier migration — DROP line
+-- removed v1.0 per perf-engineer rec #5.)
+--
+-- The trailing "id DESC" is load-bearing, not cosmetic. Those queries order by
+-- "created_at DESC, id DESC" (ADR-0033); without id in the index SQLite adds
+-- "USE TEMP B-TREE FOR LAST TERM OF ORDER BY", which sorts each same-second
+-- tie group. That costs nothing when rows have distinct seconds, but it makes
+-- LIMIT stop being an early exit inside a tie group — and a bulk ImportShared
+-- re-stamps every row to the same second, so the retention prune degrades from
+-- O(1) to O(tie-group). Measured 13µs flat vs 720µs at a 2000-row tie group.
+CREATE INDEX IF NOT EXISTS idx_memories_task_kind_created ON memories(task_type, kind, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_created_at        ON memories(created_at DESC, id DESC);
 -- idx_memories_origin_created serves the auto-summary recency read
 -- (recent-sessions: WHERE origin='auto' ORDER BY created_at DESC LIMIT N) and
 -- the origin-keyed eviction scan (ADR-0016). Never joined on FTS.
-CREATE INDEX IF NOT EXISTS idx_memories_origin_created    ON memories(origin, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_origin_created    ON memories(origin, created_at DESC, id DESC);
 
 -- memory_files is the file-provenance relation (ADR-0021 Phase 2): the files a
 -- Claude Code session read or changed, keyed by the droids-mem session_id the
