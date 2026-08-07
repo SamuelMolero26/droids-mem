@@ -7,6 +7,36 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Code-graph async rebuild lifecycle** (issue #73). Six defects on the
+  warm-serve path, found by exercising it end to end:
+  - A completing rebuild closed the SQLite handle its caller was still
+    querying, so a build landing mid-response surfaced as
+    `sql: database is closed` instead of the intended degraded stale answer.
+    Handles are refcounted now and close only when the last holder releases.
+  - A superseded build's completion channel was never closed, so
+    `graph_build_wait` waited out its full timeout for a build whose result had
+    already been discarded.
+  - `graph_build_wait` ignored its `timeout` when no rebuild was in flight: it
+    started one and immediately reported `completed: true`, and on a
+    never-indexed repo it ran a full synchronous build regardless of the
+    timeout. The timeout now bounds every path, expiry reports
+    `completed: false` rather than an error, and waiting attaches to the build
+    it triggered.
+  - A repo that stopped type-checking relaunched a full `go/packages` load on
+    *every* query. The retry is now suppressed while the source still hashes to
+    a stamp that already failed; any edit lifts it.
+  - The `graph_build_wait` timeout response reported an empty stamp, hiding the
+    valid stamp of the graph still being served.
+  - A first-ever index ran on the caller's context, so a client disconnecting
+    mid-build discarded all the work and the next query restarted from zero.
+    The build now survives an abandoned caller while the caller's own wait stays
+    bounded.
+- **TUI graph tab** (`ctrl+g`) tried `graph_package` first for any input without
+  a dot, so a bare symbol name — the common case — cost two lookups and two
+  staleness checks before falling back to `graph_symbol`. Only a `/` marks a
+  package path now.
+
 ## [1.2.0] — 2026-07-22
 
 ### Changed
