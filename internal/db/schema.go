@@ -75,7 +75,14 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_fingerprint ON memories(fingerprint);
-CREATE INDEX IF NOT EXISTS idx_memories_task_type         ON memories(task_type);
+-- idx_memories_kind stands alone because kind is the SECOND column of the
+-- composite below, so no leftmost prefix covers a kind-only lookup. There is
+-- deliberately no idx_memories_task_type: task_type IS the composite's leftmost
+-- column, so the composite already serves every task_type-only lookup on the
+-- same access path. Verified on EXPLAIN QUERY PLAN — with the standalone index
+-- dropped, "WHERE task_type=?" plans as
+-- "SEARCH USING INDEX idx_memories_task_kind_created (task_type=?)" and
+-- "GROUP BY task_type" still takes a covering scan of the composite.
 CREATE INDEX IF NOT EXISTS idx_memories_kind              ON memories(kind);
 -- idx_memories_task_kind_created composite covers leftmost-prefix (task_type)
 -- and (task_type, kind) lookups AND eliminates the ORDER BY sort step for the

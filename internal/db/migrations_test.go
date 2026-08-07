@@ -642,7 +642,11 @@ func TestMigrate_V6toV7RedefinesIndexes(t *testing.T) {
 		"idx_memories_kind(kind)",
 		"idx_memories_origin_created(origin,created_at DESC,id DESC)",
 		"idx_memories_task_kind_created(task_type,kind,created_at DESC,id DESC)",
-		"idx_memories_task_type(task_type)",
+		// No idx_memories_task_type: task_type is the composite's leftmost
+		// column, so idx_memories_task_kind_created already serves every
+		// task_type-only lookup and the v6→v7 rung drops the standalone index.
+		// idx_memories_kind stays — kind is the composite's SECOND column, so
+		// no leftmost prefix covers a kind-only lookup.
 	}
 	if !equalStringSlices(got, want) {
 		t.Errorf("migrated index definitions = %v, want %v", got, want)

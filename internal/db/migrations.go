@@ -232,6 +232,14 @@ func setUserVersion(db *sql.DB, v int) error {
 // while fresh ones got the 4-column shape — same user_version, different
 // schema, nothing erroring. TestInit_FreshMatchesMigratedShape compares index
 // DEFINITIONS (not just names) to keep that drift impossible to ship.
+//
+// The rung also drops idx_memories_task_type, which was redundant: task_type is
+// the leftmost column of idx_memories_task_kind_created, so the composite
+// already serves every task_type-only lookup on the same access path. The
+// planner preferred the standalone index only because it is narrower, never
+// because it was needed, and it cost a second B-tree maintained on every write.
+// idx_memories_kind is NOT redundant and stays — kind is the composite's second
+// column, so no prefix covers a kind-only lookup.
 const migrationV6ToV7 = `
 DROP INDEX IF EXISTS idx_memories_task_kind_created;
 CREATE INDEX idx_memories_task_kind_created ON memories(task_type, kind, created_at DESC, id DESC);
@@ -241,4 +249,6 @@ CREATE INDEX idx_memories_created_at ON memories(created_at DESC, id DESC);
 
 DROP INDEX IF EXISTS idx_memories_origin_created;
 CREATE INDEX idx_memories_origin_created ON memories(origin, created_at DESC, id DESC);
+
+DROP INDEX IF EXISTS idx_memories_task_type;
 `
