@@ -122,14 +122,14 @@ jobs:
       - name: Run govulncheck
         uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1.1.0
 
+      # -no-fail is intentional: gosec findings are surfaced via SARIF in the
+      # security tab, while the lint job's golangci-lint (which also runs gosec)
+      # is the blocking gate that fails CI on real issues.
       - name: Run gosec
         uses: securego/gosec@9e75c0576c9878035d4221392108d458abe10fc3 # v2.28.0
         with:
           args: -no-fail -fmt sarif -out gosec-results.sarif ./...
 
-      # -no-fail is intentional: gosec findings are surfaced via SARIF in the
-      # security tab, while the lint job's golangci-lint (which also runs gosec)
-      # is the blocking gate that fails CI on real issues.
       - name: Upload gosec results
         if: always()
         uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
