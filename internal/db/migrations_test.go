@@ -758,6 +758,53 @@ func TestMigrate_V6toV7RedefinesIndexes(t *testing.T) {
 	}
 }
 
+// v7→v8 adds authored_at, backfilled to created_at so no pre-existing row
+// misreports its authoring date as the epoch.
+func TestMigrate_V7toV8AddsAuthoredAtBackfillsCreatedAt(t *testing.T) {
+	conn := newPreV1DB(t)
+	now := int64(1000000)
+	if _, err := conn.Exec(`
+		INSERT INTO memories (id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at)
+		VALUES ('mem_au', 'sess_au', 'crm', 'task_pattern', 't', 'w', 'l', '', 'fp_au', ?, ?)`,
+		now, now); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+	if err := db.Migrate(conn); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if !slices.Contains(tableColumns(t, conn, "memories"), "authored_at") {
+		t.Fatal("migrated DB missing memories.authored_at")
+	}
+	if !slices.Contains(tableColumns(t, conn, "archived_memories"), "authored_at") {
+		t.Fatal("migrated DB missing archived_memories.authored_at")
+	}
+	var authoredAt int64
+	if err := conn.QueryRow(`SELECT authored_at FROM memories WHERE id = 'mem_au'`).Scan(&authoredAt); err != nil {
+		t.Fatalf("read authored_at: %v", err)
+	}
+	if authoredAt != now {
+		t.Errorf("backfilled authored_at = %d, want created_at %d", authoredAt, now)
+	}
+	if got, want := userVersion(t, conn), db.CurrentSchemaVersion; got != want {
+		t.Errorf("post-migrate user_version = %d, want %d", got, want)
+	}
+}
+
+// A fresh DB carries authored_at from schema.go directly and reports the
+// current head version.
+func TestInit_FreshDBHasAuthoredAtAndVersion8(t *testing.T) {
+	conn := newTestDB(t)
+	if !slices.Contains(tableColumns(t, conn, "memories"), "authored_at") {
+		t.Error("fresh DB missing memories.authored_at")
+	}
+	if !slices.Contains(tableColumns(t, conn, "archived_memories"), "authored_at") {
+		t.Error("fresh DB missing archived_memories.authored_at")
+	}
+	if got, want := userVersion(t, conn), 8; got != want {
+		t.Errorf("fresh DB user_version = %d, want %d", got, want)
+	}
+}
+
 func equalStringSlices(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

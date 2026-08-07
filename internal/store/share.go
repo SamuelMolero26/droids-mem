@@ -12,8 +12,11 @@ import (
 
 // SharedMemory is the wire shape of one exported memory (ADR-0028). It carries
 // only the content needed to reconstruct a save on another machine — no id, no
-// timestamps, no author. The pool is anonymous by design: identity is exactly
-// what the Scrub pipeline removes, so attribution would fight it.
+// author, no source. The pool is anonymous by design: identity is exactly what
+// the Scrub pipeline removes, so attribution would fight it. The one exception
+// is AuthoredAt: a coarse origin date, not an identity, spent so an imported
+// lesson's age stays observable instead of being erased by re-stamping
+// created_at to the import time.
 type SharedMemory struct {
 	Kind     string `json:"kind"`
 	TaskType string `json:"task_type"`
@@ -21,6 +24,10 @@ type SharedMemory struct {
 	What     string `json:"what"`
 	Learned  string `json:"learned"`
 	Tags     string `json:"tags"`
+	// AuthoredAt is when the lesson was originally written. Content-stable, so
+	// it survives a re-export unchanged and a re-exported pool stays
+	// byte-identical across peers. Still no id, no author, no source.
+	AuthoredAt int64 `json:"authored_at,omitempty"`
 }
 
 // ExportShared streams every scope='shared' memory to w as JSONL, one compact
@@ -33,7 +40,7 @@ type SharedMemory struct {
 // stamped per-machine at save time, would have churned the diff across peers).
 func (s *Store) ExportShared(ctx context.Context, w io.Writer) error {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT kind, task_type, title, what, learned, tags
+		SELECT kind, task_type, title, what, learned, tags, authored_at
 		FROM memories
 		WHERE scope = 'shared'
 		ORDER BY fingerprint`)
@@ -45,7 +52,7 @@ func (s *Store) ExportShared(ctx context.Context, w io.Writer) error {
 	enc := json.NewEncoder(w) // Encode writes one line + '\n' = JSONL
 	for rows.Next() {
 		var m SharedMemory
-		if err := rows.Scan(&m.Kind, &m.TaskType, &m.Title, &m.What, &m.Learned, &m.Tags); err != nil {
+		if err := rows.Scan(&m.Kind, &m.TaskType, &m.Title, &m.What, &m.Learned, &m.Tags, &m.AuthoredAt); err != nil {
 			return fmt.Errorf("scan shared memory: %w", err)
 		}
 		if err := enc.Encode(&m); err != nil {
@@ -128,6 +135,10 @@ func (s *Store) importLine(ctx context.Context, line []byte, res *ImportResult) 
 		Learned:  m.Learned,
 		Tags:     m.Tags,
 		Scope:    "shared",
+		// Carry the peer's origin date so it stays observable across the
+		// import boundary. Save clamps it (the pool is a trust boundary) —
+		// see resolveAuthoredAt.
+		AuthoredAt: m.AuthoredAt,
 	})
 	if err != nil {
 		var ve *ValidationError
