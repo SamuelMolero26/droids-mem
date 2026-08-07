@@ -48,18 +48,18 @@ to verify a listener actually holds the token before reporting `already_running`
 Single binary, layered. Don't bypass layers:
 
 1. **`cmd/droids-mem/`** — cobra subcommands. One `cmd_*.go` per command; delegates to store, emits JSON via `output.go`. No business logic.
-2. **`internal/mcpserver/`** — MCP bridge (`server.go` wires HTTP + auth, `stdio.go` the stdio transport for host-spawned servers (`serve --stdio`, ADR-0024 — no port/token; instructions string forks one summary sentence per transport), `tools.go` defines the 4 memory tools, `graph_tools.go` the 2 code-graph tools). Operator commands (`list`, `schema`, `doctor`, `prune`) intentionally not exposed here.
+2. **`internal/mcpserver/`** — MCP bridge (`server.go` wires HTTP + auth, `stdio.go` the stdio transport for host-spawned servers (`serve --stdio` — no port/token; instructions string forks one summary sentence per transport), `tools.go` defines the 4 memory tools, `graph_tools.go` the 2 code-graph tools). Operator commands (`list`, `schema`, `doctor`, `prune`) intentionally not exposed here.
 3. **`internal/store/`** — all business logic shared by CLI and MCP. Key files:
    - `save.go` — validate → scrub → fingerprint → dedupe (2 layers) → insert; owns scrub *policy* (which fields, tag + identifier strict-reject, empty-after-scrub)
    - `search.go` — FTS5 MATCH queries
    - `context.go` — two-tier context bundle assembly (always + browse)
-   - `doctor.go` / `inspect.go` — health checks (incl. ADR-0010 growth warnings), introspection
-   - `prune.go` — manual deletion + `--suggest-dupes` cluster discovery (ADR-0010); never automatic
-   - `eval_engine_test.go` — recall eval engine (ADR-0025), test-only: scores paraphrase→memory fixture pairs against `mem_search`/`mem_context`; driven by `recall_benchmark_test.go`. Store code imports `internal/scrub` directly (no alias layer).
-4. **`internal/scrub/`** — the scrub *engine* (ADR-0008): `spec.yaml` (embedded declarative detector spec, single source of truth, pinned-hash version enforcement), `scrub.go` (single-pass collect → overlap-resolve → splice, windowed scanning), `entropy.go` (deterministic gate for usage-class detectors), `corpus.go` + `testdata/` (fixture corpus, `[CUT]` defang convention). No store imports.
+   - `doctor.go` / `inspect.go` — health checks (incl. growth warnings), introspection
+   - `prune.go` — manual deletion + `--suggest-dupes` cluster discovery; never automatic
+   - `eval_engine_test.go` — recall eval engine, test-only: scores paraphrase→memory fixture pairs against `mem_search`/`mem_context`; driven by `recall_benchmark_test.go`. Store code imports `internal/scrub` directly (no alias layer).
+4. **`internal/scrub/`** — the scrub *engine*: `spec.yaml` (embedded declarative detector spec, single source of truth, pinned-hash version enforcement), `scrub.go` (single-pass collect → overlap-resolve → splice, windowed scanning), `entropy.go` (deterministic gate for usage-class detectors), `corpus.go` + `testdata/` (fixture corpus, `[CUT]` defang convention). No store imports.
 5. **`internal/db/`** — `db.go` opens connection + applies pragmas; `schema.go` holds raw DDL string.
 6. **`internal/state/`** — `LoadOrCreateToken()` is the canonical bearer-token resolver. Owns all `~/.droids-mem/` file ops.
-7. **`internal/graph/`** — native code-graph subsystem (ADR-0020): per-repo Go symbol/call-edge index under `~/.droids-mem/graphs/<hash>/graph.db`, built with `go/packages` + `callgraph/cha` (interface dispatch resolved, over-approximate). Staleness-check-on-query via a `.go` count/size/max-mtime stamp; a repo that stops type-checking serves the last good graph with `stale: true`. Shares NOTHING with the Memory model — no scrub, no dedupe, no retention, never mem.db. Consumed by `cmd_graph.go` (boot-gate bypassed — annotations don't inherit, each leaf carries the bypass) and `internal/mcpserver/graph_tools.go`.
+7. **`internal/graph/`** — native code-graph subsystem: per-repo Go symbol/call-edge index under `~/.droids-mem/graphs/<hash>/graph.db`, built with `go/packages` + `callgraph/cha` (interface dispatch resolved, over-approximate). Staleness-check-on-query via a `.go` count/size/max-mtime stamp; a repo that stops type-checking serves the last good graph with `stale: true`. Shares NOTHING with the Memory model — no scrub, no dedupe, no retention, never mem.db. Consumed by `cmd_graph.go` (boot-gate bypassed — annotations don't inherit, each leaf carries the bypass) and `internal/mcpserver/graph_tools.go`. A call *into* a closure is not an edge; a call made *from* inside a closure is, attributed to the enclosing declaration.
 
 ## Data model invariants
 
@@ -72,7 +72,7 @@ Single binary, layered. Don't bypass layers:
 ## Dedupe (save)
 
 Two layers, both must pass before insert:
-1. **Fingerprint** — SHA-256 of normalized (`title+learned` + `task_type` + `kind`). Excludes `what` by design (ADR 0001). Exact match → skip (or overwrite if `force=true`).
+1. **Fingerprint** — SHA-256 of normalized (`title+learned` + `task_type` + `kind`). Excludes `what` by design. Exact match → skip (or overwrite if `force=true`).
 2. **Near-duplicate** — BM25 top-20 candidates (on `title+what+learned+tags`, column weights `bm25(memories_fts, 3, 1, 2, 1)`) re-ranked by Jaccard token-set similarity. Threshold: `≥ 0.85` → near-duplicate → skip. `SaveResponse` includes `score` (Jaccard) and `matched_id` when skipped.
 
 Both layers run inside a `BEGIN IMMEDIATE` transaction to close the dedupe race.
@@ -86,7 +86,7 @@ Two-tier model. No `--limit` flag; tier sizes are hardcoded constants.
 - `user_rules[]` — newest 5 `user_rule` rows for `task_type` (decision #20)
 
 **Browse tier** (title + 120-rune snippet from `what`):
-- rule stubs — `user_rule` rows beyond the always-tier 5, title-only, listed first (ADR-0011)
+- rule stubs — `user_rule` rows beyond the always-tier 5, title-only, listed first
 - ≤10 `error_resolution` by BM25 rank
 - ≤10 `task_pattern` by BM25 rank
 
@@ -104,11 +104,11 @@ Session retention: on `session_summary` save, delete oldest if > 5 for that `tas
 
 ## MCP contract
 
-6 tools: `mem_save`, `mem_search`, `mem_context`, `mem_get` (memory) + `graph_symbol`, `graph_package` (code graph, ADR-0020 — signatures-first, agent passes `repo` = absolute project root).
+6 tools: `mem_save`, `mem_search`, `mem_context`, `mem_get` (memory) + `graph_symbol`, `graph_package` (code graph — signatures-first, agent passes `repo` = absolute project root).
 
 - `mem_context` mints `session_id` (stateless server — agent stores and reuses it).
-- Auth: `Authorization: Bearer <token>` on every `/mcp` request. Stdio transport (`serve --stdio`, ADR-0024) has no port/token — the pipe is private to the spawning host; same tool surface, only the instructions string's summary sentence differs (stdio hosts self-save a `session_summary`).
-- `*store.ValidationError` → MCP tool error `{error, field, message}`; other runtime errors → structured envelope `{status, error, message, retryable, suggestion}` (dominant case: transient `BEGIN IMMEDIATE` write-lock timeout, ADR-0024).
+- Auth: `Authorization: Bearer <token>` on every `/mcp` request. Stdio transport (`serve --stdio`) has no port/token — the pipe is private to the spawning host; same tool surface, only the instructions string's summary sentence differs (stdio hosts self-save a `session_summary`).
+- `*store.ValidationError` → MCP tool error `{error, field, message}`; other runtime errors → structured envelope `{status, error, message, retryable, suggestion}` (dominant case: transient `BEGIN IMMEDIATE` write-lock timeout).
 - SIGTERM → `http.Server.Shutdown` (10 s grace) → `db.Close`.
 
 ## Consumer pattern (convention, not enforced)
@@ -124,15 +124,18 @@ Intended flow: only the Root agent writes to `droids-mem` — sub-agents get no 
 
 ## Reference docs
 
-Architecture decisions live in `docs/adr/` — read the relevant ADR before
-changing a design assumption; that directory is the index, not this file.
-Historical `(ADR-00XX)` parentheticals below `0020` in code comments annotate
-real decisions whose files were removed; their rationale now lives inline here
-and in code.
+This file is the design reference that ships with the repo — the rationale for
+every locked decision is stated inline above, not deferred to another document.
 
-- `future.todo` — deferred / post-V1 ideas and shipping-audit backlog.
-- `CONTEXT.md` — domain language and term aliases (gitignored, local only).
-- `files/shared-context-sync-PRD.md` — shared-pool git-transport spec.
+Some code comments still carry `(ADR-00XX)` parentheticals. Those annotate real
+decisions, but the ADR files are **not in the repo** (`/docs/` is gitignored, so
+they exist only on a maintainer's machine). Treat such a citation as a bare
+marker that a decision was deliberate — never as something to go read, and never
+as grounds to assume the doc says more than the surrounding code and this file
+already say. Do not add new ADR citations to tracked files.
+
+The same applies to `future.todo`, `CONTEXT.md`, and `files/` — all local only,
+none tracked.
 
 ## Engineering practices
 
@@ -154,4 +157,4 @@ and in code.
   Scanner aborts the whole stream via `sc.Err()` on any line over its 64KB
   token cap, which a crafted/oversized line can trigger to defeat exactly that
   per-line resilience guarantee; Reader grows to any line length so a bad line
-  stays a per-line failure. (Learned building `import`, ADR-0028.)
+  stays a per-line failure. (Learned building `import`.)
