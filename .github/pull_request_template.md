@@ -4,4 +4,4 @@
 - [ ] **Tests**: added/updated for changed behavior; `go test -race -shuffle=on ./...` passes
 - [ ] **Lint**: `golangci-lint run --timeout 5m` is clean
 - [ ] **Dependencies**: go.mod/go.sum changes verified with `go mod verify`
-- [ ] **Commit**: conventional commits, no AI attribution
+- [ ] **Commit**: conventional commits, no AI attribution; AI-assisted code is fine when an engineer owns and reviews it
