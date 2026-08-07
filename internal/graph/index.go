@@ -256,17 +256,21 @@ func callEdges(pkgs []*packages.Package, byPos map[string]*symRow) (map[[2]int64
 
 	edges := map[[2]int64]bool{}
 	err := callgraph.GraphVisitEdges(cg, func(e *callgraph.Edge) error {
-		caller, ok := resolve(e.Caller.Func)
-		if !ok {
+		// Drop edges whose RAW callee is a closure. CHA resolves a dynamic
+		// func()-typed call (defer cancel()) to every func()-shaped function in
+		// the program, so a function's own deferred closure collects in-edges
+		// from unrelated code, and resolve()'s Parent() collapse would bill them
+		// to the enclosing declaration (issue #69). The check must run BEFORE
+		// resolve(), which makes a closure indistinguishable from its enclosing
+		// decl. A closure that escapes and is genuinely invoked elsewhere loses
+		// that in-edge too — accepted, since crediting the call to the enclosing
+		// declaration was never correct either. Caller-side collapse is left
+		// untouched: a call made FROM inside a closure still counts.
+		if e.Callee.Func.Parent() != nil {
 			return nil
 		}
-		// An edge INTO a closure is funcsBySig noise by construction: only the
-		// enclosing function can statically reach a closure, so every other
-		// in-edge arrives via signature-based dynamic dispatch (issue #69).
-		// The check runs on the RAW function before resolve()'s Parent()
-		// collapse, which would make a closure indistinguishable from a direct
-		// call to its enclosing declaration. Caller-side collapse is untouched.
-		if e.Callee.Func.Parent() != nil {
+		caller, ok := resolve(e.Caller.Func)
+		if !ok {
 			return nil
 		}
 		callee, ok := resolve(e.Callee.Func)

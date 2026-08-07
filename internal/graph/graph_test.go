@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -399,12 +400,14 @@ func TestInterfaceFanOut(t *testing.T) {
 	}
 }
 
-// TestClosureCalleeGhost pins the closure-callee edge projection fix (issue
-// #69): CHA's funcsBySig resolves dynamic func()-typed calls (Noise's
-// defer cancel()) to every func()-shaped function in the program — including
-// the target's own deferred closure (Target$1) — and resolve()'s Parent()
-// collapse would attribute those edges to Target. The guard drops edges whose
-// RAW callee is a closure, so the caller set is exactly the real call site.
+// TestClosureCalleeGhost pins both halves of the closure edge projection
+// (issue #69). Callee side: CHA's funcsBySig resolves dynamic func()-typed
+// calls (Noise's defer cancel()) to every func()-shaped function in the
+// program — including Target's own deferred closure (Target$1) — and
+// resolve()'s Parent() collapse would turn that into a Noise → Target ghost;
+// the guard drops edges whose RAW callee is a closure. Caller side is
+// deliberately untouched: ClosureCaller reaches Target only from inside a
+// closure and must survive as a real caller.
 func TestClosureCalleeGhost(t *testing.T) {
 	m, repo := testManagerAt(t, "testdata/closures")
 	ctx := context.Background()
@@ -413,24 +416,20 @@ func TestClosureCalleeGhost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Symbol Target: %v", err)
 	}
-	got := map[string]bool{}
+	got := make([]string, 0, len(resp.Callers))
 	for _, n := range resp.Callers {
-		got[n.QName] = true
+		got = append(got, n.QName)
 	}
-	want := map[string]bool{"closures.Caller": true}
-	for qn := range want {
-		if !got[qn] {
-			t.Errorf("Target missing caller %s; got %v", qn, got)
-		}
+	slices.Sort(got)
+	want := []string{"closures.Caller", "closures.ClosureCaller"}
+	if !slices.Equal(got, want) {
+		t.Errorf("Target callers = %v, want exactly %v (closures.Noise is a funcsBySig ghost and must be dropped; closures.ClosureCaller reaches Target through a closure and must survive)", got, want)
 	}
-	if len(got) != len(want) {
-		t.Errorf("Target callers = %v, want exactly %v (closure ghost must be dropped)", got, want)
+	if resp.TransitiveCallers == nil {
+		t.Fatalf("Target transitive_callers = nil, want 2 (up-closure of the two real call sites)")
 	}
-	if got["closures.Noise"] {
-		t.Errorf("Target callers include ghost closures.Noise: %v", got)
-	}
-	if resp.TransitiveCallers == nil || *resp.TransitiveCallers != 1 {
-		t.Errorf("Target transitive_callers = %v, want 1 (up-closure of the single real caller)", resp.TransitiveCallers)
+	if *resp.TransitiveCallers != 2 {
+		t.Errorf("Target transitive_callers = %d, want 2 (up-closure of the two real call sites)", *resp.TransitiveCallers)
 	}
 }
 
