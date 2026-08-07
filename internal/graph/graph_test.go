@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -396,6 +397,39 @@ func TestInterfaceFanOut(t *testing.T) {
 	}
 	if resp.TransitiveCallers == nil || *resp.TransitiveCallers != 3 {
 		t.Errorf("MockStore.Save transitive_callers = %v, want 3", resp.TransitiveCallers)
+	}
+}
+
+// TestClosureCalleeGhost pins both halves of the closure edge projection
+// (issue #69). Callee side: CHA's funcsBySig resolves dynamic func()-typed
+// calls (Noise's defer cancel()) to every func()-shaped function in the
+// program — including Target's own deferred closure (Target$1) — and
+// resolve()'s Parent() collapse would turn that into a Noise → Target ghost;
+// the guard drops edges whose RAW callee is a closure. Caller side is
+// deliberately untouched: ClosureCaller reaches Target only from inside a
+// closure and must survive as a real caller.
+func TestClosureCalleeGhost(t *testing.T) {
+	m, repo := testManagerAt(t, "testdata/closures")
+	ctx := context.Background()
+
+	resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "closures.Target", Direction: "up"})
+	if err != nil {
+		t.Fatalf("Symbol Target: %v", err)
+	}
+	got := make([]string, 0, len(resp.Callers))
+	for _, n := range resp.Callers {
+		got = append(got, n.QName)
+	}
+	slices.Sort(got)
+	want := []string{"closures.Caller", "closures.ClosureCaller"}
+	if !slices.Equal(got, want) {
+		t.Errorf("Target callers = %v, want exactly %v (closures.Noise is a funcsBySig ghost and must be dropped; closures.ClosureCaller reaches Target through a closure and must survive)", got, want)
+	}
+	if resp.TransitiveCallers == nil {
+		t.Fatalf("Target transitive_callers = nil, want 2 (up-closure of the two real call sites)")
+	}
+	if *resp.TransitiveCallers != 2 {
+		t.Errorf("Target transitive_callers = %d, want 2 (up-closure of the two real call sites)", *resp.TransitiveCallers)
 	}
 }
 
