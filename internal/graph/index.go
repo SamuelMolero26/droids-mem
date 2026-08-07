@@ -260,6 +260,15 @@ func callEdges(pkgs []*packages.Package, byPos map[string]*symRow) (map[[2]int64
 		if !ok {
 			return nil
 		}
+		// An edge INTO a closure is funcsBySig noise by construction: only the
+		// enclosing function can statically reach a closure, so every other
+		// in-edge arrives via signature-based dynamic dispatch (issue #69).
+		// The check runs on the RAW function before resolve()'s Parent()
+		// collapse, which would make a closure indistinguishable from a direct
+		// call to its enclosing declaration. Caller-side collapse is untouched.
+		if e.Callee.Func.Parent() != nil {
+			return nil
+		}
 		callee, ok := resolve(e.Callee.Func)
 		if !ok || caller == callee {
 			return nil
