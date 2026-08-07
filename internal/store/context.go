@@ -202,7 +202,7 @@ func fetchLastSessionConn(ctx context.Context, conn *sql.Conn, taskType string) 
 		       expand_count, COALESCE(last_expanded_at, 0), review_after, pinned
 		FROM memories
 		WHERE task_type = ? AND kind = 'session_summary'
-		ORDER BY created_at DESC
+		ORDER BY created_at DESC, id DESC
 		LIMIT 1
 	`, taskType).Scan(&m.ID, &m.Kind, &m.Title, &m.Learned, &m.CreatedAt, &m.ExpandCount, &m.LastExpandedAt, &reviewAfter, &m.Pinned)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -235,7 +235,7 @@ func fetchUserRulesConn(ctx context.Context, conn *sql.Conn, taskType string, fu
 		       expand_count, COALESCE(last_expanded_at, 0), review_after, pinned
 		FROM memories
 		WHERE task_type = ? AND kind = 'user_rule'
-		ORDER BY created_at DESC
+		ORDER BY created_at DESC, id DESC
 	`, taskType)
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("fetch user rules: %w", err)

@@ -32,12 +32,17 @@ type TaskTypeCount struct {
 
 // ListTaskTypes returns every task_type in the corpus, its memory count, and
 // the title of its newest session_summary (empty string if none exist).
+//
+// `id DESC` is the same-second tiebreak (issue #58) — without it a same-second
+// tie group resolves in index scan order (oldest-first) and the census can
+// show a stale title for a task_type with several summaries saved in one
+// second.
 func (s *Store) ListTaskTypes(ctx context.Context) ([]TaskTypeCount, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT m.task_type, COUNT(*),
 		       COALESCE((SELECT title FROM memories
 		                  WHERE task_type = m.task_type AND kind = 'session_summary'
-		                  ORDER BY created_at DESC LIMIT 1), '')
+		                  ORDER BY created_at DESC, id DESC LIMIT 1), '')
 		FROM memories m
 		GROUP BY m.task_type
 		ORDER BY m.task_type
