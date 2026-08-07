@@ -342,10 +342,32 @@ func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, func()
 		return conn, release, fresh, nil
 	}
 
-	// First build: sync (no previous graph to serve stale)
+	// First build: the caller waits, because there is no prior graph to serve
+	// stale. Who waits and what the build runs on are separate concerns:
+	//
+	//   - the build runs on WithoutCancel, so a caller that goes away mid-index
+	//     (client disconnect, agent cancel, WaitBuild timeout) does not discard
+	//     it. Abandoning it wrote nothing, so the next query restarted from zero
+	//     and a repo whose clients kept disconnecting could never finish indexing.
+	//   - the caller's wait is bounded by its own ctx, so a deadline still means
+	//     something — WaitBuild's timeout in particular.
+	//
+	// On abandonment the build keeps repoLock until it lands, so the next caller
+	// blocks and then finds a finished graph rather than starting a second build.
 	if conn == nil {
 		release()
-		buildErr := buildIndex(ctx, repo, path, current)
+		done := make(chan error, 1) // buffered: the build never blocks on a gone caller
+		go func() { done <- buildIndex(context.WithoutCancel(ctx), repo, path, current) }()
+
+		var buildErr error
+		select {
+		case buildErr = <-done:
+		case <-ctx.Done():
+			// Hand lock ownership to the build. sync.Mutex permits unlocking
+			// from a different goroutine than the one that locked it.
+			go func() { <-done; lock.Unlock() }()
+			return nil, noopRelease, Freshness{}, ctx.Err()
+		}
 		if buildErr != nil {
 			lock.Unlock()
 			return nil, noopRelease, Freshness{}, fmt.Errorf("index %s: %w", repo, buildErr)

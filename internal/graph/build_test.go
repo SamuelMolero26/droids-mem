@@ -491,6 +491,45 @@ func itoa(n int64) string {
 	return string(b)
 }
 
+// TestEnsureFresh_ColdBuildSurvivesCallerCancel pins D6: a cold build used to
+// run on the caller's context, so a client that disconnected mid-index killed
+// it and discarded every second of work — the next query started from zero.
+// The build must finish and publish regardless of the caller going away.
+func TestEnsureFresh_ColdBuildSurvivesCallerCancel(t *testing.T) {
+	repo := copyFixture(t)
+	m := managerFor(t)
+	canon, err := canonicalRepo(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Caller is already gone before the build starts — the harshest version of
+	// a disconnect, and deterministic.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// The caller is told its own context died. That part is correct.
+	_, release, _, err := m.ensureFresh(ctx, repo)
+	release()
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled caller should get its own ctx error, got %v", err)
+	}
+
+	// ...but the build must survive it. The next query blocks on the repo lock
+	// the abandoned build still holds, then finds a finished graph — it must not
+	// start over, and it must not come back stale.
+	resp, err := m.Symbol(context.Background(), SymbolRequest{Repo: repo, Symbol: "Announce"})
+	if err != nil {
+		t.Fatalf("abandoned cold build discarded its work: %v", err)
+	}
+	if resp.Freshness.Stale {
+		t.Errorf("expected a fresh graph from the surviving build, got %+v", resp.Freshness)
+	}
+	if _, err := os.Stat(m.dbPath(canon)); err != nil {
+		t.Fatalf("no graph published: %v", err)
+	}
+}
+
 // TestWaitBuild_BadRepoPath keeps the error path honest: a nonexistent repo is
 // an error, not a Completed:false response.
 func TestWaitBuild_BadRepoPath(t *testing.T) {
