@@ -155,18 +155,18 @@ type Model struct {
 
 	// Graph tab (ADR-0020): optional code-graph browser. graphQ is nil when no
 	// graph manager was passed — ctrl+g is silently a no-op.
-	graphQ    GraphQuerier
-	graphIn   textinput.Model
-	graphOut  viewport.Model
-	graphRepo string // repo root passed at construction; "" means use graphQ's default
+	graphQ   GraphQuerier
+	graphIn  textinput.Model
+	graphOut viewport.Model
 }
 
 type pushFunc func(ctx context.Context, repo string, s memStore, n int) error
 type pullFunc func(ctx context.Context, repo string, s memStore) (store.ImportResult, error)
 
 // New builds an inspector model over the given store. Pass an optional
-// GraphQuerier and repo root to enable the graph tab (ctrl+g).
-func New(s memStore, graphQ GraphQuerier, repo string) Model {
+// GraphQuerier to enable the graph tab (ctrl+g); the querier carries its own
+// repo root, so the model never needs one.
+func New(s memStore, graphQ GraphQuerier) Model {
 	ti := textinput.New()
 	ti.Placeholder = "search memories… (≥3 chars)"
 	ti.Prompt = "/ "
@@ -214,7 +214,6 @@ func New(s memStore, graphQ GraphQuerier, repo string) Model {
 	if graphQ != nil {
 		m.graphQ = graphQ
 		m.graphIn = gi
-		m.graphRepo = repo
 		m.graphOut = viewport.New(0, 0)
 	}
 	return m
@@ -519,36 +518,37 @@ func (m Model) handleGraphKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // get graph_symbol. On error the message contains the error text.
 func (m Model) graphQueryCmd(q string) tea.Cmd {
 	g := m.graphQ
-	repo := m.graphRepo
 	return func() tea.Msg {
 		// Bound the query so a slow/hung graph rebuild can't block this
 		// goroutine forever; the adapter propagates ctx to graph.Manager.
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		// Heuristic: if the query contains "/" or looks dotted, try symbol first.
-		// Otherwise start with package.
-		hasSlash := strings.Contains(q, "/")
-		hasDot := strings.Contains(q, ".")
-
-		if hasSlash || !hasDot {
-			// Try as a package path first.
-			out, err := g.Package(ctx, repo, q)
+		// Only a "/" reliably marks a package path; everything else is far
+		// likelier to be a symbol. Trying Package first for a bare name like
+		// "Announce" cost two round trips (and two staleness checks) on the
+		// most common input, so the fallback order is symbol-first now.
+		if strings.Contains(q, "/") {
+			out, err := g.Package(ctx, q)
 			if err == nil {
 				return graphMsg{content: out}
 			}
-			// Package failed — try as a symbol name (e.g. "Store.Save").
-			out, err = g.Symbol(ctx, repo, q)
+			// Not a package — a slashed name can still be a qualified symbol.
+			out, err = g.Symbol(ctx, q)
 			if err != nil {
 				return graphMsg{err: err}
 			}
 			return graphMsg{content: out}
 		}
-		// Looks like a symbol name — try symbol first.
-		out, err := g.Symbol(ctx, repo, q)
-		if err != nil {
-			return graphMsg{err: err}
+		out, err := g.Symbol(ctx, q)
+		if err == nil {
+			return graphMsg{content: out}
 		}
-		return graphMsg{content: out}
+		// Not a symbol — a bare name can still be a top-level package.
+		pkgOut, pkgErr := g.Package(ctx, q)
+		if pkgErr != nil {
+			return graphMsg{err: err} // report the symbol error, the likelier intent
+		}
+		return graphMsg{content: pkgOut}
 	}
 }
 
