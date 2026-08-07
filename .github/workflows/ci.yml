@@ -130,8 +130,10 @@ jobs:
         with:
           args: -no-fail -fmt sarif -out gosec-results.sarif ./...
 
+      # Skipped on fork PRs: security-events is downgraded to read there, so the
+      # upload can only fail and redden an otherwise-green external PR.
       - name: Upload gosec results
-        if: always()
+        if: always() && github.event.pull_request.head.repo.fork != true
         uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
         with:
           sarif_file: gosec-results.sarif

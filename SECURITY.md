@@ -22,7 +22,7 @@ the report.
 - MCP bridge authentication: token file permissions (0600), loopback-only
   binding by default, bearer token verification
 - Scrub engine (detector spec, entropy gating)
-- Shared-pool git transport (see `files/shared-context-sync-PRD.md`)
+- Shared-pool git transport
 
 ## Policy
 

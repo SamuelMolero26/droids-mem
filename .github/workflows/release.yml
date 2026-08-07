@@ -7,11 +7,11 @@ on:
   push:
     tags:
       - "v*.*.*"
+  # Dispatch from the tag ref itself (Actions UI → "Use workflow from" → the tag).
+  # No tag input: `Validate tag` requires the checked-out tree to BE the tag, so
+  # an input could only ever restate GITHUB_REF — and it was the one
+  # untrusted string in this workflow.
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag to release (e.g. v1.0.0)"
-        required: true
 
 permissions:
   contents: read
@@ -54,15 +54,7 @@ jobs:
 
       - name: Resolve version
         id: version
-        env:
-          RAW_TAG: ${{ github.event.inputs.tag }}
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="$RAW_TAG"
-          else
-            TAG="${GITHUB_REF#refs/tags/}"
-          fi
-          printf 'tag<<EOF\n%s\nEOF\n' "$TAG" >> "$GITHUB_OUTPUT"
+        run: echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
 
       - name: Validate tag
         env:
@@ -146,15 +138,7 @@ jobs:
 
       - name: Resolve version
         id: version
-        env:
-          RAW_TAG: ${{ github.event.inputs.tag }}
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="$RAW_TAG"
-          else
-            TAG="${GITHUB_REF#refs/tags/}"
-          fi
-          printf 'tag<<EOF\n%s\nEOF\n' "$TAG" >> "$GITHUB_OUTPUT"
+        run: echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
 
       - name: Validate tag
         env:
