@@ -99,11 +99,52 @@ type stampEntry struct {
 }
 
 // buildState tracks one in-flight async rebuild for a repo.
+//
+// done is closed exactly once, by whoever retires the state: buildAsync when
+// its own build finishes, or ensureFresh when it supersedes the build. A
+// retired state is always removed from Manager.builds first, so the two paths
+// can never both close the same channel.
 type buildState struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	stamp  string        // the stamp value this build targets
-	done   chan struct{} // closed when build finishes (success or failure)
+	done   chan struct{} // closed when build finishes, fails, or is superseded
+}
+
+// connEntry is a refcounted handle on one graph.db. A rebuild replaces the file
+// by rename and then retires the old handle, but a query that already took the
+// handle may still be running several statements against it — Symbol alone runs
+// half a dozen. Closing it out from under that caller surfaced as
+// "sql: database is closed" mid-response, so retirement is deferred until the
+// last holder releases.
+type connEntry struct {
+	db     *sql.DB
+	refs   int
+	dead   bool // retired from the map; close once refs drops to zero
+	closed bool
+}
+
+// retire marks e dead and closes it if nobody holds it. Caller holds Manager.mu.
+func (e *connEntry) retire() {
+	e.dead = true
+	e.maybeClose()
+}
+
+// release drops one reference. Caller must NOT hold Manager.mu.
+func (m *Manager) release(e *connEntry) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e.refs--
+	e.maybeClose()
+}
+
+// maybeClose closes the handle once it is retired and unreferenced. Caller
+// holds Manager.mu.
+func (e *connEntry) maybeClose() {
+	if e.dead && e.refs <= 0 && !e.closed {
+		e.closed = true
+		_ = e.db.Close()
+	}
 }
 
 // Manager routes queries to per-repo graph databases, rebuilding a repo's
@@ -113,7 +154,7 @@ type Manager struct {
 
 	mu         sync.Mutex
 	locks      map[string]*sync.Mutex
-	conns      map[string]*sql.DB     // open handle per repo db
+	conns      map[string]*connEntry  // refcounted handle per repo db
 	stampCache map[string]*stampEntry // key: canonical repo path
 
 	buildsMu sync.Mutex
@@ -121,8 +162,17 @@ type Manager struct {
 
 	// lastBuildErrors holds the most recent build error per repo so the
 	// warm-serve path can surface it via Freshness.IndexError. Protected by
-	// buildsMu. Cleared when a new build starts.
+	// buildsMu. A successful build deletes the entry; a failing one overwrites
+	// it. It is deliberately NOT cleared when a build starts: an agent querying
+	// mid-rebuild deserves to know why the graph went stale in the first place.
 	lastBuildErrors map[string]string
+
+	// failedStamps records, per repo, the stamp whose build failed. While the
+	// working tree still hashes to that stamp, rebuilding is pointless — it
+	// would fail identically — so ensureFresh serves stale without relaunching.
+	// Any edit moves the stamp and lifts the suppression on the next query.
+	// Protected by buildsMu.
+	failedStamps map[string]string
 }
 
 // NewManager creates a Manager storing graphs under base.
@@ -130,10 +180,11 @@ func NewManager(base string) *Manager {
 	return &Manager{
 		base:            base,
 		locks:           make(map[string]*sync.Mutex),
-		conns:           make(map[string]*sql.DB),
+		conns:           make(map[string]*connEntry),
 		stampCache:      make(map[string]*stampEntry),
 		builds:          make(map[string]*buildState),
 		lastBuildErrors: make(map[string]string),
+		failedStamps:    make(map[string]string),
 	}
 }
 
@@ -141,10 +192,10 @@ func NewManager(base string) *Manager {
 // rebuilds. Build goroutines detect the cancelled context and exit.
 func (m *Manager) Close() {
 	m.mu.Lock()
-	for _, c := range m.conns {
-		_ = c.Close()
+	for _, e := range m.conns {
+		e.retire() // in-flight queries close theirs on release
 	}
-	m.conns = make(map[string]*sql.DB)
+	m.conns = make(map[string]*connEntry)
 	m.mu.Unlock()
 
 	m.buildsMu.Lock()
@@ -170,8 +221,9 @@ func (m *Manager) buildAsync(ctx context.Context, repo, path, stamp string) {
 
 	bs, ok := m.builds[repo]
 	if !ok || bs.stamp != stamp {
-		// Superseded by a newer build — discard (ensureFresh already cancelled
-		// the old context, so the ctx here is already dead)
+		// Superseded by a newer build — discard. ensureFresh already cancelled
+		// this build's context AND closed its done channel when it retired the
+		// state, so there is nothing left to clean up here.
 		return
 	}
 	delete(m.builds, repo)
@@ -180,11 +232,15 @@ func (m *Manager) buildAsync(ctx context.Context, repo, path, stamp string) {
 
 	if buildErr != nil {
 		m.lastBuildErrors[repo] = buildErr.Error()
+		// Remember which source failed so ensureFresh stops relaunching an
+		// identical doomed build on every subsequent query.
+		m.failedStamps[repo] = stamp
 		return // failed — old graph stays in place as stale
 	}
-	// Success: clear any prior error and close the old connection so the next
+	// Success: clear any prior error and retire the old connection so the next
 	// open() picks up the new .db file
 	delete(m.lastBuildErrors, repo)
+	delete(m.failedStamps, repo)
 	m.closeConn(path)
 }
 
@@ -246,19 +302,29 @@ func (m *Manager) dbPath(repo string) string {
 }
 
 // ensureFresh returns an open handle on the repo's graph db, rebuilding it
-// when the working tree changed since the stored stamp.
+// when the working tree changed since the stored stamp. The returned release
+// func must be called when the caller is done with the handle — it is always
+// non-nil, even when conn is nil.
 //
-// First build (no graph exists yet): synchronous buildIndex. Error returns
-// directly — there is no prior graph to fall back to.
+// First build (no graph exists yet): synchronous buildIndex, using the caller's
+// ctx — the caller is waiting on it, so the caller's deadline governs. Error
+// returns directly; there is no prior graph to fall back to. An existing but
+// unopenable graph.db lands here too (open reports conn==nil), which silently
+// self-heals a corrupt file by rebuilding it.
 //
-// Warm-serve (stale graph exists): the rebuild launches asynchronously and the
-// caller gets the stale graph back with Freshness.{Stale,Rebuilding} set. The
-// next query either finds the fresh graph or continues warm-serving. A caller
-// that wants to wait for the async build to finish can call WaitBuild.
-func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, Freshness, error) {
+// Warm-serve (stale graph exists): the rebuild launches asynchronously on a
+// background context — it outlives the request that noticed the staleness — and
+// the caller gets the stale graph back with Freshness.{Stale,Rebuilding} set.
+// The next query either finds the fresh graph or continues warm-serving. A
+// caller that wants to wait for the async build can call WaitBuild.
+//
+// A stamp whose build already failed is served stale WITHOUT relaunching: the
+// same source would fail the same way, and a broken tree is exactly when an
+// agent queries most.
+func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, func(), Freshness, error) {
 	repo, err := canonicalRepo(repo)
 	if err != nil {
-		return nil, Freshness{}, err
+		return nil, noopRelease, Freshness{}, err
 	}
 	lock := m.repoLock(repo)
 	lock.Lock()
@@ -266,31 +332,32 @@ func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, Freshn
 	current, err := m.cachedStamp(repo)
 	if err != nil {
 		lock.Unlock()
-		return nil, Freshness{}, err
+		return nil, noopRelease, Freshness{}, err
 	}
 	path := m.dbPath(repo)
 
-	conn, fresh, err := m.open(path)
+	conn, release, fresh, err := m.open(path)
 	if err == nil && fresh.Stamp == current {
 		lock.Unlock()
-		return conn, fresh, nil
+		return conn, release, fresh, nil
 	}
 
 	// First build: sync (no previous graph to serve stale)
 	if conn == nil {
+		release()
 		buildErr := buildIndex(ctx, repo, path, current)
 		if buildErr != nil {
 			lock.Unlock()
-			return nil, Freshness{}, fmt.Errorf("index %s: %w", repo, buildErr)
+			return nil, noopRelease, Freshness{}, fmt.Errorf("index %s: %w", repo, buildErr)
 		}
 		m.closeConn(path)
-		conn, fresh, err = m.open(path)
+		conn, release, fresh, err = m.open(path)
 		if err != nil {
 			lock.Unlock()
-			return nil, Freshness{}, err
+			return nil, noopRelease, Freshness{}, err
 		}
 		lock.Unlock()
-		return conn, fresh, nil
+		return conn, release, fresh, nil
 	}
 
 	// Warm-serve: graph exists but stamp mismatched
@@ -303,16 +370,29 @@ func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, Freshn
 		m.buildsMu.Unlock()
 		fresh.Stale = true
 		fresh.Rebuilding = true
-		if lastErr != "" {
-			fresh.IndexError = lastErr
-		}
+		fresh.IndexError = lastErr
 		lock.Unlock()
-		return conn, fresh, nil
+		return conn, release, fresh, nil
 	}
 	if building {
-		// Stamp changed — cancel the in-flight build, it's already stale
+		// Stamp changed — the in-flight build targets dead source. Cancel it,
+		// drop it, and close its done channel: a WaitBuild caller blocked on
+		// this state must not wait out its full timeout for a build whose
+		// result is already discarded. This runs before the failed-stamp check
+		// below so a suppressed rebuild still retires the doomed build.
 		bs.cancel()
 		delete(m.builds, repo)
+		close(bs.done)
+	}
+	if m.failedStamps[repo] == current {
+		// This exact source already failed to build. Serve stale with the
+		// reason and launch nothing — retrying burns a full go/packages load
+		// per query for a guaranteed-identical failure.
+		m.buildsMu.Unlock()
+		fresh.Stale = true
+		fresh.IndexError = lastErr
+		lock.Unlock()
+		return conn, release, fresh, nil
 	}
 
 	// Launch new async build with background context
@@ -335,62 +415,111 @@ func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, Freshn
 
 	fresh.Stale = true
 	fresh.Rebuilding = true
-	return conn, fresh, nil
+	return conn, release, fresh, nil
 }
 
-// WaitBuild blocks until any active async build for repo finishes,
-// or until timeout. Returns whether the build completed (false = timeout
-// or no build was in progress) and whether it succeeded.
+// WaitBuild brings repo's graph up to date and blocks until that work
+// finishes, or until timeout — whichever comes first. Completed reports whether
+// the graph settled within the timeout; Rebuilt whether it is now fresh.
+//
+// The timeout governs every path, including the synchronous cold build of a
+// never-indexed repo. An expired timeout is reported as Completed:false, not as
+// an error: the caller asked to wait a bounded time, and running out of it is a
+// normal answer. Errors are reserved for a repo that cannot be indexed at all.
+//
+// Waiting never launches a *second* build. A rebuild already in flight is
+// attached to; one that is needed but unstarted is triggered exactly once via
+// ensureFresh and then awaited.
 func (m *Manager) WaitBuild(ctx context.Context, repo string, timeout time.Duration) (*BuildWaitResponse, error) {
 	repo, err := canonicalRepo(repo)
 	if err != nil {
 		return nil, err
 	}
 
-	m.buildsMu.Lock()
-	bs, ok := m.builds[repo]
-	m.buildsMu.Unlock()
-
-	if !ok {
-		// No active build — check current freshness
-		conn, fresh, err := m.ensureFresh(ctx, repo)
-		if err != nil {
-			return nil, err
-		}
-		_ = conn // just need freshness
-		return &BuildWaitResponse{
-			Repo:      repo,
-			Completed: true,
-			Rebuilt:   !fresh.Stale,
-			Freshness: fresh,
-		}, nil
-	}
-
-	// Wait with timeout
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// Trigger whatever is needed: cold builds run synchronously here (bounded
+	// by waitCtx), stale ones launch an async rebuild we then wait on.
+	_, release, fresh, err := m.ensureFresh(waitCtx, repo)
+	if err != nil {
+		if waitCtx.Err() != nil && ctx.Err() == nil {
+			// The timeout expired mid-cold-build, not a real indexing failure.
+			return m.waitTimedOut(repo), nil
+		}
+		return nil, err
+	}
+	release()
+
+	if !fresh.Stale {
+		return &BuildWaitResponse{Repo: repo, Completed: true, Rebuilt: true, Freshness: fresh}, nil
+	}
+
+	m.buildsMu.Lock()
+	bs, ok := m.builds[repo]
+	m.buildsMu.Unlock()
+	if !ok {
+		// Stale with nothing in flight: the build already finished (or is
+		// suppressed as a known failure). Report what we have — do not
+		// relaunch, or a broken repo would rebuild on every wait.
+		return &BuildWaitResponse{Repo: repo, Completed: true, Rebuilt: false, Freshness: fresh}, nil
+	}
+
 	select {
 	case <-bs.done:
-		// Build finished — check result
-		conn, fresh, err := m.ensureFresh(waitCtx, repo)
-		if err != nil {
-			return nil, err
+		// Build finished (or was superseded). Read the resulting state without
+		// launching anything new.
+		settled, ferr := m.freshnessNow(repo)
+		if ferr != nil {
+			return nil, ferr
 		}
-		_ = conn
 		return &BuildWaitResponse{
 			Repo:      repo,
 			Completed: true,
-			Rebuilt:   !fresh.Stale,
-			Freshness: fresh,
+			Rebuilt:   !settled.Stale,
+			Freshness: settled,
 		}, nil
 	case <-waitCtx.Done():
-		return &BuildWaitResponse{
-			Repo:      repo,
-			Completed: false,
-			Freshness: Freshness{Stale: true, Rebuilding: true},
-		}, nil
+		return m.waitTimedOut(repo), nil
 	}
+}
+
+// waitTimedOut reports a timeout against the graph currently on disk, so the
+// caller still sees the real stamp of what is being served rather than a
+// fabricated empty Freshness.
+func (m *Manager) waitTimedOut(repo string) *BuildWaitResponse {
+	fresh, err := m.freshnessNow(repo)
+	if err != nil {
+		fresh = Freshness{}
+	}
+	fresh.Stale = true
+	fresh.Rebuilding = true
+	return &BuildWaitResponse{Repo: repo, Completed: false, Freshness: fresh}
+}
+
+// freshnessNow reports repo's current freshness without ever launching a build.
+// It is the read-only counterpart to ensureFresh, used by WaitBuild after a
+// build settles — calling ensureFresh there would start yet another rebuild
+// whenever the one we just awaited had failed.
+func (m *Manager) freshnessNow(repo string) (Freshness, error) {
+	current, err := m.cachedStamp(repo)
+	if err != nil {
+		return Freshness{}, err
+	}
+	_, release, fresh, err := m.open(m.dbPath(repo))
+	if err != nil {
+		return Freshness{}, err
+	}
+	defer release()
+
+	m.buildsMu.Lock()
+	fresh.IndexError = m.lastBuildErrors[repo]
+	_, building := m.builds[repo]
+	m.buildsMu.Unlock()
+
+	fresh.Stale = fresh.Stamp != current
+	fresh.Rebuilding = building
+	return fresh, nil
 }
 
 // BuildWaitResponse reports the outcome of a WaitBuild call.
@@ -401,39 +530,52 @@ type BuildWaitResponse struct {
 	Freshness Freshness `json:"freshness"`
 }
 
-// open returns the cached handle for path (opening it if needed) plus its
-// stored freshness meta. A missing db is (nil, zero, nil-error from cache
+// noopRelease is returned alongside a nil handle so every caller can
+// `defer release()` unconditionally.
+func noopRelease() {}
+
+// open returns the cached handle for path (opening it if needed), a release
+// func the caller must invoke when done with the handle, and the stored
+// freshness meta. A missing db is (nil, noop, zero, nil-error from cache
 // perspective): callers treat conn==nil as "no graph yet".
-func (m *Manager) open(path string) (*sql.DB, Freshness, error) {
+//
+// The returned handle is refcounted: a rebuild landing mid-query retires the
+// entry but cannot close it until this release runs.
+func (m *Manager) open(path string) (*sql.DB, func(), Freshness, error) {
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
-			return nil, Freshness{}, nil // absent db is not an error: "no graph yet"
+			return nil, noopRelease, Freshness{}, nil // absent db is not an error: "no graph yet"
 		}
-		return nil, Freshness{}, fmt.Errorf("stat graph db: %w", err)
+		return nil, noopRelease, Freshness{}, fmt.Errorf("stat graph db: %w", err)
 	}
 	m.mu.Lock()
-	conn, ok := m.conns[path]
-	m.mu.Unlock()
+	entry, ok := m.conns[path]
 	if !ok {
-		var err error
-		conn, err = sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)&_pragma=query_only(true)")
+		db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)&_pragma=query_only(true)")
 		if err != nil {
-			return nil, Freshness{}, fmt.Errorf("open graph db: %w", err)
+			m.mu.Unlock()
+			return nil, noopRelease, Freshness{}, fmt.Errorf("open graph db: %w", err)
 		}
-		m.mu.Lock()
-		m.conns[path] = conn
-		m.mu.Unlock()
+		entry = &connEntry{db: db}
+		m.conns[path] = entry
 	}
+	entry.refs++ // held until the returned release runs
+	m.mu.Unlock()
+
+	release := func() { m.release(entry) }
+
 	var fresh Freshness
-	rows, err := conn.Query(`SELECT key, value FROM meta WHERE key IN ('stamp','indexed_at')`)
+	rows, err := entry.db.Query(`SELECT key, value FROM meta WHERE key IN ('stamp','indexed_at')`)
 	if err != nil {
-		return nil, Freshness{}, fmt.Errorf("read graph meta: %w", err)
+		release()
+		return nil, noopRelease, Freshness{}, fmt.Errorf("read graph meta: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var k, v string
 		if err := rows.Scan(&k, &v); err != nil {
-			return nil, Freshness{}, err
+			release()
+			return nil, noopRelease, Freshness{}, err
 		}
 		switch k {
 		case "stamp":
@@ -442,14 +584,21 @@ func (m *Manager) open(path string) (*sql.DB, Freshness, error) {
 			fresh.IndexedAt = v
 		}
 	}
-	return conn, fresh, rows.Err()
+	if err := rows.Err(); err != nil {
+		release()
+		return nil, noopRelease, Freshness{}, err
+	}
+	return entry.db, release, fresh, nil
 }
 
+// closeConn retires the cached handle for path so the next open() picks up a
+// newly renamed graph.db. The underlying *sql.DB is closed here only if nobody
+// holds it; otherwise the last release closes it.
 func (m *Manager) closeConn(path string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if c, ok := m.conns[path]; ok {
-		_ = c.Close()
+	if e, ok := m.conns[path]; ok {
+		e.retire()
 		delete(m.conns, path)
 	}
 }
@@ -497,11 +646,17 @@ func (m *Manager) Index(ctx context.Context, repo string) (*IndexResponse, error
 	if err := buildIndex(ctx, repo, path, current); err != nil {
 		return nil, fmt.Errorf("index %s: %w", repo, err)
 	}
+	// A forced build that succeeded clears whatever the async path recorded.
+	m.buildsMu.Lock()
+	delete(m.lastBuildErrors, repo)
+	delete(m.failedStamps, repo)
+	m.buildsMu.Unlock()
 	m.closeConn(path)
-	conn, fresh, err := m.open(path)
+	conn, release, fresh, err := m.open(path)
 	if err != nil {
 		return nil, err
 	}
+	defer release()
 	resp := &IndexResponse{Repo: repo, Freshness: fresh}
 	if err := conn.QueryRow(`SELECT COUNT(*) FROM symbols`).Scan(&resp.Symbols); err != nil {
 		return nil, err
