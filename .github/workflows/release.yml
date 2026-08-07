@@ -1,5 +1,8 @@
 name: Release
 
+# Tag-triggered runs execute the workflow file as it exists AT the tagged
+# commit — a workflow fix must land before the tag is cut.
+
 on:
   push:
     tags:
@@ -20,6 +23,7 @@ jobs:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    if: github.repository == 'SamuelMolero26/droids-mem'
     strategy:
       fail-fast: false
       matrix:
@@ -34,10 +38,13 @@ jobs:
             goarch: arm64
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: stable
           cache: true
@@ -51,6 +58,18 @@ jobs:
           else
             echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Validate tag
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.version.outputs.tag }}"
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag must match vMAJOR.MINOR.PATCH"; exit 1; }
+          git fetch --tags --force origin
+          git rev-parse --verify "$TAG^{commit}" >/dev/null || exit 1
+          git fetch origin main
+          # only merged-to-main commits release
+          git merge-base --is-ancestor "$TAG" origin/main || { echo "tag $TAG is not an ancestor of origin/main"; exit 1; }
+          grep -q "^## \[${TAG#v}\]" CHANGELOG.md || { echo "CHANGELOG.md missing ## [${TAG#v}]"; exit 1; }
 
       - name: Build binary
         env:
@@ -75,13 +94,13 @@ jobs:
           echo "Binary size: $SIZE bytes (limit: $MAX)"
 
       - name: Attest build provenance (SLSA)
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@ef244123eb79f2f7a7e75d99086184180e6d0018 # v1.4.4
         with:
           subject-path: 'dist/droids-mem-${{ steps.version.outputs.tag }}-${{ matrix.goos }}-${{ matrix.goarch }}'
           subject-name: droids-mem-${{ matrix.goos }}-${{ matrix.goarch }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: droids-mem-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*
@@ -92,12 +111,17 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     timeout-minutes: 10
+    environment: release
+    if: github.repository == 'SamuelMolero26/droids-mem'
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           merge-multiple: true
@@ -110,6 +134,18 @@ jobs:
           else
             echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Validate tag
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.version.outputs.tag }}"
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag must match vMAJOR.MINOR.PATCH"; exit 1; }
+          git fetch --tags --force origin
+          git rev-parse --verify "$TAG^{commit}" >/dev/null || exit 1
+          git fetch origin main
+          # only merged-to-main commits release
+          git merge-base --is-ancestor "$TAG" origin/main || { echo "tag $TAG is not an ancestor of origin/main"; exit 1; }
+          grep -q "^## \[${TAG#v}\]" CHANGELOG.md || { echo "CHANGELOG.md missing ## [${TAG#v}]"; exit 1; }
 
       - name: Generate release notes
         id: notes
@@ -142,6 +178,10 @@ jobs:
           } > release-notes.md
           cat release-notes.md
 
+      - name: Verify SHA256 sidecars
+        run: |
+          cd dist && for f in *.sha256; do sha256sum -c "$f" >/dev/null || exit 1; done
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -168,7 +208,7 @@ jobs:
           LINUX_ARM64=$(sha linux-arm64)
           LINUX_AMD64=$(sha linux-amd64)
 
-          git clone "https://x-access-token:${TAP_TOKEN}@github.com/${TAP}.git" tap
+          git clone "https://github.com/${TAP}.git" tap
           mkdir -p tap/Formula
           cat > tap/Formula/droids-mem.rb <<EOF
           class DroidsMem < Formula
@@ -209,4 +249,5 @@ jobs:
 
           cd tap
           git add Formula/droids-mem.rb
-          git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" commit -m "droids-mem $VERSION" && git push
+          git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" commit -m "droids-mem $VERSION"
+          git push "https://x-access-token:${TAP_TOKEN}@github.com/${TAP}.git" HEAD:main
