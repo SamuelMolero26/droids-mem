@@ -32,6 +32,14 @@ CREATE TABLE IF NOT EXISTS memories (
     origin                TEXT    NOT NULL DEFAULT 'manual' CHECK(origin IN ('manual','auto')),
     review_after          INTEGER,
     pinned                INTEGER NOT NULL DEFAULT 0,
+    -- authored_at is when the lesson was WRITTEN; created_at is when it entered
+    -- THIS store. They are equal for a locally-authored row and diverge on
+    -- import, where ImportShared re-stamps created_at to the local import time
+    -- but carries the peer's authored_at forward. Pure provenance: it is never
+    -- an ORDER BY key and never drives review_after -- an old peer lesson must
+    -- not jump the newest-first queue, and there is no decay clock in this
+    -- change ("time-semantics-ordering-and-authored-at").
+    authored_at           INTEGER NOT NULL DEFAULT 0,
     CHECK(updated_at >= created_at)
 );
 
@@ -62,6 +70,7 @@ CREATE TABLE IF NOT EXISTS archived_memories (
     origin                TEXT    NOT NULL DEFAULT 'manual',
     review_after          INTEGER,
     pinned                INTEGER NOT NULL DEFAULT 0,
+    authored_at           INTEGER NOT NULL DEFAULT 0,
     archived_at           INTEGER NOT NULL
 );
 
