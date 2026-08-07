@@ -5,14 +5,14 @@ on:
   push:
     branches:
       - main
+      - develop
   workflow_dispatch:
 
 permissions:
   contents: read
-  security-events: write
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -23,19 +23,22 @@ jobs:
     defaults:
       run:
         working-directory: .
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         go:
-          - "1.25"
           - "1.26"
           - "stable"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ matrix.go }}
           cache: true
@@ -59,7 +62,7 @@ jobs:
 
       - name: Upload coverage
         if: matrix.go == 'stable'
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           files: ./coverage.out
           fail_ci_if_error: false
@@ -72,22 +75,26 @@ jobs:
     defaults:
       run:
         working-directory: .
+    permissions:
+      contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
           cache: true
           cache-dependency-path: go.sum
 
-      - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
-
       - name: Run golangci-lint
-        run: golangci-lint run --timeout 5m
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.12.2
+          args: --timeout 5m
 
   security:
     name: Security Scan
@@ -96,31 +103,59 @@ jobs:
     defaults:
       run:
         working-directory: .
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
           cache: true
           cache-dependency-path: go.sum
 
       - name: Run govulncheck
-        uses: golang/govulncheck-action@v1
+        uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1.1.0
 
+      # -no-fail is intentional: gosec findings are surfaced via SARIF in the
+      # security tab, while the lint job's golangci-lint (which also runs gosec)
+      # is the blocking gate that fails CI on real issues.
       - name: Run gosec
-        uses: securego/gosec@master
+        uses: securego/gosec@9e75c0576c9878035d4221392108d458abe10fc3 # v2.28.0
         with:
           args: -no-fail -fmt sarif -out gosec-results.sarif ./...
 
+      # Skipped on fork PRs: security-events is downgraded to read there, so the
+      # upload can only fail and redden an otherwise-green external PR.
       - name: Upload gosec results
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        if: always() && github.event.pull_request.head.repo.fork != true
+        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
         with:
           sarif_file: gosec-results.sarif
           category: gosec
+
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Review dependencies
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
 
   codeql:
     name: CodeQL Analysis
@@ -129,27 +164,32 @@ jobs:
     defaults:
       run:
         working-directory: .
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
         with:
           languages: go
           config-file: .github/codeql/codeql-config.yml
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
           cache: true
           cache-dependency-path: go.sum
 
       - name: Autobuild
-        uses: github/codeql-action/autobuild@v3
+        uses: github/codeql-action/autobuild@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
         with:
           category: /language:go
