@@ -19,6 +19,9 @@ import (
 //
 //	go test ./internal/store -run TestRecallBenchmark -v
 //	EVAL_WRITE_REPORT=1 go test ...   # rewrites eval/RESULTS.md
+//
+// Without EVAL_WRITE_REPORT the committed eval/RESULTS.md is asserted as a
+// golden, so ranking or corpus changes cannot land with a stale report.
 
 // benchCorpus is the fixed benchmark corpus. Clusters share vocabulary so a
 // query must rank its target above near-neighbours.
@@ -169,8 +172,8 @@ func TestRecallBenchmark(t *testing.T) {
 	md := renderBenchmark(rep, len(benchCorpus))
 	t.Log("\n" + md)
 
+	path := filepath.Join("..", "..", "eval", "RESULTS.md")
 	if os.Getenv("EVAL_WRITE_REPORT") != "" {
-		path := filepath.Join("..", "..", "eval", "RESULTS.md")
 		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 			t.Fatalf("mkdir eval: %v", err)
 		}
@@ -178,13 +181,32 @@ func TestRecallBenchmark(t *testing.T) {
 			t.Fatalf("write RESULTS.md: %v", err)
 		}
 		t.Logf("wrote %s", path)
+	} else {
+		// RESULTS.md is a committed artifact, so it silently rots: a change to
+		// ranking, the corpus, or the report shape leaves stale numbers in the
+		// repo that nobody notices until someone reads them as current. The
+		// render is deterministic on a fixed corpus, so treat the committed file
+		// as a golden — drift fails here, in the same run that caused it.
+		committed, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read RESULTS.md (regenerate with EVAL_WRITE_REPORT=1): %v", err)
+		}
+		if string(committed) != md {
+			t.Errorf("eval/RESULTS.md is stale — regenerate and commit it:\n"+
+				"\tEVAL_WRITE_REPORT=1 go test ./internal/store -run TestRecallBenchmark -count=1\n\n"+
+				"current run produced:\n%s", md)
+		}
 	}
 
 	// Regression floors — guard the marketed claim without asserting perfection.
-	// The honest weak spot (synonym_hard) is deliberately NOT floored high; these
-	// only catch a real collapse of the paraphrase capability.
-	assertFloor(t, "mem_search recall@5 overall", rep.MemSearch.RecallAt5, 0.75)
-	assertFloor(t, "mem_search MRR overall", rep.MemSearch.MRR, 0.65)
+	// These only catch a real collapse of the paraphrase capability.
+	assertFloor(t, "mem_search recall@5 overall", rep.MemSearch.RecallAt5, 0.95)
+	assertFloor(t, "mem_search MRR overall", rep.MemSearch.MRR, 0.85)
+	if tm := rep.ByType["synonym_hard"]; tm != nil {
+		// Weakest class by construction (zero surface overlap with the target).
+		// Floored only high enough to lock in the column-weighted BM25 gain.
+		assertFloor(t, "synonym_hard recall@5", tm.RecallAt5, 0.90)
+	}
 	if tm := rep.ByType["reorder"]; tm != nil {
 		assertFloor(t, "reorder recall@5", tm.RecallAt5, 0.95)
 	}
@@ -200,7 +222,15 @@ func assertFloor(t *testing.T, name string, got, floor float64) {
 	}
 }
 
-// renderBenchmark formats the report as markdown: data only.
+// renderBenchmark formats the report as markdown.
+//
+// Data plus definitions, never claims. 4ffe33d stripped this report back to
+// bare tables to get rid of editorializing ("the honest limit…", "proof we are
+// not cherry-picking") — that judgement stands and is not reversed here. But it
+// also removed the metric and column definitions, which left a reader who does
+// not already know the harness unable to say what `overlap 0.17` or an MRR of
+// 0.90 means. Definitions are documentation, not narrative: they describe how a
+// number was computed without asserting anything about whether it is good.
 func renderBenchmark(rep *store.EvalReport, corpusSize int) string {
 	order := []struct{ key, label string }{
 		{"keyword", "keyword"},
@@ -212,7 +242,31 @@ func renderBenchmark(rep *store.EvalReport, corpusSize int) string {
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Retrieval benchmark\n\n")
-	fmt.Fprintf(&b, "Corpus: %d memories, 7 clusters. Queries: %d.\n\n", corpusSize, rep.TotalPairs)
+	fmt.Fprintf(&b, "Measures whether droids-mem returns the *right* memory for a query "+
+		"phrased in words the author never wrote. Retrieval is lexical (SQLite FTS5 + "+
+		"porter stemming, no embeddings), so paraphrase is the hard case.\n\n")
+	fmt.Fprintf(&b, "Generated from `internal/store/recall_benchmark_test.go`. Regenerate with:\n\n")
+	fmt.Fprintf(&b, "```\nEVAL_WRITE_REPORT=1 go test ./internal/store -run TestRecallBenchmark -count=1\n```\n\n")
+
+	fmt.Fprintf(&b, "## Setup\n\n")
+	fmt.Fprintf(&b, "**Corpus** — %d memories in 7 topic clusters. Memories inside a cluster share "+
+		"vocabulary, so a query has to beat its near-neighbours, not just unrelated rows.\n\n", corpusSize)
+	fmt.Fprintf(&b, "**Queries** — %d, each hand-authored to name exactly one correct memory and "+
+		"worded independently of it.\n\n", rep.TotalPairs)
+
+	fmt.Fprintf(&b, "**Query classes** — how a query is related to its target:\n\n")
+	fmt.Fprintf(&b, "| class | relation to the target's wording |\n|---|---|\n")
+	fmt.Fprintf(&b, "| keyword | shares distinctive terms |\n")
+	fmt.Fprintf(&b, "| morphological | same terms, different inflection (exercises porter stemming) |\n")
+	fmt.Fprintf(&b, "| word-order | same terms, reordered |\n")
+	fmt.Fprintf(&b, "| reword | partly reworded; some terms survive |\n")
+	fmt.Fprintf(&b, "| synonym (zero overlap) | shares no terms at all — only meaning |\n\n")
+
+	fmt.Fprintf(&b, "**Metrics**:\n\n")
+	fmt.Fprintf(&b, "| metric | meaning |\n|---|---|\n")
+	fmt.Fprintf(&b, "| recall@1 | target came back first, ahead of every distractor |\n")
+	fmt.Fprintf(&b, "| recall@5 | target came back within the top 5 — `mem_search`'s default page |\n")
+	fmt.Fprintf(&b, "| MRR | mean reciprocal rank: 1.00 = always first, 0.50 = typically second |\n\n")
 
 	fmt.Fprintf(&b, "## mem_search\n\n")
 	fmt.Fprintf(&b, "| query class | n | recall@1 | recall@5 | MRR |\n")
@@ -229,19 +283,41 @@ func renderBenchmark(rep *store.EvalReport, corpusSize int) string {
 		rep.MemSearch.Scored, pct(rep.MemSearch.RecallAt1), pct(rep.MemSearch.RecallAt5), dec(rep.MemSearch.MRR))
 
 	fmt.Fprintf(&b, "## mem_context browse tier\n\n")
-	fmt.Fprintf(&b, "browse_hit_rate: %s (%d eligible queries)\n\n", pct(rep.MemContext.BrowseHitRate), rep.MemContext.EligiblePairs)
+	fmt.Fprintf(&b, "`mem_context` returns a bundle, not a ranked list. `browse_hit_rate` is the "+
+		"share of eligible pairs whose target appears anywhere in the bundle's browse tier.\n\n")
+	fmt.Fprintf(&b, "A pair is **eligible** when its target is structurally reachable there: a "+
+		"browse-tier kind (`error_resolution` or `task_pattern`) carrying a `task_type`. "+
+		"Pairs that can never appear are excluded rather than counted as failures.\n\n")
+	fmt.Fprintf(&b, "| call shape | hit rate | eligible pairs |\n|---|---|---|\n")
+	fmt.Fprintf(&b, "| with query | %s | %d |\n", pct(rep.MemContext.BrowseHitRate), rep.MemContext.EligiblePairs)
+	fmt.Fprintf(&b, "| no query (session-start default) | %s | %d |\n\n",
+		pct(rep.MemContext.BrowseHitRateNoQuery), rep.MemContext.EligiblePairs)
 
-	fmt.Fprintf(&b, "## misses (rank > 5)\n\n")
+	fmt.Fprintf(&b, "## Misses — target outside `mem_search`'s top 5\n\n")
 	misses := searchMisses(rep)
 	if len(misses) == 0 {
-		fmt.Fprintf(&b, "none\n")
+		fmt.Fprintf(&b, "None.\n")
 		return b.String()
 	}
+	fmt.Fprintf(&b, "- **rank** — position the target was returned at; `—` means it was not returned at all.\n")
+	fmt.Fprintf(&b, "- **overlap** — share of the query's words (>2 chars) that literally appear in the "+
+		"target's title, what, or learned text. 0.00 means the query and the memory have no words "+
+		"in common, so only meaning connects them.\n\n")
 	fmt.Fprintf(&b, "| rank | overlap | class | query | target |\n")
 	fmt.Fprintf(&b, "|---|---|---|---|---|\n")
+	// Label the class the same way the results table does; the raw fixture keys
+	// (synonym_hard, reorder) are internal names and mean nothing to a reader.
+	label := map[string]string{}
+	for _, o := range order {
+		label[o.key] = o.label
+	}
 	for _, m := range misses {
+		class := label[m.Type]
+		if class == "" {
+			class = m.Type
+		}
 		fmt.Fprintf(&b, "| %s | %.2f | %s | %s | %s |\n",
-			rankStr(m.SearchRank), m.QueryTargetOverlap, m.Type, m.Query, m.ExpectTitle)
+			rankStr(m.SearchRank), m.QueryTargetOverlap, class, m.Query, m.ExpectTitle)
 	}
 	return b.String()
 }

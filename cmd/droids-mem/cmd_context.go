@@ -57,7 +57,7 @@ deep-read any browse-tier item.`,
 	}
 
 	cmd.Flags().StringVar(&taskType, "task-type", "", "Task type to load context for (required)")
-	cmd.Flags().StringVar(&query, "query", "", "Optional FTS query for browse-tier ranking (defaults to task-type tokens)")
+	cmd.Flags().StringVar(&query, "query", "", "Optional FTS query for browse-tier ranking; absent or punctuation-only ranks the tier by recency instead")
 	cmd.Flags().StringVar(&mode, "mode", "orient", "Retrieval depth: orient | deep | refresh")
 
 	_ = cmd.MarkFlagRequired("task-type")

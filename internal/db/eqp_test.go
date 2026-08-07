@@ -7,11 +7,18 @@ import (
 )
 
 // TestEQP_HotQueriesUseCompositeIndex locks in the planner choice for the
-// three non-FTS hot queries that ORDER BY created_at DESC inside a
-// (task_type, kind) filter. The composite idx_memories_task_kind_created
-// must serve both filter + ordering, eliminating the temp B-tree sort.
+// newest-first-ordered hot queries. Each case mirrors a real production query
+// (a WHERE-scoped filter, ORDER BY created_at DESC, id DESC) and asserts that
+// the named composite index serves both the filter and the full ordering,
+// eliminating any temp B-tree sort.
 //
-// If a future schema change drops the composite or reorders its columns,
+// "USE TEMP B-TREE" (not the full "...FOR ORDER BY" string) is the substring
+// under test: when an index covers only a PREFIX of the ordering, SQLite
+// emits "USE TEMP B-TREE FOR LAST TERM OF ORDER BY", which a full-string
+// match against "USE TEMP B-TREE FOR ORDER BY" never catches — a false
+// negative that let issue #58's tie-group bug ship undetected.
+//
+// If a future schema change drops a composite index or reorders its columns,
 // these assertions fail loud.
 func TestEQP_HotQueriesUseCompositeIndex(t *testing.T) {
 	conn := newTestDB(t)
@@ -27,44 +34,67 @@ func TestEQP_HotQueriesUseCompositeIndex(t *testing.T) {
 	}
 
 	cases := []struct {
-		name  string
-		query string
-		args  []any
+		name      string
+		query     string
+		args      []any
+		wantIndex string
 	}{
 		{
 			name: "prune_session_summary",
 			query: `EXPLAIN QUERY PLAN
 				SELECT id FROM memories
 				WHERE task_type = ? AND kind = 'session_summary'
-				ORDER BY created_at DESC LIMIT ?`,
-			args: []any{"crm", 5},
+				ORDER BY created_at DESC, id DESC LIMIT ?`,
+			args:      []any{"crm", 5},
+			wantIndex: "idx_memories_task_kind_created",
 		},
 		{
 			name: "fetch_last_session",
 			query: `EXPLAIN QUERY PLAN
 				SELECT id FROM memories
 				WHERE task_type = ? AND kind = 'session_summary'
-				ORDER BY created_at DESC LIMIT 1`,
-			args: []any{"crm"},
+				ORDER BY created_at DESC, id DESC LIMIT 1`,
+			args:      []any{"crm"},
+			wantIndex: "idx_memories_task_kind_created",
 		},
 		{
 			name: "fetch_user_rules",
 			query: `EXPLAIN QUERY PLAN
 				SELECT id FROM memories
 				WHERE task_type = ? AND kind = 'user_rule'
-				ORDER BY created_at DESC`,
-			args: []any{"crm"},
+				ORDER BY created_at DESC, id DESC`,
+			args:      []any{"crm"},
+			wantIndex: "idx_memories_task_kind_created",
+		},
+		{
+			// prune_auto_summaries / recent_sessions read by origin.
+			name: "recent_sessions_by_origin",
+			query: `EXPLAIN QUERY PLAN
+				SELECT id FROM memories
+				WHERE origin = ?
+				ORDER BY created_at DESC, id DESC LIMIT ?`,
+			args:      []any{"auto", 10},
+			wantIndex: "idx_memories_origin_created",
+		},
+		{
+			// list's unfiltered recency read.
+			name: "list_unfiltered_recency",
+			query: `EXPLAIN QUERY PLAN
+				SELECT id FROM memories
+				ORDER BY created_at DESC, id DESC LIMIT ?`,
+			args:      []any{20},
+			wantIndex: "idx_memories_created_at",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			plan := explainPlan(t, conn, tc.query, tc.args...)
-			if !strings.Contains(plan, "idx_memories_task_kind_created") {
-				t.Errorf("plan does not use idx_memories_task_kind_created:\n%s", plan)
+			if !strings.Contains(plan, tc.wantIndex) {
+				t.Errorf("plan does not use %s:\n%s", tc.wantIndex, plan)
 			}
-			if strings.Contains(plan, "USE TEMP B-TREE FOR ORDER BY") {
-				t.Errorf("plan still sorts via temp B-tree (composite index not serving ORDER BY):\n%s", plan)
+			if strings.Contains(plan, "USE TEMP B-TREE") {
+				t.Errorf("plan still sorts via temp B-tree (index not fully serving ORDER BY):\n%s", plan)
 			}
 		})
 	}

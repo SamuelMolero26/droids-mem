@@ -176,7 +176,7 @@ func contextToolDef() mcp.Tool {
 		mcp.WithString("task_type", mcp.Required(),
 			mcp.Description("Workflow tag scoping the bundle.")),
 		mcp.WithString("query",
-			mcp.Description("Optional focus query for browse-tier ranking. Falls back to task_type tokens. Invalid with mode=refresh.")),
+			mcp.Description("Optional focus query for browse-tier ranking. Absent or punctuation-only ranks the tier by recency instead. Invalid with mode=refresh.")),
 		mcp.WithString("mode",
 			mcp.Description("Retrieval depth: orient (default — always tier + browse snippets), deep (always tier with all rules full + browse full bodies), refresh (always tier only, cheap mid-run re-anchor).")),
 		mcp.WithString("session_id",

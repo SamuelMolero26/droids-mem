@@ -1,7 +1,7 @@
 # Session memory (droids-mem) — compose guidance
 
 A block in your `CLAUDE.md` (global or project) is the model-judgment half of
-the intake gate (ADR-0016): the hooks guarantee *when* to consider saving; the
+the intake gate: the hooks guarantee *when* to consider saving; the
 block tells the model *whether* and *how* to compose.
 
 The canonical block lives at
