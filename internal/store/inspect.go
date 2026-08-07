@@ -97,7 +97,7 @@ func (s *Store) List(ctx context.Context, req ListRequest) (*ListResponse, error
 		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at,
 		       expand_count, COALESCE(last_expanded_at, 0), scope, review_after, pinned
 		FROM memories %s
-		ORDER BY created_at DESC
+		ORDER BY created_at DESC, id DESC
 		LIMIT ?
 	`, where)
 
@@ -156,7 +156,7 @@ func (s *Store) RecentSessions(ctx context.Context, req RecentSessionsRequest) (
 		       expand_count, COALESCE(last_expanded_at, 0), review_after, pinned
 		FROM memories
 		WHERE origin = 'auto'
-		ORDER BY created_at DESC
+		ORDER BY created_at DESC, id DESC
 		LIMIT ?
 	`, limit)
 	if err != nil {

@@ -109,6 +109,41 @@ func tableExists(t *testing.T, conn *sql.DB, name string) bool {
 	return count == 1
 }
 
+// indexDefs returns "name(col,col DESC,…)" per index. indexNames compares only
+// names, which a DROP+CREATE that keeps the name but changes the columns slips
+// straight past — the exact drift that would leave a migrated DB and a fresh DB
+// on different schemas at the same user_version. Compares pragma_index_xinfo
+// rather than sqlite_master.sql because the raw DDL text differs by whitespace
+// and IF NOT EXISTS between the schema and migration paths.
+func indexDefs(t *testing.T, conn *sql.DB) []string {
+	t.Helper()
+	rows, err := conn.Query(`
+		SELECT m.name, (
+			SELECT group_concat(x.name || CASE WHEN x.desc THEN ' DESC' ELSE '' END)
+			FROM pragma_index_xinfo(m.name) x WHERE x.key = 1
+		)
+		FROM sqlite_master m
+		WHERE m.type = 'index' AND m.name NOT LIKE 'sqlite_%'`)
+	if err != nil {
+		t.Fatalf("inspect index defs: %v", err)
+	}
+	defer rows.Close()
+	var defs []string
+	for rows.Next() {
+		var name string
+		var cols sql.NullString
+		if err := rows.Scan(&name, &cols); err != nil {
+			t.Fatalf("scan index def: %v", err)
+		}
+		defs = append(defs, name+"("+cols.String+")")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("index def rows: %v", err)
+	}
+	sort.Strings(defs)
+	return defs
+}
+
 func indexNames(t *testing.T, conn *sql.DB) []string {
 	t.Helper()
 	rows, err := conn.Query(
@@ -383,8 +418,8 @@ func TestInit_FreshMatchesMigratedShape(t *testing.T) {
 	if got, want := tableColumns(t, fresh, "meta"), tableColumns(t, migrated, "meta"); !equalStringSlices(got, want) {
 		t.Errorf("meta columns diverge:\n fresh   = %v\n migrate = %v", got, want)
 	}
-	if got, want := indexNames(t, fresh), indexNames(t, migrated); !equalStringSlices(got, want) {
-		t.Errorf("index set diverges:\n fresh   = %v\n migrate = %v", got, want)
+	if got, want := indexDefs(t, fresh), indexDefs(t, migrated); !equalStringSlices(got, want) {
+		t.Errorf("index definitions diverge:\n fresh   = %v\n migrate = %v", got, want)
 	}
 }
 
@@ -585,6 +620,36 @@ func TestArchivedMemories_ColumnParityWithMemories(t *testing.T) {
 		if !want[c] {
 			t.Errorf("archived_memories has extra column %q not in memories ∪ {archived_at}", c)
 		}
+	}
+}
+
+// v6→v7 widens the three recency-serving indexes to 4 columns (ADR-0033):
+// task_type/kind, created_at, and origin composites all end in
+// `created_at DESC, id DESC` so the newest-first tiebreak never needs a temp
+// B-tree sort.
+func TestMigrate_V6toV7RedefinesIndexes(t *testing.T) {
+	conn := newPreV1DB(t)
+	if err := db.Migrate(conn); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if got, want := userVersion(t, conn), db.CurrentSchemaVersion; got != want {
+		t.Errorf("post-migrate user_version = %d, want %d", got, want)
+	}
+	got := indexDefs(t, conn)
+	want := []string{
+		"idx_memories_created_at(created_at DESC,id DESC)",
+		"idx_memories_fingerprint(fingerprint)",
+		"idx_memories_kind(kind)",
+		"idx_memories_origin_created(origin,created_at DESC,id DESC)",
+		"idx_memories_task_kind_created(task_type,kind,created_at DESC,id DESC)",
+		// No idx_memories_task_type: task_type is the composite's leftmost
+		// column, so idx_memories_task_kind_created already serves every
+		// task_type-only lookup and the v6→v7 rung drops the standalone index.
+		// idx_memories_kind stays — kind is the composite's SECOND column, so
+		// no leftmost prefix covers a kind-only lookup.
+	}
+	if !equalStringSlices(got, want) {
+		t.Errorf("migrated index definitions = %v, want %v", got, want)
 	}
 }
 

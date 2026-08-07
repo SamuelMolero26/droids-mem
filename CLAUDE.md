@@ -67,6 +67,7 @@ Single binary, layered. Don't bypass layers:
 - FTS sync via 3 triggers (AI/AD/AU). Direct inserts to `memories_fts` are bugs.
 - `tags` — space-delimited string, NOT JSON (FTS5 tokenizes on whitespace).
 - `updated_at = created_at` set in code on insert. CHECK constraint enforces `updated_at >= created_at` at DB layer. Never `DEFAULT 0`.
+- **Index-changing migration rungs must `DROP INDEX` before `CREATE INDEX`.** `CREATE INDEX IF NOT EXISTS` is a no-op against an index that already exists under a different column definition — an upgraded DB silently keeps the old shape while a fresh DB gets the new one, same `user_version`, nothing errors. `internal/db/migrations.go` and `internal/db/schema.go` must move in lockstep, and the drift guard (`TestInit_FreshMatchesMigratedShape`) must compare index *definitions* via `pragma_index_xinfo`, not names or `sqlite_master.sql` text (which differs by whitespace and `IF NOT EXISTS` between the DDL and migration paths).
 
 ## Dedupe (save)
 

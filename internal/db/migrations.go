@@ -7,7 +7,7 @@ import (
 
 // CurrentSchemaVersion is the user_version that a fully-initialized
 // database reports. Bump when adding a new entry to the migrations ladder.
-const CurrentSchemaVersion = 6
+const CurrentSchemaVersion = 7
 
 // migration is one rung in the PRAGMA user_version ladder. Each rung runs
 // inside its own transaction; partial failure rolls back atomically.
@@ -36,6 +36,7 @@ var migrations = []migration{
 	{from: 3, to: 4, sql: migrationV3ToV4},
 	{from: 4, to: 5, sql: migrationV4ToV5},
 	{from: 5, to: 6, sql: migrationV5ToV6},
+	{from: 6, to: 7, sql: migrationV6ToV7},
 }
 
 const migrationV0ToV1 = `
@@ -220,3 +221,34 @@ func setUserVersion(db *sql.DB, v int) error {
 	}
 	return nil
 }
+
+// migrationV6ToV7 carries the ADR-0033 newest-first ordering tiebreak: the
+// three recency-serving indexes widen from 3 to 4 columns, ending in
+// `created_at DESC, id DESC`.
+//
+// The three index redefinitions must DROP first. CREATE INDEX IF NOT EXISTS is
+// a NO-OP against an index that already exists under the old definition, so an
+// IF NOT EXISTS-only rung would leave upgraded databases on the 3-column shape
+// while fresh ones got the 4-column shape — same user_version, different
+// schema, nothing erroring. TestInit_FreshMatchesMigratedShape compares index
+// DEFINITIONS (not just names) to keep that drift impossible to ship.
+//
+// The rung also drops idx_memories_task_type, which was redundant: task_type is
+// the leftmost column of idx_memories_task_kind_created, so the composite
+// already serves every task_type-only lookup on the same access path. The
+// planner preferred the standalone index only because it is narrower, never
+// because it was needed, and it cost a second B-tree maintained on every write.
+// idx_memories_kind is NOT redundant and stays — kind is the composite's second
+// column, so no prefix covers a kind-only lookup.
+const migrationV6ToV7 = `
+DROP INDEX IF EXISTS idx_memories_task_kind_created;
+CREATE INDEX idx_memories_task_kind_created ON memories(task_type, kind, created_at DESC, id DESC);
+
+DROP INDEX IF EXISTS idx_memories_created_at;
+CREATE INDEX idx_memories_created_at ON memories(created_at DESC, id DESC);
+
+DROP INDEX IF EXISTS idx_memories_origin_created;
+CREATE INDEX idx_memories_origin_created ON memories(origin, created_at DESC, id DESC);
+
+DROP INDEX IF EXISTS idx_memories_task_type;
+`
