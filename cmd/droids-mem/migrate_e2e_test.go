@@ -127,7 +127,8 @@ func openMigratedDB(t *testing.T, dbPath string) *sql.DB {
 // TestE2E_MigrateRescrub covers the full upgrade path:
 //  1. Pre-v1.0 DB seeded with rows containing secrets.
 //  2. Binary boot fails (no scrub baseline).
-//  3. `migrate --rescrub` rewrites rows, rebuilds FTS, sets sentinel.
+//  3. `migrate --rescrub` rewrites rows and sets the sentinel (the porter
+//     tokenizer flip already landed at open via the boot ladder rung 6→7).
 //  4. Subsequent boot succeeds; raw secrets are gone, bracket tokens present.
 func TestE2E_MigrateRescrub(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "mem.db")
@@ -147,7 +148,6 @@ func TestE2E_MigrateRescrub(t *testing.T) {
 		RowsRewritten      int    `json:"rows_rewritten"`
 		RowsWithRedactions int    `json:"rows_with_redactions"`
 		TotalRedactions    int    `json:"total_redactions"`
-		FTSRebuilt         bool   `json:"fts_rebuilt"`
 		BaselineSet        bool   `json:"scrub_baseline_complete_set"`
 		PatternVersion     int    `json:"pattern_version"`
 	}
@@ -160,17 +160,16 @@ func TestE2E_MigrateRescrub(t *testing.T) {
 	if summary.RowsScanned != 2 {
 		t.Errorf("rows_scanned = %d, want 2", summary.RowsScanned)
 	}
-	if summary.RowsRewritten != 2 {
-		t.Errorf("rows_rewritten = %d, want 2", summary.RowsRewritten)
+	// rows_rewritten counts rows whose content actually changed after scrub
+	// (SM-R4): only the legacy_secret row changed, so 1 — not 2.
+	if summary.RowsRewritten != 1 {
+		t.Errorf("rows_rewritten = %d, want 1 (only legacy_secret row changed)", summary.RowsRewritten)
 	}
 	if summary.RowsWithRedactions != 1 {
 		t.Errorf("rows_with_redactions = %d, want 1 (only legacy_secret row had secrets)", summary.RowsWithRedactions)
 	}
 	if summary.TotalRedactions < 2 {
 		t.Errorf("total_redactions = %d, want >=2 (1 IP + 2 emails)", summary.TotalRedactions)
-	}
-	if !summary.FTSRebuilt {
-		t.Error("fts_rebuilt = false, want true")
 	}
 	if !summary.BaselineSet {
 		t.Error("scrub_baseline_complete_set = false, want true")
@@ -249,8 +248,9 @@ func TestE2E_MigrateRescrub(t *testing.T) {
 	}
 }
 
-// TestE2E_MigrateNoRescrub confirms the lighter path: baseline is set, FTS
-// gets the v1.0 tokenizer, but row bodies are NOT rewritten.
+// TestE2E_MigrateNoRescrub confirms the lighter path: baseline is set but row
+// bodies are NOT rewritten (plaintext stays). The tokenizer flip is the boot
+// ladder's job, not migrate's.
 func TestE2E_MigrateNoRescrub(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "mem.db")
 	seedPreV1DB(t, dbPath)
@@ -264,7 +264,6 @@ func TestE2E_MigrateNoRescrub(t *testing.T) {
 		RowsScanned        int    `json:"rows_scanned"`
 		RowsRewritten      int    `json:"rows_rewritten"`
 		RowsWithRedactions int    `json:"rows_with_redactions"`
-		FTSRebuilt         bool   `json:"fts_rebuilt"`
 		BaselineSet        bool   `json:"scrub_baseline_complete_set"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &summary); err != nil {
@@ -275,9 +274,6 @@ func TestE2E_MigrateNoRescrub(t *testing.T) {
 	}
 	if summary.RowsRewritten != 0 {
 		t.Errorf("rows_rewritten = %d, want 0 on no-rescrub", summary.RowsRewritten)
-	}
-	if !summary.FTSRebuilt {
-		t.Error("fts_rebuilt = false, want true (tokenizer flip still applies)")
 	}
 	if !summary.BaselineSet {
 		t.Error("expected baseline set")
