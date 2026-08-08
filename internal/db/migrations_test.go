@@ -694,13 +694,14 @@ func TestMigrate_V5toV6AddsLifecycleColumnsGrandfathersRows(t *testing.T) {
 	}
 }
 
-// PRAGMA table_info parity guard (D5): archived_memories must carry exactly
-// the memories column set plus archived_at. This is a lazy-safe drift guard —
-// no shared column-const in prod, just a test-time comparison — so a future
-// ALTER on memories that forgets its archived_memories mirror fails loud here
-// instead of silently dropping a column at archive time.
-func TestArchivedMemories_ColumnParityWithMemories(t *testing.T) {
-	conn := newTestDB(t)
+// assertColumnParity is the D5/SM-R8 archived_memories drift guard: the table
+// must carry exactly the memories column set plus archived_at. It is lazy-safe
+// by design — no shared column-const in prod, just a test-time comparison — so
+// a future ALTER on memories that forgets its archived_memories mirror fails
+// loud here instead of silently dropping a column at archive time. The guard
+// runs against fresh AND migrated databases (SM-R8).
+func assertColumnParity(t *testing.T, conn *sql.DB) {
+	t.Helper()
 	memCols := tableColumns(t, conn, "memories")
 	archCols := tableColumns(t, conn, "archived_memories")
 
@@ -766,4 +767,26 @@ func equalStringSlices(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func TestArchivedMemories_ColumnParityWithMemories(t *testing.T) {
+	t.Run("fresh", func(t *testing.T) {
+		assertColumnParity(t, newTestDB(t))
+	})
+	// SM-R8: the guard must also hold on the migrated path — the v5 fixture
+	// predates the rung that creates archived_memories, so this exercises the
+	// rung-created table, not just the fresh DDL.
+	t.Run("v5-migrated", func(t *testing.T) {
+		conn := loadFixture(t, "schema_v5.sql")
+		if tableExists(t, conn, "archived_memories") {
+			t.Fatalf("v5 fixture has archived_memories — wrong fixture shape (rung 5→6 creates it)")
+		}
+		if err := db.Migrate(conn); err != nil {
+			t.Fatalf("Migrate: %v", err)
+		}
+		if got, want := userVersion(t, conn), db.CurrentSchemaVersion; got != want {
+			t.Errorf("post-migrate user_version = %d, want %d", got, want)
+		}
+		assertColumnParity(t, conn)
+	})
 }

@@ -18,7 +18,8 @@ var version = "dev"
 
 // bootGateBypass marks a command as exempt from db.AssertBootReady. Used by
 // the migrate subcommand, which exists precisely to satisfy the gate, and by
-// `schema` which only prints DDL without touching live data.
+// `schema`, which prints the CLI parameter schemas for MCP tooling — it never
+// touches the DB or DDL.
 const bootGateBypass = "bypass_boot_gate"
 
 // app lazily opens the database on first use so commands that never touch
@@ -92,9 +93,11 @@ start of each run — all via a local binary with zero external dependencies.`,
 			// more-scrubbed. --no-rescrub encodes the human judgment "no row
 			// holds plaintext" and must never be auto-chosen.
 			// Runs for every non-bypassed command, so the first read (list,
-			// search, doctor) after an upgrade triggers this one-time write;
-			// on a large corpus it can outlast ensure-server's 5s /healthz poll,
-			// so the spawned serve may briefly report "not healthy" mid-migration.
+			// search, doctor) after an upgrade triggers this one-time rescrub
+			// row rewrite; on a large corpus it can outlast ensure-server's 5s
+			// /healthz poll, so the spawned serve may briefly report "not
+			// healthy" mid-migration. (The tokenizer flip already happened at
+			// open — boot ladder rung 6→7, before the gate.)
 			// ponytail: concurrent cold-start (hook → ensure-server → serve) can
 			// race here; Migrate's BEGIN IMMEDIATE serializes them and losers
 			// re-rescrub idempotently. Add coordination only if that waste bites.
@@ -105,7 +108,7 @@ start of each run — all via a local binary with zero external dependencies.`,
 				log.Printf("boot gate: auto-migration failed: %v", merr)
 				return err
 			}
-			log.Printf("boot gate: auto-rescrubbed stale DB — %d rows, %d redactions",
+			log.Printf("boot gate: auto-rescrubbed stale DB — %d rows rewritten, %d redactions",
 				summary.RowsRewritten, summary.TotalRedactions)
 			return nil
 		},
