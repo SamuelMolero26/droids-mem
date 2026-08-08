@@ -118,9 +118,10 @@ CREATE TABLE IF NOT EXISTS memory_files (
 `
 
 // FTSSchema is the FTS5 virtual table + the three sync triggers (AI/AD/AU).
-// Single source of truth: the fresh-DB ddl embeds it, and `migrate --rescrub`
-// re-executes it verbatim after dropping the old index (internal/store/migrate.go),
-// so a tokenizer change here propagates to migrated DBs automatically.
+// Single source of truth: the fresh-DB ddl embeds it, and the migration
+// ladder's rung 7→8 (migrations.go) re-executes it verbatim after dropping
+// the trigram index, so a tokenizer change here propagates to migrated DBs
+// automatically at the next boot.
 //
 // FTS5 tokenizer (decision #17, + porter ADR-0018-era retrieval pass): the
 // porter stemmer wraps unicode61, folding morphological variants (cancel /
@@ -130,8 +131,8 @@ CREATE TABLE IF NOT EXISTS memory_files (
 // porter does NOT bridge true synonyms (panic <-> nil pointer) — that gap is
 // left to write-time canonical tags, not retrieval-side machinery (embeddings
 // rejected: local-first, pure-Go, no CGO).
-// Existing databases pick up the stemmer by running 'droids-mem migrate'
-// (either mode drops + recreates this table from FTSSchema and reindexes).
+// Existing databases pick up the stemmer via the boot ladder rung 7→8 on
+// first open after an upgrade (once per DB, before the boot gate runs).
 const FTSSchema = `
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     title,

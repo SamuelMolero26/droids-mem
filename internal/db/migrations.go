@@ -7,7 +7,7 @@ import (
 
 // CurrentSchemaVersion is the user_version that a fully-initialized
 // database reports. Bump when adding a new entry to the migrations ladder.
-const CurrentSchemaVersion = 7
+const CurrentSchemaVersion = 8
 
 // migration is one rung in the PRAGMA user_version ladder. Each rung runs
 // inside its own transaction; partial failure rolls back atomically.
@@ -24,11 +24,12 @@ type migration struct {
 // (no scope, scrub_pattern_version, scrub_counts, or meta). v1 = v1.0 schema
 // matching schema.go ddl for a fresh DB.
 //
-// v0→v1 only widens the row shape and adds the meta table. The FTS5 tokenizer
-// flip (decision #17 in v1.0 plan) lives in `migrate --rescrub` so it can run
-// in the same transaction as the row rewrite; the auto-applied ladder leaves
-// FTS untouched and lets the boot gate block startup until the operator opts
-// in via --rescrub or --no-rescrub.
+// The FTS5 tokenizer flip (decision #17 in the v1.0 plan) lives in rung 7→8:
+// the auto-applied ladder drops the trigram FTS + sync triggers, recreates
+// them from FTSSchema (porter stemmer), and reindexes from memories — all
+// inside the rung transaction. store.Migrate no longer owns any FTS work; it
+// performs only the optional rescrub row rewrite and the scrub-baseline
+// sentinel stamp.
 var migrations = []migration{
 	{from: 0, to: 1, sql: migrationV0ToV1},
 	{from: 1, to: 2, sql: migrationV1ToV2},
@@ -37,10 +38,19 @@ var migrations = []migration{
 	{from: 4, to: 5, sql: migrationV4ToV5},
 	{from: 5, to: 6, sql: migrationV5ToV6},
 	{from: 6, to: 7, sql: migrationV6ToV7},
+	{from: 7, to: 8, sql: migrationV7ToV8},
 }
 
+// migrationV0ToV1 widens the row shape and adds the meta table.
+//
+// The scope column DEFAULT is 'personal' — matching schema.go ddl — so a
+// migrated v0 DB's stored CREATE text is byte-identical to fresh (SM-R6
+// parity). The change is data-identical: save.go always writes scope
+// explicitly, the v4→v5 backfill still runs (a no-op), and only newly-migrated
+// v0 DBs see the text difference. Pre-existing migrated DBs keep their
+// historical stored text (version gate), and that DEFAULT never fires.
 const migrationV0ToV1 = `
-ALTER TABLE memories ADD COLUMN scope TEXT NOT NULL DEFAULT 'shared'
+ALTER TABLE memories ADD COLUMN scope TEXT NOT NULL DEFAULT 'personal'
     CHECK(scope IN ('personal','shared'));
 ALTER TABLE memories ADD COLUMN scrub_pattern_version INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE memories ADD COLUMN scrub_counts TEXT;
@@ -153,6 +163,36 @@ CREATE TABLE IF NOT EXISTS archived_memories (
     pinned                INTEGER NOT NULL DEFAULT 0,
     archived_at           INTEGER NOT NULL
 );
+`
+
+// migrationV7ToV8 flips the FTS5 tokenizer from trigram to porter
+// (decision #17): drop the trigram index + its sync triggers, recreate both
+// from FTSSchema (schema.go — single source of truth), and reindex from
+// memories. Pure SQL, idempotent (IF EXISTS/IF NOT EXISTS + version gate
+// skips at v8), and row-preserving (explicit rowid in the SELECT — no
+// INSERT OR REPLACE on memories). SQLite DDL is transactional, so the rung
+// either fully lands with its user_version bump or rolls back whole.
+//
+// The tokenizer flip moved here from store.Migrate so the boot ladder owns
+// the flip once per DB at upgrade; `migrate` no longer touches FTS.
+const migrationV7ToV8 = dropFTSTriggersAndTable + FTSSchema + reindexFromMemories
+
+// dropFTSTriggersAndTable tears down the pre-v8 trigram FTS index and its
+// sync triggers before FTSSchema recreates them with the porter tokenizer.
+// Concatenated FIRST inside migrationV7ToV8 (drops before CREATEs).
+const dropFTSTriggersAndTable = `
+DROP TRIGGER IF EXISTS memories_ai;
+DROP TRIGGER IF EXISTS memories_ad;
+DROP TRIGGER IF EXISTS memories_au;
+DROP TABLE IF EXISTS memories_fts;
+`
+
+// reindexFromMemories backfills the recreated memories_fts from the memories
+// table. The explicit rowid keeps the FTS5 external-content key aligned with
+// the INTEGER rowid that the sync triggers write (no row reassignment).
+const reindexFromMemories = `
+INSERT INTO memories_fts(rowid, title, what, learned, tags)
+SELECT rowid, title, what, learned, tags FROM memories;
 `
 
 // Migrate advances db's schema from its current user_version up to
