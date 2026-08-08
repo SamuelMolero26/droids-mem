@@ -153,9 +153,9 @@ type Manager struct {
 	base string // e.g. ~/.droids-mem/graphs
 
 	mu         sync.Mutex
-	locks      map[string]*sync.Mutex
-	conns      map[string]*connEntry  // refcounted handle per repo db
-	stampCache map[string]*stampEntry // key: canonical repo path
+	locks      map[string]chan struct{} // 1-buffered semaphore per repo; see repoLock
+	conns      map[string]*connEntry    // refcounted handle per repo db
+	stampCache map[string]*stampEntry   // key: canonical repo path
 
 	buildsMu sync.Mutex
 	builds   map[string]*buildState // key: canonical repo path
@@ -179,7 +179,7 @@ type Manager struct {
 func NewManager(base string) *Manager {
 	return &Manager{
 		base:            base,
-		locks:           make(map[string]*sync.Mutex),
+		locks:           make(map[string]chan struct{}),
 		conns:           make(map[string]*connEntry),
 		stampCache:      make(map[string]*stampEntry),
 		builds:          make(map[string]*buildState),
@@ -213,17 +213,18 @@ func (m *Manager) Close() {
 // the warm-serve path can surface it via Freshness.IndexError. If the build was
 // superseded by a newer one (stamp changed during the build), the result is
 // discarded (ensureFresh already cancelled the old build's context).
-func (m *Manager) buildAsync(ctx context.Context, repo, path, stamp string) {
-	buildErr := buildIndex(ctx, repo, path, stamp)
+func (m *Manager) buildAsync(bs *buildState, repo, path string) {
+	buildErr := buildIndex(bs.ctx, repo, path, bs.stamp)
 
 	m.buildsMu.Lock()
 	defer m.buildsMu.Unlock()
 
-	bs, ok := m.builds[repo]
-	if !ok || bs.stamp != stamp {
+	if m.builds[repo] != bs {
 		// Superseded by a newer build — discard. ensureFresh already cancelled
 		// this build's context AND closed its done channel when it retired the
-		// state, so there is nothing left to clean up here.
+		// state, so there is nothing left to clean up here. The comparison is on
+		// identity, not stamp: a stamp can repeat, and matching one would let
+		// this goroutine retire a live build it never ran.
 		return
 	}
 	delete(m.builds, repo)
@@ -234,7 +235,7 @@ func (m *Manager) buildAsync(ctx context.Context, repo, path, stamp string) {
 		m.lastBuildErrors[repo] = buildErr.Error()
 		// Remember which source failed so ensureFresh stops relaunching an
 		// identical doomed build on every subsequent query.
-		m.failedStamps[repo] = stamp
+		m.failedStamps[repo] = bs.stamp
 		return // failed — old graph stays in place as stale
 	}
 	// Success: clear any prior error and retire the old connection so the next
@@ -244,16 +245,79 @@ func (m *Manager) buildAsync(ctx context.Context, repo, path, stamp string) {
 	m.closeConn(path)
 }
 
-func (m *Manager) repoLock(repo string) *sync.Mutex {
+// finishColdBuild records the outcome of a first-ever index and publishes it.
+// The cold path is not covered by buildAsync's bookkeeping, so without this a
+// failure was forgotten (the next query paid for the same doomed build) and an
+// abandoned success never retired the cached handle — which matters when the
+// cold path was entered because an existing graph.db would not open: nothing
+// would pick up the replacement and the repo re-entered the cold path forever.
+func (m *Manager) finishColdBuild(repo, path, stamp string, err error) {
+	m.buildsMu.Lock()
+	if err != nil {
+		m.lastBuildErrors[repo] = err.Error()
+		m.failedStamps[repo] = stamp
+		m.buildsMu.Unlock()
+		return
+	}
+	delete(m.lastBuildErrors, repo)
+	delete(m.failedStamps, repo)
+	m.buildsMu.Unlock()
+	m.closeConn(path)
+}
+
+// suppressedFailure reports whether stamp is the exact source that already
+// failed to build, along with the recorded reason.
+func (m *Manager) suppressedFailure(repo, stamp string) (bool, string) {
+	m.buildsMu.Lock()
+	defer m.buildsMu.Unlock()
+	if m.failedStamps[repo] != stamp {
+		return false, ""
+	}
+	return true, m.lastBuildErrors[repo]
+}
+
+// repoLock returns the per-repo build lock. It is a 1-buffered channel rather
+// than a sync.Mutex because acquiring it must be abandonable: an abandoned cold
+// build keeps the lock until it lands (deliberately — that is what stops a
+// second caller starting a duplicate build), and a sync.Mutex would make every
+// other caller wait out the whole build with its own deadline unenforceable.
+func (m *Manager) repoLock(repo string) chan struct{} {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	l, ok := m.locks[repo]
 	if !ok {
-		l = &sync.Mutex{}
+		l = make(chan struct{}, 1)
 		m.locks[repo] = l
 	}
 	return l
 }
+
+// acquireLock takes l, or gives up when ctx dies. Either the lock is held on a
+// nil return, or it is not and the caller must not release it.
+//
+// The uncontended case is tried first and unconditionally: a plain two-way
+// select picks randomly when the lock is free AND ctx is already dead, which
+// would make an already-cancelled caller sometimes fail to start the cold build
+// that is supposed to outlive it. Only a lock someone else holds is worth
+// abandoning.
+func acquireLock(ctx context.Context, l chan struct{}) error {
+	select {
+	case l <- struct{}{}:
+		return nil
+	default:
+	}
+	select {
+	case l <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// releaseLock hands l back. Like the sync.Mutex it replaces, it may be called
+// from a goroutine other than the acquirer — the abandoned-cold-build path does
+// exactly that.
+func releaseLock(l chan struct{}) { <-l }
 
 func canonicalRepo(repo string) (string, error) {
 	abs, err := filepath.Abs(repo)
@@ -327,18 +391,20 @@ func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, func()
 		return nil, noopRelease, Freshness{}, err
 	}
 	lock := m.repoLock(repo)
-	lock.Lock()
+	if err := acquireLock(ctx, lock); err != nil {
+		return nil, noopRelease, Freshness{}, err
+	}
 
 	current, err := m.cachedStamp(repo)
 	if err != nil {
-		lock.Unlock()
+		releaseLock(lock)
 		return nil, noopRelease, Freshness{}, err
 	}
 	path := m.dbPath(repo)
 
 	conn, release, fresh, err := m.open(path)
 	if err == nil && fresh.Stamp == current {
-		lock.Unlock()
+		releaseLock(lock)
 		return conn, release, fresh, nil
 	}
 
@@ -356,6 +422,13 @@ func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, func()
 	// blocks and then finds a finished graph rather than starting a second build.
 	if conn == nil {
 		release()
+		if failed, why := m.suppressedFailure(repo, current); failed {
+			// Same source already failed to index, and there is no stale graph to
+			// fall back on. Report the recorded reason instead of paying for an
+			// identical doomed build on every query.
+			releaseLock(lock)
+			return nil, noopRelease, Freshness{}, fmt.Errorf("index %s: %s", repo, why)
+		}
 		done := make(chan error, 1) // buffered: the build never blocks on a gone caller
 		go func() { done <- buildIndex(context.WithoutCancel(ctx), repo, path, current) }()
 
@@ -363,22 +436,26 @@ func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, func()
 		select {
 		case buildErr = <-done:
 		case <-ctx.Done():
-			// Hand lock ownership to the build. sync.Mutex permits unlocking
-			// from a different goroutine than the one that locked it.
-			go func() { <-done; lock.Unlock() }()
+			// Hand lock ownership to the build: it still has to record its
+			// outcome, and the next caller must find a finished graph rather
+			// than start a second one.
+			go func() {
+				m.finishColdBuild(repo, path, current, <-done)
+				releaseLock(lock)
+			}()
 			return nil, noopRelease, Freshness{}, ctx.Err()
 		}
+		m.finishColdBuild(repo, path, current, buildErr)
 		if buildErr != nil {
-			lock.Unlock()
+			releaseLock(lock)
 			return nil, noopRelease, Freshness{}, fmt.Errorf("index %s: %w", repo, buildErr)
 		}
-		m.closeConn(path)
 		conn, release, fresh, err = m.open(path)
 		if err != nil {
-			lock.Unlock()
+			releaseLock(lock)
 			return nil, noopRelease, Freshness{}, err
 		}
-		lock.Unlock()
+		releaseLock(lock)
 		return conn, release, fresh, nil
 	}
 
@@ -393,7 +470,7 @@ func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, func()
 		fresh.Stale = true
 		fresh.Rebuilding = true
 		fresh.IndexError = lastErr
-		lock.Unlock()
+		releaseLock(lock)
 		return conn, release, fresh, nil
 	}
 	if building {
@@ -413,27 +490,28 @@ func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, func()
 		m.buildsMu.Unlock()
 		fresh.Stale = true
 		fresh.IndexError = lastErr
-		lock.Unlock()
+		releaseLock(lock)
 		return conn, release, fresh, nil
 	}
 
 	// Launch new async build with background context
 	bgCtx, cancel := context.WithCancel(context.Background())
-	m.builds[repo] = &buildState{
+	launched := &buildState{
 		ctx:    bgCtx,
 		cancel: cancel,
 		stamp:  current,
 		done:   make(chan struct{}),
 	}
+	m.builds[repo] = launched
 	// Surface the last build error while a new build is in-flight if one
 	// exists — the agent deserves to know why the graph was stale before
 	// the retry. The error is cleared when the new build finishes (success
 	// deletes it; failure replaces it).
 	fresh.IndexError = lastErr
 	m.buildsMu.Unlock()
-	lock.Unlock() // Release BEFORE goroutine — critical
+	releaseLock(lock) // Release BEFORE goroutine — critical
 
-	go m.buildAsync(bgCtx, repo, path, current)
+	go m.buildAsync(launched, repo, path)
 
 	fresh.Stale = true
 	fresh.Rebuilding = true
@@ -482,9 +560,14 @@ func (m *Manager) WaitBuild(ctx context.Context, repo string, timeout time.Durat
 	m.buildsMu.Unlock()
 	if !ok {
 		// Stale with nothing in flight: the build already finished (or is
-		// suppressed as a known failure). Report what we have — do not
-		// relaunch, or a broken repo would rebuild on every wait.
-		return &BuildWaitResponse{Repo: repo, Completed: true, Rebuilt: false, Freshness: fresh}, nil
+		// suppressed as a known failure). Re-read rather than reusing the
+		// snapshot from before the trigger — do not relaunch, or a broken repo
+		// would rebuild on every wait.
+		settled, ferr := m.freshnessNow(repo)
+		if ferr != nil {
+			return nil, ferr
+		}
+		return &BuildWaitResponse{Repo: repo, Completed: true, Rebuilt: !settled.Stale, Freshness: settled}, nil
 	}
 
 	select {
@@ -657,8 +740,10 @@ func (m *Manager) Index(ctx context.Context, repo string) (*IndexResponse, error
 		return nil, err
 	}
 	lock := m.repoLock(repo)
-	lock.Lock()
-	defer lock.Unlock()
+	if err := acquireLock(ctx, lock); err != nil {
+		return nil, err
+	}
+	defer releaseLock(lock)
 
 	current, err := m.cachedStamp(repo)
 	if err != nil {
@@ -668,12 +753,9 @@ func (m *Manager) Index(ctx context.Context, repo string) (*IndexResponse, error
 	if err := buildIndex(ctx, repo, path, current); err != nil {
 		return nil, fmt.Errorf("index %s: %w", repo, err)
 	}
-	// A forced build that succeeded clears whatever the async path recorded.
-	m.buildsMu.Lock()
-	delete(m.lastBuildErrors, repo)
-	delete(m.failedStamps, repo)
-	m.buildsMu.Unlock()
-	m.closeConn(path)
+	// A forced build that succeeded clears whatever any earlier failure recorded
+	// and retires the old handle so the next open() sees the new file.
+	m.finishColdBuild(repo, path, current, nil)
 	conn, release, fresh, err := m.open(path)
 	if err != nil {
 		return nil, err

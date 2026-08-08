@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -438,7 +439,10 @@ func TestEnsureFresh_NoRebuildLoopOnPersistentFailure(t *testing.T) {
 	}
 	waitForBuild(t, m, repo, 30*time.Second)
 
-	before := buildNonce.Load()
+	// buildStarts, not buildNonce: the nonce is only taken in writeGraphDB, which
+	// a type-check failure never reaches, so it cannot tell a suppressed rebuild
+	// from a relaunched one.
+	before := buildStarts.Load()
 	for range 5 {
 		resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"})
 		if err != nil {
@@ -449,7 +453,7 @@ func TestEnsureFresh_NoRebuildLoopOnPersistentFailure(t *testing.T) {
 		}
 		waitForBuild(t, m, repo, 30*time.Second)
 	}
-	if got := buildNonce.Load() - before; got != 0 {
+	if got := buildStarts.Load() - before; got != 0 {
 		t.Errorf("%d rebuild(s) launched for an already-failed stamp, want 0", got)
 	}
 
@@ -476,19 +480,7 @@ func graphChecksum(t *testing.T, m *Manager, repo string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return info.ModTime().String() + ":" + itoa(info.Size())
-}
-
-func itoa(n int64) string {
-	if n == 0 {
-		return "0"
-	}
-	var b []byte
-	for n > 0 {
-		b = append([]byte{byte('0' + n%10)}, b...)
-		n /= 10
-	}
-	return string(b)
+	return info.ModTime().String() + ":" + strconv.FormatInt(info.Size(), 10)
 }
 
 // TestEnsureFresh_ColdBuildSurvivesCallerCancel pins D6: a cold build used to
@@ -527,6 +519,207 @@ func TestEnsureFresh_ColdBuildSurvivesCallerCancel(t *testing.T) {
 	}
 	if _, err := os.Stat(m.dbPath(canon)); err != nil {
 		t.Fatalf("no graph published: %v", err)
+	}
+}
+
+// --- the repo lock must not outrank a caller's deadline ---
+
+// holdRepoLock takes repo's build lock and releases it on cleanup, standing in
+// for an abandoned cold build that keeps the lock until it lands.
+func holdRepoLock(t *testing.T, m *Manager, repo string) {
+	t.Helper()
+	canon, err := canonicalRepo(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := m.repoLock(canon)
+	if err := acquireLock(context.Background(), l); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { releaseLock(l) })
+}
+
+// TestEnsureFresh_DeadlineWinsWhileRepoLockHeld pins the lock-contention half of
+// the cold-build fix: an abandoned build keeps repoLock until it finishes, so
+// acquiring that lock has to be abandonable or the next caller's deadline is
+// unenforceable — it would block for the whole build no matter what it asked for.
+func TestEnsureFresh_DeadlineWinsWhileRepoLockHeld(t *testing.T) {
+	repo := copyFixture(t)
+	m := managerFor(t)
+	holdRepoLock(t, m, repo)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, release, _, err := m.ensureFresh(ctx, repo)
+	release()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("want DeadlineExceeded while another caller holds the repo lock, got %v", err)
+	}
+	if el := time.Since(start); el > 2*time.Second {
+		t.Errorf("blocked %s on the repo lock for a 20ms deadline", el)
+	}
+}
+
+// TestWaitBuild_TimesOutWhileRepoLockHeld is the same defect at the contract
+// level: graph_build_wait promises the timeout governs every path, including a
+// cold build. A build already holding the lock must produce Completed:false
+// within the timeout, not a wait as long as the build.
+func TestWaitBuild_TimesOutWhileRepoLockHeld(t *testing.T) {
+	repo := copyFixture(t)
+	m := managerFor(t)
+	holdRepoLock(t, m, repo)
+
+	start := time.Now()
+	resp, err := m.WaitBuild(context.Background(), repo, 20*time.Millisecond)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("a timeout must be reported in the response, not as an error: %v", err)
+	}
+	if resp.Completed {
+		t.Errorf("nothing can complete while the repo lock is held, got %+v", resp)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("WaitBuild ignored its 20ms timeout: took %s", elapsed)
+	}
+}
+
+// --- a cold build that fails must be remembered too ---
+
+// TestEnsureFresh_ColdFailureIsNotRelaunched extends the failed-stamp
+// suppression to the cold path. It was only ever recorded by buildAsync, so a
+// repo that has never been indexed AND does not type-check re-ran a full
+// go/packages load on every single query — the exact defect the warm path fixes.
+func TestEnsureFresh_ColdFailureIsNotRelaunched(t *testing.T) {
+	repo := copyFixture(t)
+	writeFile(t, repo, "broken.go", "package main\nfunc Bad() { undefined(")
+	m := managerFor(t)
+	ctx := context.Background()
+
+	_, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"})
+	if err == nil {
+		t.Fatal("want an error: no graph exists and the repo does not type-check")
+	}
+	if !strings.Contains(err.Error(), "type-check") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	before := buildStarts.Load()
+	for range 3 {
+		second, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"})
+		if err == nil {
+			t.Fatalf("still broken, still no graph — want an error, got %+v", second)
+		}
+		if !strings.Contains(err.Error(), "type-check") {
+			t.Errorf("a suppressed cold build must still report why: %v", err)
+		}
+	}
+	if got := buildStarts.Load() - before; got != 0 {
+		t.Errorf("%d cold rebuild(s) for an already-failed stamp, want 0", got)
+	}
+
+	// Not a latch: fixing the source must index the repo.
+	writeFile(t, repo, "broken.go", "package main\n\nfunc Recovered() {}\n")
+	if _, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Recovered"}); err != nil {
+		t.Fatalf("a moved stamp must retry the cold build: %v", err)
+	}
+}
+
+// TestEnsureFresh_AbandonedColdFailureIsRecorded covers the other half: when the
+// caller walks away, the surviving build's outcome was dropped on the floor —
+// neither the error nor the suppression was recorded, so the next query paid for
+// the same doomed build again.
+func TestEnsureFresh_AbandonedColdFailureIsRecorded(t *testing.T) {
+	repo := copyFixture(t)
+	writeFile(t, repo, "broken.go", "package main\nfunc Bad() { undefined(")
+	m := managerFor(t)
+	canon, err := canonicalRepo(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, release, _, err := m.ensureFresh(ctx, repo)
+	release()
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled caller should get its own ctx error, got %v", err)
+	}
+
+	current, err := stamp(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		m.buildsMu.Lock()
+		got := m.failedStamps[canon]
+		m.buildsMu.Unlock()
+		if got == current {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("abandoned cold build never recorded its failure (failedStamps=%q)", got)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	before := buildStarts.Load()
+	if _, err := m.Symbol(context.Background(), SymbolRequest{Repo: repo, Symbol: "Announce"}); err == nil {
+		t.Fatal("want an error for a broken repo with no graph")
+	}
+	if got := buildStarts.Load() - before; got != 0 {
+		t.Errorf("%d rebuild(s) after an abandoned failure, want 0", got)
+	}
+}
+
+// --- buildAsync must recognise its own state, not any state with its stamp ---
+
+// TestBuildAsync_ForeignStateWithSameStampIsIgnored pins the ABA hole: matching
+// m.builds[repo] by stamp string let a superseded goroutine retire whatever
+// state happened to carry the same stamp — closing the live build's done channel
+// early and attributing its own outcome to a build it never ran.
+func TestBuildAsync_ForeignStateWithSameStampIsIgnored(t *testing.T) {
+	repo := copyFixture(t)
+	m := managerFor(t)
+	canon, err := canonicalRepo(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := stamp(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The state the manager is actually tracking.
+	lctx, lcancel := context.WithCancel(context.Background())
+	defer lcancel()
+	live := &buildState{ctx: lctx, cancel: lcancel, stamp: current, done: make(chan struct{})}
+	m.buildsMu.Lock()
+	m.builds[canon] = live
+	m.buildsMu.Unlock()
+	defer func() {
+		m.buildsMu.Lock()
+		delete(m.builds, canon)
+		m.buildsMu.Unlock()
+	}()
+
+	// A stale goroutine carrying the same stamp finishes and must touch nothing.
+	octx, ocancel := context.WithCancel(context.Background())
+	ocancel()
+	m.buildAsync(&buildState{ctx: octx, cancel: ocancel, stamp: current, done: make(chan struct{})}, canon, m.dbPath(canon))
+
+	select {
+	case <-live.done:
+		t.Fatal("a foreign build closed the live state's done channel")
+	default:
+	}
+	m.buildsMu.Lock()
+	_, still := m.builds[canon]
+	m.buildsMu.Unlock()
+	if !still {
+		t.Error("a foreign build retired the live build state")
 	}
 }
 

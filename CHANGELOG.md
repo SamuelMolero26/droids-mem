@@ -25,7 +25,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     it triggered.
   - A repo that stopped type-checking relaunched a full `go/packages` load on
     *every* query. The retry is now suppressed while the source still hashes to
-    a stamp that already failed; any edit lifts it.
+    a stamp that already failed; any edit lifts it. This covers the first-ever
+    index too: a repo that has never been indexed *and* does not type-check
+    reports the recorded reason instead of rebuilding on every query, whether or
+    not the caller that triggered the failing build stayed to see it.
+  - The per-repo build lock ignored the waiting caller's context. Since an
+    abandoned cold build keeps that lock until it lands, a second caller blocked
+    for the whole build no matter what deadline it asked for — `graph_build_wait`
+    included. Acquiring the lock can now be abandoned when the caller's context
+    expires; taking an uncontended lock still never fails.
   - The `graph_build_wait` timeout response reported an empty stamp, hiding the
     valid stamp of the graph still being served.
   - A first-ever index ran on the caller's context, so a client disconnecting
