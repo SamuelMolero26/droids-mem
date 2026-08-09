@@ -37,7 +37,10 @@ type memStore interface {
 // the two shapes of real code questions (ADR-0020): scope-anchored (Package)
 // and symbol-anchored (Symbol). Results are returned as JSON text for the
 // viewport — the TUI renders them raw, not parsed.
+//
+// The implementation owns its repo root — the TUI never picks one, so no repo
+// argument crosses this boundary.
 type GraphQuerier interface {
-	Package(ctx context.Context, repo string, pkg string) (string, error)
-	Symbol(ctx context.Context, repo string, symbol string) (string, error)
+	Package(ctx context.Context, pkg string) (string, error)
+	Symbol(ctx context.Context, symbol string) (string, error)
 }

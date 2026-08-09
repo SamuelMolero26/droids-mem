@@ -18,24 +18,16 @@ type graphAdapter struct {
 	repo string
 }
 
-func (a *graphAdapter) Package(ctx context.Context, repo, pkg string) (string, error) {
-	r := a.repo
-	if repo != "" {
-		r = repo
-	}
-	resp, err := a.gm.Package(ctx, graph.PackageRequest{Repo: r, Package: pkg})
+func (a *graphAdapter) Package(ctx context.Context, pkg string) (string, error) {
+	resp, err := a.gm.Package(ctx, graph.PackageRequest{Repo: a.repo, Package: pkg})
 	if err != nil {
 		return "", err
 	}
 	return marshalJSON(resp)
 }
 
-func (a *graphAdapter) Symbol(ctx context.Context, repo, symbol string) (string, error) {
-	r := a.repo
-	if repo != "" {
-		r = repo
-	}
-	resp, err := a.gm.Symbol(ctx, graph.SymbolRequest{Repo: r, Symbol: symbol})
+func (a *graphAdapter) Symbol(ctx context.Context, symbol string) (string, error) {
+	resp, err := a.gm.Symbol(ctx, graph.SymbolRequest{Repo: a.repo, Symbol: symbol})
 	if err != nil {
 		return "", err
 	}
@@ -70,7 +62,7 @@ route through prune.`,
 				wd, _ := os.Getwd()
 				gq = &graphAdapter{gm: gm, repo: wd}
 			}
-			p := tea.NewProgram(tui.New(s, gq, ""), tea.WithAltScreen())
+			p := tea.NewProgram(tui.New(s, gq), tea.WithAltScreen())
 			_, err = p.Run()
 			if gq != nil {
 				gm.Close()

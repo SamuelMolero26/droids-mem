@@ -116,7 +116,7 @@ type graphBuildWaitArgs struct {
 
 func graphBuildWaitToolDef() mcp.Tool {
 	return mcp.NewTool("graph_build_wait",
-		mcp.WithDescription("Block until any active async rebuild for the repo finishes, or until timeout. Returns the final freshness state. Use after graph_symbol returns rebuilding: true."),
+		mcp.WithDescription("Bring the repo's graph up to date and block until that finishes, or until timeout. Attaches to a rebuild already in flight, and triggers one if the graph is stale but no build has started. Returns the final freshness state; completed: false means the timeout expired first, not that anything failed. Use after graph_symbol returns rebuilding: true."),
 		mcp.WithString("repo", mcp.Required(),
 			mcp.Description("Absolute path to the repo root (your project working directory).")),
 		mcp.WithNumber("timeout",

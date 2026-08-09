@@ -44,6 +44,7 @@ type symRow struct {
 // replaces dbPath with a fresh graph (build to .tmp, rename over). A repo that
 // does not type-check returns an error and leaves any existing graph intact.
 func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
+	buildStarts.Add(1)
 	cfg := &packages.Config{
 		Context: ctx,
 		Dir:     repo,
@@ -454,6 +455,11 @@ func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, sy
 // buildNonce makes concurrent same-process graph builds write distinct temp
 // files. See writeGraphDB.
 var buildNonce atomic.Uint64
+
+// buildStarts counts buildIndex entries. Tests assert that an already-failed
+// stamp does not relaunch; buildNonce cannot serve that role because it is only
+// taken in writeGraphDB, which a type-check failure returns long before.
+var buildStarts atomic.Uint64
 
 // staleTempAge bounds how long a graph build may plausibly run. buildIndex
 // measures ~2.5s; an hour is far past any real build, so anything older is

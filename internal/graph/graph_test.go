@@ -164,13 +164,24 @@ func TestPackageSurface(t *testing.T) {
 	}
 }
 
-func TestStalenessRebuildAndDegradedServe(t *testing.T) {
+// TestDegradedServeOnBrokenRepo covers exactly one thing: a repo that stops
+// type-checking still answers queries from the last good graph, marked stale.
+//
+// It used to be named for async rebuild recovery and ended in a WaitBuild loop,
+// but that loop was unreachable (issue #73): deleting the broken fixture
+// restored the original file count, size, and max mtime, so the stamp came back
+// byte-identical, ensureFresh short-circuited as fresh, and the loop broke on
+// its first iteration. Rebuild and recovery are covered properly in
+// build_test.go; this test keeps the narrow guarantee it actually proves.
+func TestDegradedServeOnBrokenRepo(t *testing.T) {
 	// Disable stamp caching: this test modifies files and queries
 	// immediately, so a cached stamp would mask the change.
 	defer func(d time.Duration) { stampTTL = d }(stampTTL)
 	stampTTL = 0
 
-	m, repo := testManager(t)
+	repo := copyFixture(t) // never mutate the shared fixture in place
+	m := NewManager(filepath.Join(t.TempDir(), "graphs"))
+	t.Cleanup(m.Close)
 	ctx := context.Background()
 
 	if _, err := m.Index(ctx, repo); err != nil {
@@ -178,13 +189,10 @@ func TestStalenessRebuildAndDegradedServe(t *testing.T) {
 	}
 
 	// Break the repo: staleness check must trip and serve the old graph stale.
-	broken := filepath.Join(repo, "broken_fixture.go")
-	if err := os.WriteFile(broken, []byte("package main\nfunc Bad() { undefined("), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(repo, "broken_fixture.go"),
+		[]byte("package main\nfunc Bad() { undefined("), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Remove(broken) })
-	future := time.Now().Add(2 * time.Second) // ensure the stamp moves
-	_ = os.Chtimes(broken, future, future)
 
 	resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"})
 	if err != nil {
@@ -193,34 +201,8 @@ func TestStalenessRebuildAndDegradedServe(t *testing.T) {
 	if !resp.Freshness.Stale {
 		t.Errorf("expected stale degraded serve, got %+v", resp.Freshness)
 	}
-
-	// Fix the repo: the next query should see fresh within a few
-	// async rebuild cycles.
-	if err := os.Remove(broken); err != nil {
-		t.Fatal(err)
-	}
-
-	// Loop: query to trigger a rebuild if needed, wait for it, repeat until
-	// fresh or timeout. This handles the race where the async build launched
-	// on the broken repo might run after the fix and write a graph with a
-	// stale stamp, requiring a second async rebuild.
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		resp, err = m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"})
-		if err != nil {
-			t.Fatalf("Symbol after fix: %v", err)
-		}
-		if !resp.Freshness.Stale {
-			break // fresh!
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("graph never became fresh: %+v", resp.Freshness)
-		}
-		wb, err := m.WaitBuild(ctx, repo, 5*time.Second)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_ = wb
+	if resp.Symbol == nil || resp.Symbol.QName != "testmod.Announce" {
+		t.Errorf("degraded serve must still resolve symbols, got %+v", resp.Symbol)
 	}
 }
 

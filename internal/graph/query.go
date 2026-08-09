@@ -121,10 +121,11 @@ type SymbolResponse struct {
 
 // Symbol resolves and answers a symbol-anchored query against repo's graph.
 func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolResponse, error) {
-	conn, fresh, err := m.ensureFresh(ctx, req.Repo)
+	conn, release, fresh, err := m.ensureFresh(ctx, req.Repo)
 	if err != nil {
 		return nil, err
 	}
+	defer release() // hold the handle for every statement below, not just the first
 	m.bump(req.Repo, "symbol")
 	resp := &SymbolResponse{Repo: req.Repo, Freshness: fresh, Hint: expandHint}
 	if fresh.Stale {
@@ -620,10 +621,11 @@ type PackageResponse struct {
 // Package returns the exported surface of one package: signatures + first
 // doc line per symbol, never bodies.
 func (m *Manager) Package(ctx context.Context, req PackageRequest) (*PackageResponse, error) {
-	conn, fresh, err := m.ensureFresh(ctx, req.Repo)
+	conn, release, fresh, err := m.ensureFresh(ctx, req.Repo)
 	if err != nil {
 		return nil, err
 	}
+	defer release() // hold the handle for every statement below, not just the first
 	m.bump(req.Repo, "package")
 	pkg := strings.Trim(req.Package, "/")
 	var resolved string
