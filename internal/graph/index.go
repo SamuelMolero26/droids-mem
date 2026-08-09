@@ -48,6 +48,7 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	cfg := &packages.Config{
 		Context: ctx,
 		Dir:     repo,
+		Env:     goToolEnv(),
 		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
 			packages.NeedImports | packages.NeedDeps | packages.NeedTypes |
 			packages.NeedSyntax | packages.NeedTypesInfo | packages.NeedModule,
