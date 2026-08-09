@@ -227,22 +227,29 @@ func (m *Manager) buildAsync(bs *buildState, repo, path string) {
 		// this goroutine retire a live build it never ran.
 		return
 	}
-	delete(m.builds, repo)
-	close(bs.done)
-	bs.cancel() // release the cancel func so it doesn't leak
 
 	if buildErr != nil {
-		m.lastBuildErrors[repo] = buildErr.Error()
-		// Remember which source failed so ensureFresh stops relaunching an
+		// Failed — old graph stays in place as stale. Signal the waiter and
+		// remember which source failed so ensureFresh stops relaunching an
 		// identical doomed build on every subsequent query.
+		m.lastBuildErrors[repo] = buildErr.Error()
 		m.failedStamps[repo] = bs.stamp
-		return // failed — old graph stays in place as stale
+		delete(m.builds, repo)
+		close(bs.done)
+		bs.cancel()
+		return
 	}
 	// Success: clear any prior error and retire the old connection so the next
-	// open() picks up the new .db file
+	// open() picks up the new .db file. Retiring MUST happen before close(done):
+	// a WaitBuild caller that wakes on done re-reads state via open(), and a
+	// still-cached old handle would report the pre-rename stamp — Rebuilt:false
+	// for a build that actually succeeded (CI-flaky).
 	delete(m.lastBuildErrors, repo)
 	delete(m.failedStamps, repo)
 	m.closeConn(path)
+	delete(m.builds, repo)
+	close(bs.done)
+	bs.cancel() // release the cancel func so it doesn't leak
 }
 
 // finishColdBuild records the outcome of a first-ever index and publishes it.
