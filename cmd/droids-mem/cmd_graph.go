@@ -95,6 +95,7 @@ automatically when the repo changes. See docs/adr/0020-native-code-graph.md.`,
 				return err
 			}
 			defer gm.Close()
+			state.RecordGraphUse("graph_index")
 			resp, err := gm.Index(cmd.Context(), resolveRepo())
 			if err != nil {
 				writeError("graph_index_failed", err.Error(), true)
@@ -124,6 +125,7 @@ automatically when the repo changes. See docs/adr/0020-native-code-graph.md.`,
 				return err
 			}
 			defer gm.Close()
+			state.RecordGraphUse("graph_symbol")
 			freshenForCLI(cmd.Context(), gm, resolveRepo())
 			resp, err := gm.Symbol(cmd.Context(), graph.SymbolRequest{
 				Repo:      resolveRepo(),
@@ -161,6 +163,7 @@ automatically when the repo changes. See docs/adr/0020-native-code-graph.md.`,
 				return err
 			}
 			defer gm.Close()
+			state.RecordGraphUse("graph_package")
 			freshenForCLI(cmd.Context(), gm, resolveRepo())
 			resp, err := gm.Package(cmd.Context(), graph.PackageRequest{
 				Repo:    resolveRepo(),

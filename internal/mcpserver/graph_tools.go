@@ -11,6 +11,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/samuelmolero26/droids-mem/internal/graph"
+	"github.com/samuelmolero26/droids-mem/internal/state"
 )
 
 // registerGraphTools exposes the native code-graph subsystem (ADR-0020) as
@@ -62,6 +63,7 @@ STALE GRAPH: the freshness.stale flag is true when the repo changed but no longe
 
 func graphSymbolHandler(gm *graph.Manager) func(context.Context, mcp.CallToolRequest, graphSymbolArgs) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, _ mcp.CallToolRequest, a graphSymbolArgs) (*mcp.CallToolResult, error) {
+		state.RecordGraphUse("graph_symbol")
 		resp, err := gm.Symbol(ctx, graph.SymbolRequest{
 			Repo:      a.Repo,
 			Symbol:    a.Symbol,
@@ -99,6 +101,7 @@ STALE GRAPH: same staleness semantics as graph_symbol. When freshness.stale is t
 
 func graphPackageHandler(gm *graph.Manager) func(context.Context, mcp.CallToolRequest, graphPackageArgs) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, _ mcp.CallToolRequest, a graphPackageArgs) (*mcp.CallToolResult, error) {
+		state.RecordGraphUse("graph_package")
 		resp, err := gm.Package(ctx, graph.PackageRequest{Repo: a.Repo, Package: a.Package})
 		if err != nil {
 			return graphToolErr(err), nil
@@ -128,6 +131,7 @@ func graphBuildWaitToolDef() mcp.Tool {
 
 func graphBuildWaitHandler(gm *graph.Manager) func(context.Context, mcp.CallToolRequest, graphBuildWaitArgs) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, _ mcp.CallToolRequest, a graphBuildWaitArgs) (*mcp.CallToolResult, error) {
+		state.RecordGraphUse("graph_build_wait")
 		timeout := time.Duration(a.Timeout) * time.Second
 		if a.Timeout <= 0 {
 			timeout = 10 * time.Second

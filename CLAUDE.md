@@ -37,7 +37,13 @@ Both suites isolate `DROIDS_MEM_DB` and `DROIDS_MEM_HOME` per test.
 | `DROIDS_MEM_MCP_ADDR` | `127.0.0.1:7777` | Bind address (loopback by default; non-loopback logs a plaintext warning) |
 | `DROIDS_MEM_MCP_ENDPOINT` | `/mcp` | `/healthz` + `/identity` always unauthenticated |
 
-State dir layout: `mem.db` (0600), `token` (0600), `mcp.pid`, `mcp.log`.
+State dir layout: `mem.db` (0600), `token` (0600), `mcp.pid`, `mcp.log`,
+`graph_last` (tool name; its **mtime** is the timestamp).
+
+`droids-mem statusline` prints `droids-mem:<tool>` when `graph_last` is under
+60 s old, nothing otherwise — a Claude Code `statusLine` segment that makes an
+agent's code-graph use visible instead of silent. Both the MCP handlers and the
+`graph` CLI leaves stamp it. Cosmetic only: write failures are swallowed.
 
 `/identity?nonce=<n>` answers `HMAC-SHA256(token, nonce)` — ensure-server uses it
 to verify a listener actually holds the token before reporting `already_running`
