@@ -135,8 +135,15 @@ func Fetch(ctx context.Context, repoDir string, s Store) (store.ImportResult, er
 // poisoned line is counted in Failed, not fatal. A pool with no file yet (fresh
 // remote) is not an error.
 func fetchInto(ctx context.Context, repoDir string, s Store) (store.ImportResult, error) {
-	if _, err := runGit(ctx, repoDir, "pull"); err != nil {
-		return store.ImportResult{}, err
+	// Only pull when there is somewhere to pull from. A local-only pool has no
+	// upstream, so `git pull` fails with "no tracking information" and aborts
+	// before the import — meaning the pool on disk could never be consumed and
+	// the boot auto-Fetch logged that same failure on every start. Push already
+	// guards its fetch-first step this way; Fetch did not.
+	if hasRemote(ctx, repoDir) {
+		if _, err := runGit(ctx, repoDir, "pull"); err != nil {
+			return store.ImportResult{}, err
+		}
 	}
 	path := filepath.Join(repoDir, sharedFile)
 	// #nosec G304 -- repoDir is a user-chosen path they own.
