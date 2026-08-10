@@ -722,7 +722,11 @@ func (m *Manager) open(path string) (*sql.DB, func(), Freshness, error) {
 	release := func() { m.release(entry) }
 
 	var fresh Freshness
-	rows, err := entry.db.Query(`SELECT key, value FROM meta WHERE key IN ('stamp','indexed_at')`)
+	// noctx exception: open() has no context and threading one in would ripple
+	// through freshnessNow and its callers for a two-row read off an
+	// already-cached local handle. The cancellation that matters is on the
+	// walks and the build, both of which are context-bound.
+	rows, err := entry.db.Query(`SELECT key, value FROM meta WHERE key IN ('stamp','indexed_at')`) //nolint:noctx // see above
 	if err != nil {
 		release()
 		return nil, noopRelease, Freshness{}, fmt.Errorf("read graph meta: %w", err)
@@ -814,10 +818,10 @@ func (m *Manager) Index(ctx context.Context, repo string) (*IndexResponse, error
 	}
 	defer release()
 	resp := &IndexResponse{Repo: repo, Freshness: fresh}
-	if err := conn.QueryRow(`SELECT COUNT(*) FROM symbols`).Scan(&resp.Symbols); err != nil {
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM symbols`).Scan(&resp.Symbols); err != nil {
 		return nil, err
 	}
-	if err := conn.QueryRow(`SELECT COUNT(*) FROM edges`).Scan(&resp.Edges); err != nil {
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM edges`).Scan(&resp.Edges); err != nil {
 		return nil, err
 	}
 	return resp, nil
