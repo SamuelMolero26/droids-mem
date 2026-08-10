@@ -81,7 +81,13 @@ func (e *FingerprintCollisionError) Error() string {
 //
 // Schema shape (including the tokenizer flip) is the ladder's job — see
 // SchemaVersionError. Migrate performs no schema or index work of its own.
-func Migrate(s *Store, opts MigrateOptions) (*MigrateSummary, error) {
+//
+// ctx cancels the rescrub: it is the longest-running write in the binary and
+// also runs unattended from the boot gate's auto-migration, so a caller that
+// gives up must be able to stop it. Cancelling aborts inside BEGIN IMMEDIATE,
+// so the database rolls back to its pre-migrate shape with no sentinel — the
+// gate stays closed and the operator can retry.
+func Migrate(ctx context.Context, s *Store, opts MigrateOptions) (*MigrateSummary, error) {
 	summary := &MigrateSummary{
 		Mode:           "no-rescrub",
 		PatternVersion: scrub.Version,
@@ -90,7 +96,6 @@ func Migrate(s *Store, opts MigrateOptions) (*MigrateSummary, error) {
 		summary.Mode = "rescrub"
 	}
 
-	ctx := context.Background()
 	conn, err := s.DB().Conn(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("acquire conn: %w", err)
@@ -113,7 +118,10 @@ func Migrate(s *Store, opts MigrateOptions) (*MigrateSummary, error) {
 	committed := false
 	defer func() {
 		if !committed {
-			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+			// Background, not ctx: cancellation is the main reason this fires,
+			// and the rollback still has to run on a dead ctx (same pattern as
+			// save.go / prune.go).
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 		}
 	}()
 
@@ -188,6 +196,12 @@ func rewriteAllRows(ctx context.Context, conn *sql.Conn, summary *MigrateSummary
 	// for anything this misses (e.g. a DB-level UNIQUE violation).
 	fpOwners := make(map[string]string, len(states))
 	for i := range states {
+		// The scrub pass is pure Go between SQL statements, so without this a
+		// cancelled caller would keep scrubbing the whole corpus before the
+		// next ExecContext noticed.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		st := &states[i]
 		titleOut, titleRep := scrub.Scrub(st.title)
 		whatOut, whatRep := scrub.Scrub(st.what)

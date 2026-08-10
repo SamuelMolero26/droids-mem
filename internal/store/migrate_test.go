@@ -1,8 +1,10 @@
 package store_test
 
 import (
+	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,7 +55,7 @@ func TestMigrate_RejectsNonCurrentVersion(t *testing.T) {
 	conn := loadFixtureStore(t, "schema_v7.sql")
 	s := store.New(conn)
 
-	_, err := store.Migrate(s, store.MigrateOptions{Rescrub: true})
+	_, err := store.Migrate(t.Context(), s, store.MigrateOptions{Rescrub: true})
 	var svErr *store.SchemaVersionError
 	if !errors.As(err, &svErr) {
 		t.Fatalf("Migrate on a v7 DB: want *store.SchemaVersionError, got %v", err)
@@ -105,7 +107,7 @@ func TestMigrate_RescrubCollisionFailsLoud(t *testing.T) {
 	}
 
 	s := store.New(conn)
-	_, err := store.Migrate(s, store.MigrateOptions{Rescrub: true})
+	_, err := store.Migrate(t.Context(), s, store.MigrateOptions{Rescrub: true})
 	var fpc *store.FingerprintCollisionError
 	if !errors.As(err, &fpc) {
 		t.Fatalf("Migrate --rescrub on colliding rows: want *store.FingerprintCollisionError, got %v", err)
@@ -139,6 +141,55 @@ func TestMigrate_RescrubCollisionFailsLoud(t *testing.T) {
 	}
 }
 
+// TestMigrate_HonorsContextCancellation proves the rescrub is interruptible.
+// It is the longest-running write in the binary — a full row rewrite over the
+// whole corpus — and it runs unattended from the boot gate's auto-migration,
+// so a caller that gives up (Ctrl-C, a serve shutdown, a request deadline)
+// must actually stop it. Cancelling must also leave nothing behind: the work
+// is inside BEGIN IMMEDIATE, so an aborted run rolls back to the pre-migrate
+// shape with no sentinel and the boot gate still closed.
+func TestMigrate_HonorsContextCancellation(t *testing.T) {
+	conn := loadFixtureStore(t, "schema_v0.sql")
+	now := int64(1000000)
+	for i := range 3 {
+		if _, err := conn.Exec(`
+			INSERT INTO memories (id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at)
+			VALUES (?, 'sess', 'crm_upload', 'error_resolution', ?, 'body', 'lesson ' || ?, '', ?, ?, ?)`,
+			fmt.Sprintf("mem_ctx_%d", i), fmt.Sprintf("row %d", i), i,
+			fmt.Sprintf("fp_%d", i), now, now); err != nil {
+			t.Fatalf("seed row %d: %v", i, err)
+		}
+	}
+	if err := db.Migrate(conn); err != nil {
+		t.Fatalf("Migrate ladder: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // caller already gave up before the first statement runs
+
+	s := store.New(conn)
+	_, err := store.Migrate(ctx, s, store.MigrateOptions{Rescrub: true})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Migrate with a cancelled context: want context.Canceled, got %v", err)
+	}
+
+	// Nothing committed: no sentinel, so the boot gate stays closed and the
+	// operator can retry.
+	var n int
+	if err := conn.QueryRow(
+		`SELECT COUNT(*) FROM meta WHERE key = 'scrub_baseline_complete'`,
+	).Scan(&n); err != nil {
+		t.Fatalf("count meta: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("sentinel persisted despite cancellation (%d rows)", n)
+	}
+	var bgErr *db.BootGateError
+	if err := db.AssertBootReady(conn); !errors.As(err, &bgErr) {
+		t.Errorf("boot gate after cancelled migrate: want *BootGateError, got %v", err)
+	}
+}
+
 // TestMigrate_LadderNeverWritesSentinel proves SM-R3 (CRITICAL): the ladder
 // must never stamp meta.scrub_baseline_complete — the sentinel is written ONLY
 // by store.Migrate (both modes) and fresh-DB DDL. Otherwise the boot gate
@@ -163,7 +214,7 @@ func TestMigrate_LadderNeverWritesSentinel(t *testing.T) {
 
 		// Completion: store.Migrate (either mode) stamps '1' and the gate opens.
 		s := store.New(conn)
-		if _, err := store.Migrate(s, store.MigrateOptions{Rescrub: false}); err != nil {
+		if _, err := store.Migrate(t.Context(), s, store.MigrateOptions{Rescrub: false}); err != nil {
 			t.Fatalf("store.Migrate: %v", err)
 		}
 		if err := db.AssertBootReady(conn); err != nil {
@@ -196,7 +247,7 @@ func TestMigrate_LadderNeverWritesSentinel(t *testing.T) {
 		}
 
 		s := store.New(conn)
-		if _, err := store.Migrate(s, store.MigrateOptions{Rescrub: false}); err != nil {
+		if _, err := store.Migrate(t.Context(), s, store.MigrateOptions{Rescrub: false}); err != nil {
 			t.Fatalf("store.Migrate: %v", err)
 		}
 		if err := db.AssertBootReady(conn); err != nil {

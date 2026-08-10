@@ -40,7 +40,7 @@ migrate only rewrites rows (--rescrub) and stamps the sentinel.`,
   # Operator has verified the corpus is clean; skip the rewrite.
   droids-mem migrate --no-rescrub`,
 		Annotations: map[string]string{bootGateBypass: "true"},
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			if rescrub == noRescrub {
 				writeError("usage_error", "specify exactly one of --rescrub or --no-rescrub", false,
 					withSuggestion("re-run with `droids-mem migrate --rescrub` (recommended) or `--no-rescrub`"),
@@ -52,7 +52,10 @@ migrate only rewrites rows (--rescrub) and stamps the sentinel.`,
 			if err != nil {
 				return err
 			}
-			summary, err := store.Migrate(s, store.MigrateOptions{Rescrub: rescrub})
+			// cmd.Context() is cobra's signal-aware context, so Ctrl-C during a
+			// long rescrub aborts the rewrite and rolls back instead of running
+			// the whole corpus out.
+			summary, err := store.Migrate(cmd.Context(), s, store.MigrateOptions{Rescrub: rescrub})
 			if err != nil {
 				// A re-fingerprint collision is an operator decision, not a
 				// retryable runtime failure: exit 5 (conflict/duplicate class).

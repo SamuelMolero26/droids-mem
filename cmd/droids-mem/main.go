@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"log"
 	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 
 	"github.com/samuelmolero26/droids-mem/internal/db"
 	"github.com/samuelmolero26/droids-mem/internal/store"
@@ -101,7 +104,7 @@ start of each run — all via a local binary with zero external dependencies.`,
 			// ponytail: concurrent cold-start (hook → ensure-server → serve) can
 			// race here; Migrate's BEGIN IMMEDIATE serializes them and losers
 			// re-rescrub idempotently. Add coordination only if that waste bites.
-			summary, merr := store.Migrate(s, store.MigrateOptions{Rescrub: true})
+			summary, merr := store.Migrate(cmd.Context(), s, store.MigrateOptions{Rescrub: true})
 			if merr != nil {
 				// Fail closed: return the gate error so the manual remediation
 				// string still shows; log merr since the gate error omits it.
@@ -154,7 +157,14 @@ start of each run — all via a local binary with zero external dependencies.`,
 		newMigrateCmd(a),
 	)
 
-	if err := root.Execute(); err != nil {
+	// Signal-aware root context so Ctrl-C reaches cmd.Context() — without it a
+	// long `migrate --rescrub` (or the boot gate's auto-rescrub) would run the
+	// whole corpus out with no way to stop it. serve derives its own
+	// NotifyContext from this one, so its shutdown path is unaffected.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := root.ExecuteContext(ctx); err != nil {
 		var initErr *dbInitError
 		if errors.As(err, &initErr) {
 			writeError("db_init_failed", initErr.Error(), false,
