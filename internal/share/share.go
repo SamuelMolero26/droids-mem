@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/samuelmolero26/droids-mem/internal/store"
 )
@@ -45,6 +46,12 @@ func runGit(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
+	// WaitDelay is what makes ctx actually bound this call. CommandContext kills
+	// git on cancellation, but `git pull` runs ssh as a child, ssh inherits
+	// these pipes, and Run blocks until they close — so killing git alone leaves
+	// Wait parked on ssh's own TCP timeout. Measured: 73s for a call whose
+	// deadline was 15s. WaitDelay caps that tail.
+	cmd.WaitDelay = 2 * time.Second
 	if err := cmd.Run(); err != nil {
 		// Wrap err, don't drop it: the boot fetch runs under a 15 s timeout, and
 		// without %w a caller cannot tell context.DeadlineExceeded from a real
@@ -217,6 +224,7 @@ func publishNewRepo(ctx context.Context, repoDir string) error {
 	cmd := exec.CommandContext(ctx, "gh", "repo", "create", name,
 		"--private", "--source", repoDir, "--remote", "origin", "--push")
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.WaitDelay = 2 * time.Second // same inherited-pipe tail as runGit
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("gh repo create: %s", strings.TrimSpace(string(out)))
 	}
