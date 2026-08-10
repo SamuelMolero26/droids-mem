@@ -510,8 +510,8 @@ func recvTypeName(fl *ast.FieldList) string {
 func collapseWS(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return s[:i]
+	if before, _, ok := strings.Cut(s, "\n"); ok {
+		return before
 	}
 	return s
 }

@@ -39,7 +39,7 @@ func seedRules(t *testing.T, s *store.Store, n int) {
 	if n > len(ruleSeeds) {
 		t.Fatalf("seedRules: n=%d exceeds fixture size %d", n, len(ruleSeeds))
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if _, err := s.Save(context.Background(), store.SaveRequest{
 			TaskType: "crm_upload",
 			Kind:     "user_rule",
@@ -57,7 +57,7 @@ func seedErrors(t *testing.T, s *store.Store, n int) {
 	if n > len(errorSeeds) {
 		t.Fatalf("seedErrors: n=%d exceeds fixture size %d", n, len(errorSeeds))
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if _, err := s.Save(context.Background(), store.SaveRequest{
 			TaskType: "crm_upload",
 			Kind:     "error_resolution",

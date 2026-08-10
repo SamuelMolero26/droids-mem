@@ -325,14 +325,7 @@ func TestMigrate_V0toV1(t *testing.T) {
 	cols := tableColumns(t, conn, "memories")
 	wantCols := []string{"scope", "scrub_pattern_version", "scrub_counts"}
 	for _, want := range wantCols {
-		found := false
-		for _, c := range cols {
-			if c == want {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !slices.Contains(cols, want) {
 			t.Errorf("migrated DB missing memories.%s", want)
 		}
 	}

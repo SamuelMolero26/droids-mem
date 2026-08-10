@@ -226,13 +226,7 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 		}
 	}
 
-	depth := req.Depth
-	if depth < 1 {
-		depth = 1
-	}
-	if depth > maxDepth {
-		depth = maxDepth
-	}
+	depth := min(max(req.Depth, 1), maxDepth)
 	dir := req.Direction
 	if dir == "" {
 		dir = "both"
