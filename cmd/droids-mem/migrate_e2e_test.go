@@ -341,21 +341,20 @@ func TestE2E_MigrateRejectsAmbiguousFlags(t *testing.T) {
 	}
 }
 
-// TestE2E_MigrateCollisionFailLoud proves SM-R5 through the binary: two rows
-// whose POST-scrub fingerprints collide must abort `migrate --rescrub` with
-// exit 5 (conflict class), an error naming the offending row + fingerprint,
-// no partial rewrite, and no sentinel — the operator resolves the duplicate.
-func TestE2E_MigrateCollisionFailLoud(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "mem.db")
+// seedCollidingRows lays down a pre-baseline (v0) DB holding two rows whose
+// distinct pre-scrub titles scrub to the same token stream
+// (alice@/bob@example.com → [EMAIL]) and therefore to the same post-scrub
+// fingerprint — the input that aborts `migrate --rescrub`.
+func seedCollidingRows(t *testing.T, dbPath string) {
+	t.Helper()
 	seedFixtureDB(t, dbPath, "schema_v0.sql")
 
 	conn, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("open seed db: %v", err)
 	}
+	defer conn.Close()
 	now := int64(1700000000)
-	// Distinct pre-scrub titles that scrub to the same token stream
-	// (alice@/bob@example.com → [EMAIL]) → same post-scrub fingerprint.
 	seed := []struct{ id, title string }{
 		{id: "mem_coll_a", title: "retry alice@example.com"},
 		{id: "mem_coll_b", title: "retry bob@example.com"},
@@ -365,11 +364,18 @@ func TestE2E_MigrateCollisionFailLoud(t *testing.T) {
 			INSERT INTO memories (id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at)
 			VALUES (?, 'sess', 'crm_upload', 'error_resolution', ?, 'row ' || ?, 'handle it the same way', '', 'fp_' || ?, ?, ?)`,
 			r.id, r.title, r.id, r.id, now, now); err != nil {
-			conn.Close()
 			t.Fatalf("seed %s: %v", r.id, err)
 		}
 	}
-	conn.Close()
+}
+
+// TestE2E_MigrateCollisionFailLoud proves SM-R5 through the binary: two rows
+// whose POST-scrub fingerprints collide must abort `migrate --rescrub` with
+// exit 5 (conflict class), an error naming the offending row + fingerprint,
+// no partial rewrite, and no sentinel — the operator resolves the duplicate.
+func TestE2E_MigrateCollisionFailLoud(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "mem.db")
+	seedCollidingRows(t, dbPath)
 
 	_, stderr, code := runBinary(t, dbPath, "migrate", "--rescrub")
 	if code != 5 {
@@ -394,7 +400,7 @@ func TestE2E_MigrateCollisionFailLoud(t *testing.T) {
 		t.Error("collision must not be flagged retryable — the operator decides")
 	}
 
-	conn = openMigratedDB(t, dbPath)
+	conn := openMigratedDB(t, dbPath)
 	// No partial rewrite: the raw email survives in the aborted row.
 	var title string
 	if err := conn.QueryRow(`SELECT title FROM memories WHERE id = 'mem_coll_b'`).Scan(&title); err != nil {
@@ -414,5 +420,68 @@ func TestE2E_MigrateCollisionFailLoud(t *testing.T) {
 	_, _, code = runBinary(t, dbPath, "list")
 	if code == 0 {
 		t.Error("boot gate should still be closed after aborted migrate (sentinel absent)")
+	}
+}
+
+// TestE2E_MigrateCollisionRemediationIsExecutable proves the collision
+// suggestion is actionable, not just descriptive. On a pre-baseline DB the
+// boot gate is still closed after the aborted migrate, and `prune` — the only
+// way to delete the offending row — does NOT carry bootGateBypass. So an
+// operator told merely to "deduplicate the rows, then re-run migrate" cannot
+// run a single step of it. The message must name `migrate --no-rescrub`, the
+// one gate-opening escape, and the whole sequence must actually complete.
+func TestE2E_MigrateCollisionRemediationIsExecutable(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "mem.db")
+	seedCollidingRows(t, dbPath)
+
+	_, stderr, code := runBinary(t, dbPath, "migrate", "--rescrub")
+	if code != 5 {
+		t.Fatalf("migrate --rescrub: exit = %d, want 5; stderr: %s", code, stderr)
+	}
+	var env struct {
+		Message    string `json:"message"`
+		Suggestion string `json:"suggestion"`
+	}
+	if err := json.Unmarshal([]byte(stderr), &env); err != nil {
+		t.Fatalf("parse error envelope: %v\nraw: %s", err, stderr)
+	}
+	// The suggestion is the operator's only instruction, and the plain
+	// "deduplicate then re-run" wording sends them into a closed gate.
+	if !strings.Contains(env.Suggestion, "--no-rescrub") {
+		t.Errorf("suggestion must name the gate-opening step `migrate --no-rescrub`, got: %q", env.Suggestion)
+	}
+	// The auto-remediation path (main.go PersistentPreRunE) surfaces only the
+	// store error via the log — the CLI suggestion never renders there — so the
+	// error text has to carry the escape too.
+	if !strings.Contains(env.Message, "--no-rescrub") {
+		t.Errorf("collision error text must name `migrate --no-rescrub`, got: %q", env.Message)
+	}
+	// Deleting the row is blocked until the gate opens: this is the dead end.
+	if _, _, code = runBinary(t, dbPath, "prune", "--id", "mem_coll_b", "--apply"); code == 0 {
+		t.Fatal("prune succeeded pre-remediation; test no longer covers the closed-gate dead end")
+	}
+
+	// Now walk the documented remediation verbatim.
+	if _, stderr, code = runBinary(t, dbPath, "migrate", "--no-rescrub"); code != 0 {
+		t.Fatalf("migrate --no-rescrub: exit = %d, want 0; stderr: %s", code, stderr)
+	}
+	if _, stderr, code = runBinary(t, dbPath, "prune", "--id", "mem_coll_b", "--apply"); code != 0 {
+		t.Fatalf("prune --id after gate opened: exit = %d, want 0; stderr: %s", code, stderr)
+	}
+	if _, stderr, code = runBinary(t, dbPath, "migrate", "--rescrub"); code != 0 {
+		t.Fatalf("migrate --rescrub after dedupe: exit = %d, want 0; stderr: %s", code, stderr)
+	}
+	if _, stderr, code = runBinary(t, dbPath, "list"); code != 0 {
+		t.Fatalf("list after remediation: exit = %d, want 0; stderr: %s", code, stderr)
+	}
+	// The surviving row is scrubbed — the rescrub really ran, so the operator
+	// did not end up parked on the --no-rescrub acknowledgment.
+	conn := openMigratedDB(t, dbPath)
+	var title string
+	if err := conn.QueryRow(`SELECT title FROM memories WHERE id = 'mem_coll_a'`).Scan(&title); err != nil {
+		t.Fatalf("read mem_coll_a: %v", err)
+	}
+	if strings.Contains(title, "alice@example.com") {
+		t.Errorf("surviving row still holds plaintext after remediation: %q", title)
 	}
 }

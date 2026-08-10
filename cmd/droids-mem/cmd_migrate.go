@@ -58,8 +58,12 @@ migrate only rewrites rows (--rescrub) and stamps the sentinel.`,
 				// retryable runtime failure: exit 5 (conflict/duplicate class).
 				var coll *store.FingerprintCollisionError
 				if errors.As(err, &coll) {
+					// On a pre-baseline DB the gate is still closed and `prune`
+					// — the only way to delete the row — does not bypass it, so
+					// a bare "deduplicate then re-run" is unexecutable. Name the
+					// one gate-opening escape, and that it stamps the baseline.
 					writeError("migrate_collision", err.Error(), false,
-						withSuggestion("deduplicate the colliding rows (delete or merge one), then re-run 'droids-mem migrate --rescrub'"),
+						withSuggestion("delete or merge one of the two rows with 'droids-mem prune --id <id> --apply', then re-run 'droids-mem migrate --rescrub'. If the boot gate is still closed, prune is blocked too — run 'droids-mem migrate --no-rescrub' first to open it, which marks the baseline complete on unscrubbed rows, then finish with --rescrub"),
 					)
 					exitWith(ExitConflict)
 				}

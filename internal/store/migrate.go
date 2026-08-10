@@ -63,8 +63,14 @@ type FingerprintCollisionError struct {
 	Fingerprint  string
 }
 
+// Error carries the full remediation, not just the diagnosis, because on the
+// auto-migration path this string is all the operator gets: the boot gate
+// returns its own error and only logs this one, so the `migrate` command's
+// suggestion field never renders. Deduping the row requires `prune`, which
+// does not bypass the gate — hence the --no-rescrub step.
 func (e *FingerprintCollisionError) Error() string {
-	return fmt.Sprintf("rescrub collision: row %q re-fingerprints to %q, already held by row %q — resolve the duplicate, then re-run 'droids-mem migrate --rescrub'", e.RowID, e.Fingerprint, e.CollidesWith)
+	return fmt.Sprintf("rescrub collision: row %q re-fingerprints to %q, already held by row %q — delete or merge one of the two, then re-run 'droids-mem migrate --rescrub'. While the boot gate is still closed no command can reach the rows: open it first with 'droids-mem migrate --no-rescrub', which marks the scrub baseline complete on still-unscrubbed rows — so the closing --rescrub is required, not optional",
+		e.RowID, e.Fingerprint, e.CollidesWith)
 }
 
 // Migrate establishes the scrub baseline on s.DB(): optionally rewrites every
