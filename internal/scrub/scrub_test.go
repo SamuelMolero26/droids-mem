@@ -172,8 +172,9 @@ func TestShannonEntropy(t *testing.T) {
 func BenchmarkScrub10KB_NoMatches(b *testing.B) {
 	body := buildPlainBody(10 * 1024)
 	b.SetBytes(int64(len(body)))
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	// b.Loop over b.N: the results are discarded, and b.Loop guarantees the
+	// body is not optimised away. It also manages the timer, so no ResetTimer.
+	for b.Loop() {
 		_, _ = Scrub(body)
 	}
 }
@@ -184,8 +185,9 @@ func BenchmarkScrub10KB_NoMatches(b *testing.B) {
 func BenchmarkScrub10KB_Sparse(b *testing.B) {
 	body := buildSparseBody(10 * 1024)
 	b.SetBytes(int64(len(body)))
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	// b.Loop over b.N: the results are discarded, and b.Loop guarantees the
+	// body is not optimised away. It also manages the timer, so no ResetTimer.
+	for b.Loop() {
 		_, _ = Scrub(body)
 	}
 }
@@ -196,8 +198,9 @@ func BenchmarkScrub10KB_Sparse(b *testing.B) {
 func BenchmarkScrub10KB_Dense(b *testing.B) {
 	body := buildDenseBody()
 	b.SetBytes(int64(len(body)))
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	// b.Loop over b.N: the results are discarded, and b.Loop guarantees the
+	// body is not optimised away. It also manages the timer, so no ResetTimer.
+	for b.Loop() {
 		_, _ = Scrub(body)
 	}
 }
