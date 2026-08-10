@@ -214,7 +214,17 @@ func (m *Manager) Close() {
 // superseded by a newer one (stamp changed during the build), the result is
 // discarded (ensureFresh already cancelled the old build's context).
 func (m *Manager) buildAsync(bs *buildState, repo, path string) {
-	buildErr := buildIndex(bs.ctx, repo, path, bs.stamp)
+	buildErr := buildIndexLocked(bs.ctx, repo, path, bs.stamp)
+
+	// Registered BEFORE the Unlock defer so LIFO runs it AFTER the unlock: the
+	// sweep walks the cache directory and must never hold buildsMu across that
+	// filesystem I/O.
+	sweep := false
+	defer func() {
+		if sweep {
+			sweepOrphans(m.base)
+		}
+	}()
 
 	m.buildsMu.Lock()
 	defer m.buildsMu.Unlock()
@@ -250,6 +260,7 @@ func (m *Manager) buildAsync(bs *buildState, repo, path string) {
 	delete(m.builds, repo)
 	close(bs.done)
 	bs.cancel() // release the cancel func so it doesn't leak
+	sweep = true
 }
 
 // finishColdBuild records the outcome of a first-ever index and publishes it.
@@ -270,6 +281,8 @@ func (m *Manager) finishColdBuild(repo, path, stamp string, err error) {
 	delete(m.failedStamps, repo)
 	m.buildsMu.Unlock()
 	m.closeConn(path)
+	// Lock already released — the sweep does filesystem I/O.
+	sweepOrphans(m.base)
 }
 
 // suppressedFailure reports whether stamp is the exact source that already
@@ -341,7 +354,30 @@ func canonicalRepo(repo string) (string, error) {
 	if !info.IsDir() {
 		return "", fmt.Errorf("repo path %q is not a directory", abs)
 	}
-	return abs, nil
+	return moduleRoot(abs), nil
+}
+
+// moduleRoot walks up from dir to the nearest ancestor holding a go.mod, which
+// is exactly the scope buildIndex loads (`packages.Load(Dir: repo, "./...")`).
+// Without it, an agent naming a subdirectory keys a SECOND cache built from
+// only that subtree while meta.module still names the whole module — a graph
+// whose callers and transitive_callers are silently incomplete.
+//
+// Stops at the first go.mod so a nested module resolves to itself, not its
+// parent. Returns dir unchanged when no go.mod exists anywhere above (a
+// GOPATH-style tree, or simply not Go), preserving the previous behaviour so
+// buildIndex still reports its own "no Go packages found".
+func moduleRoot(dir string) string {
+	for cur := dir; ; {
+		if _, err := os.Stat(filepath.Join(cur, "go.mod")); err == nil {
+			return cur
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur { // filesystem root
+			return dir
+		}
+		cur = parent
+	}
 }
 
 // bump records one query against tool ("symbol"|"package") as a single byte
@@ -368,8 +404,15 @@ func (m *Manager) bump(repo, tool string) {
 }
 
 func (m *Manager) dbPath(repo string) string {
+	return filepath.Join(m.base, cacheDirName(repo), "graph.db")
+}
+
+// cacheDirName is the on-disk directory a canonical repo path maps to. One-way
+// by design (the path can be arbitrarily long), which is why sweepOrphans reads
+// the source path back out of meta.repo instead of inverting this.
+func cacheDirName(repo string) string {
 	h := sha256.Sum256([]byte(repo))
-	return filepath.Join(m.base, hex.EncodeToString(h[:6]), "graph.db")
+	return hex.EncodeToString(h[:6])
 }
 
 // ensureFresh returns an open handle on the repo's graph db, rebuilding it
@@ -437,7 +480,7 @@ func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, func()
 			return nil, noopRelease, Freshness{}, fmt.Errorf("index %s: %s", repo, why)
 		}
 		done := make(chan error, 1) // buffered: the build never blocks on a gone caller
-		go func() { done <- buildIndex(context.WithoutCancel(ctx), repo, path, current) }()
+		go func() { done <- buildIndexLocked(context.WithoutCancel(ctx), repo, path, current) }()
 
 		var buildErr error
 		select {
@@ -757,7 +800,7 @@ func (m *Manager) Index(ctx context.Context, repo string) (*IndexResponse, error
 		return nil, err
 	}
 	path := m.dbPath(repo)
-	if err := buildIndex(ctx, repo, path, current); err != nil {
+	if err := buildIndexLocked(ctx, repo, path, current); err != nil {
 		return nil, fmt.Errorf("index %s: %w", repo, err)
 	}
 	// A forced build that succeeded clears whatever any earlier failure recorded
