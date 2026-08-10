@@ -7,6 +7,69 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-08-10
+
+Headline: the MCP bridge stops trusting predictable secrets and loopback HTTP —
+the bearer token now comes from crypto/rand and Claude Code connects over stdio
+— plus a code-graph reliability pass, a retrieval-ranking pass, and a
+fail-loud migration ladder.
+
+### Security
+- **MCP bearer token minted from crypto/rand** (issue #98). The token was
+  `tok_` + oklog/ulid, whose default entropy is math/rand seeded with
+  process-start nanotime — recoverable from the token file's own mtime by seed
+  search, and the only barrier between another local account and the whole
+  corpus. Now 32 bytes of crypto/rand, base64 RawURL (256 bits). Existing
+  installs keep the old token until `~/.droids-mem/token` is deleted with the
+  fixed binary on PATH.
+- **Claude Code connects over stdio instead of loopback HTTP** (issue #98):
+  `install --all` registers the server with `claude mcp add` using the stdio
+  transport (`droids-mem serve --stdio`) — no port, no token file; the host
+  owns the lifecycle, and the session-memory hooks stay in
+  `~/.claude/settings.json`.
+- **Code-graph cache hardened** (issue #98): the per-repo build lock can be
+  abandoned when the waiting caller's context expires; a completed build lands
+  on a 0600 temp file renamed into place (never world-readable); orphaned
+  cache dirs (deleted worktrees, temp dirs) are swept best-effort, keeping any
+  directory it cannot prove orphaned.
+
+### Added
+- **Code-graph status line**: `droids-mem statusline` prints
+  `droids-mem:<tool>` when `graph_last` is under 60 s old, nothing otherwise —
+  a Claude Code statusLine segment that makes code-graph use visible instead
+  of silent. Both the MCP handlers and the `graph` CLI stamp it.
+- **Migration ladder golden fixtures** (issue #97): per-version schema
+  snapshots `schema_v0..v7.sql` under `internal/db/testdata/`, regenerated
+  idempotently by `gen_fixtures.sh`; the parity test byte-compares migrated
+  DBs against fresh ones (excluding FTS shadow tables) and asserts the porter
+  tokenizer from the stored CREATE VIRTUAL TABLE text.
+
+### Changed
+- **Migration ladder restructured** (issue #97): rung 7→8 flips the FTS
+  tokenizer from trigram to porter with a row-preserving reindex inside the
+  rung transaction; rung 0→1 fixes the v0→v1 `scope` default to match the
+  fresh schema (`personal`). `store.Migrate` shrinks to precondition + optional
+  rescrub + sentinel. **`migrate --rescrub` now fails loudly (exit 5)** when
+  two rows converge to the same fingerprint — a `FingerprintCollisionError`
+  names both rows instead of silently dropping one.
+- **TUI: code-graph tab removed** (`ctrl+g`). The graph browser duplicated the
+  `graph` CLI and the `graph_symbol` / `graph_package` MCP tools, and it was
+  the only reason the TUI depended on `internal/graph`. Graph use now surfaces
+  through the status line instead.
+- **`mem_search` ranks by the project's bm25 column weights** (issue #82):
+  retrieval now uses the same column weights as dedupe (`title` 3 / `learned`
+  2 / `what` 1 / `tags` 1) instead of flat ranking; the no-query browse tier
+  ranks by recency instead of `task_type` MATCH (issues #76/#79); overlap
+  weights and the recall floor were retuned against the benchmark (issue #81).
+- **Newest-N ordering tiebroken on `id DESC`** (issues #58/#85): rows sharing
+  a timestamp no longer order arbitrarily.
+- **CI hardened** (issue #87): every third-party action pinned to a full
+  40-char commit SHA, dependency-review job added, top-level read-only
+  permissions with per-job grants, and release-gated workflows that validate
+  the tag (`vMAJOR.MINOR.PATCH`, tag must be an ancestor of main, and
+  CHANGELOG.md must carry the version section). Also adds SECURITY.md, a
+  dependabot config, and a PR template.
+
 ### Fixed
 - **Code-graph async rebuild lifecycle** (issue #73). Six defects on the
   warm-serve path, found by exercising it end to end:
@@ -40,10 +103,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     mid-build discarded all the work and the next query restarted from zero.
     The build now survives an abandoned caller while the caller's own wait stays
     bounded.
-- **TUI graph tab** (`ctrl+g`) tried `graph_package` first for any input without
-  a dot, so a bare symbol name — the common case — cost two lookups and two
-  staleness checks before falling back to `graph_symbol`. Only a `/` marks a
-  package path now.
+- **CLI and PATH-less servers can refresh a stale graph** (issue #95): the
+  `graph` CLI and a server started with no `go` on PATH can now refresh a
+  stale index through the Go toolchain resolver.
+- **Ghost callers dropped** (issues #69/#88): a call made *from* inside a
+  closure is attributed to the enclosing declaration; a call *into* a closure
+  is no longer reported as a caller of the function it was passed to.
 
 ## [1.2.0] — 2026-07-22
 
@@ -286,7 +351,8 @@ normally.
 - `workspace.yml` / inline scrub config → v1.1. v1.0 pattern set + order are
   hardcoded.
 
-[Unreleased]: https://github.com/SamuelMolero26/droids-mem/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/SamuelMolero26/droids-mem/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/SamuelMolero26/droids-mem/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/SamuelMolero26/droids-mem/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/SamuelMolero26/droids-mem/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/SamuelMolero26/droids-mem/compare/v1.0.1...v1.1.0
