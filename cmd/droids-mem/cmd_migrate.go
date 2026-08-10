@@ -32,7 +32,7 @@ Both modes set meta.scrub_baseline_complete='1', which the boot gate checks
 before every other subcommand will start.
 
 The porter-stemmer tokenizer flip is NOT part of this command: it happens
-automatically via the boot ladder (rung 6→7) on first open after an upgrade.
+automatically via the boot ladder (rung 7→8) on first open after an upgrade.
 migrate only rewrites rows (--rescrub) and stamps the sentinel.`,
 		Example: `  # Standard upgrade path — rewrites every row through the scrub patterns.
   droids-mem migrate --rescrub

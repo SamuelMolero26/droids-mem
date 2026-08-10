@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # gen_fixtures.sh — regenerates the golden per-version schema fixtures
-# (schema_v0.sql … schema_v6.sql) in this directory.
+# (schema_v0.sql … schema_v7.sql) in this directory.
 #
 # Each fixture is the sqlite_master dump of a database replayed through the
 # first N ladder rungs, plus a trailing `PRAGMA user_version = N;` stamp so a
 # test that loads it starts the ladder at exactly rung N. schema_v0.sql is the
-# pre-v1.0 shape itself; schema_v1.sql … schema_v6.sql are the successive
-# rung-replay states. The v6 fixture is the pre-flip shipped shape: the FTS
-# tokenizer stays trigram because the porter flip lands only at rung 6→7.
+# pre-v1.0 shape itself; schema_v1.sql … schema_v7.sql are the successive
+# rung-replay states. The v7 fixture is the pre-flip shipped shape: the FTS
+# tokenizer stays trigram because the porter flip lands only at rung 7→8.
+# (The 4-column recency indexes with id DESC land at rung 6→7, ADR-0033, so
+# schema_v7.sql carries trigram FTS + the 4-column indexes.)
 #
 # The inline rung SQL below duplicates the Go consts in ../migrations.go.
 # This duplication is deliberate and guarded: TestInit_FreshMatchesMigratedShape
@@ -152,6 +154,21 @@ CREATE TABLE IF NOT EXISTS archived_memories (
 SQL
 }
 
+apply_rung67() {
+    sqlite3 "$db" <<'SQL'
+DROP INDEX IF EXISTS idx_memories_task_kind_created;
+CREATE INDEX idx_memories_task_kind_created ON memories(task_type, kind, created_at DESC, id DESC);
+
+DROP INDEX IF EXISTS idx_memories_created_at;
+CREATE INDEX idx_memories_created_at ON memories(created_at DESC, id DESC);
+
+DROP INDEX IF EXISTS idx_memories_origin_created;
+CREATE INDEX idx_memories_origin_created ON memories(origin, created_at DESC, id DESC);
+
+DROP INDEX IF EXISTS idx_memories_task_type;
+SQL
+}
+
 # dump_fixture writes the current sqlite_master as re-executable SQL plus the
 # user_version stamp. ORDER BY reproduces a loadable file: user objects first,
 # then indexes, then triggers. Excluded: the FTS5 shadow tables
@@ -180,3 +197,5 @@ apply_rung45
 dump_fixture schema_v5.sql 5
 apply_rung56
 dump_fixture schema_v6.sql 6
+apply_rung67
+dump_fixture schema_v7.sql 7

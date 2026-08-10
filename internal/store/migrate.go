@@ -16,7 +16,7 @@ import (
 type MigrateOptions struct {
 	// Rescrub rewrites every memory row with the current scrub patterns,
 	// refreshing its fingerprint + scrub_counts. The tokenizer flip (porter
-	// stemmer) is owned by the db ladder's rung 6→7, applied automatically at
+	// stemmer) is owned by the db ladder's rung 7→8, applied automatically at
 	// boot — Migrate never touches the index. When false, Migrate runs the
 	// lighter `--no-rescrub` path: it stamps the scrub-baseline sentinel
 	// without touching row bodies.
@@ -37,7 +37,7 @@ type MigrateSummary struct {
 
 // SchemaVersionError aborts store.Migrate when the database's user_version is
 // not the binary's CurrentSchemaVersion. The ladder owns schema shape
-// (including the rung 6→7 tokenizer flip); store.Migrate only performs the
+// (including the rung 7→8 tokenizer flip); store.Migrate only performs the
 // optional rescrub rewrite + sentinel stamp and must not run against a schema
 // the ladder has not brought current yet.
 //

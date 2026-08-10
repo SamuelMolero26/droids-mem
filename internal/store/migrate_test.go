@@ -46,21 +46,21 @@ func userVersionOn(t *testing.T, conn *sql.DB) int {
 // TestMigrate_RejectsNonCurrentVersion proves SM-R2's precondition: a
 // database whose user_version is not CurrentSchemaVersion must be refused
 // loudly BEFORE any write. The ladder owns schema shape (including the rung
-// 6→7 FTS flip); store.Migrate only performs the optional rescrub rewrite and
+// 7→8 FTS flip); store.Migrate only performs the optional rescrub rewrite and
 // the sentinel stamp and must not run against a schema the ladder has not
 // brought current yet.
 func TestMigrate_RejectsNonCurrentVersion(t *testing.T) {
-	conn := loadFixtureStore(t, "schema_v6.sql")
+	conn := loadFixtureStore(t, "schema_v7.sql")
 	s := store.New(conn)
 
 	_, err := store.Migrate(s, store.MigrateOptions{Rescrub: true})
 	var svErr *store.SchemaVersionError
 	if !errors.As(err, &svErr) {
-		t.Fatalf("Migrate on a v6 DB: want *store.SchemaVersionError, got %v", err)
+		t.Fatalf("Migrate on a v7 DB: want *store.SchemaVersionError, got %v", err)
 	}
-	if svErr.Current != 6 || svErr.Required != db.CurrentSchemaVersion {
+	if svErr.Current != 7 || svErr.Required != db.CurrentSchemaVersion {
 		t.Errorf("SchemaVersionError = {%d, %d}, want {%d, %d}",
-			svErr.Current, svErr.Required, 6, db.CurrentSchemaVersion)
+			svErr.Current, svErr.Required, 7, db.CurrentSchemaVersion)
 	}
 
 	// No write happened: no sentinel, version untouched.
@@ -73,8 +73,8 @@ func TestMigrate_RejectsNonCurrentVersion(t *testing.T) {
 	if n != 0 {
 		t.Errorf("sentinel written by a rejected Migrate (%d rows)", n)
 	}
-	if got := userVersionOn(t, conn); got != 6 {
-		t.Errorf("user_version = %d, want 6 (unchanged)", got)
+	if got := userVersionOn(t, conn); got != 7 {
+		t.Errorf("user_version = %d, want 7 (unchanged)", got)
 	}
 }
 

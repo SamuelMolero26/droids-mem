@@ -97,7 +97,7 @@ start of each run — all via a local binary with zero external dependencies.`,
 			// row rewrite; on a large corpus it can outlast ensure-server's 5s
 			// /healthz poll, so the spawned serve may briefly report "not
 			// healthy" mid-migration. (The tokenizer flip already happened at
-			// open — boot ladder rung 6→7, before the gate.)
+			// open — boot ladder rung 7→8, before the gate.)
 			// ponytail: concurrent cold-start (hook → ensure-server → serve) can
 			// race here; Migrate's BEGIN IMMEDIATE serializes them and losers
 			// re-rescrub idempotently. Add coordination only if that waste bites.

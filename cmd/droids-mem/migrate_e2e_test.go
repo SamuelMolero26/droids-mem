@@ -102,7 +102,7 @@ func openMigratedDB(t *testing.T, dbPath string) *sql.DB {
 //  1. Pre-v1.0 DB seeded with rows containing secrets.
 //  2. Binary boot fails (no scrub baseline).
 //  3. `migrate --rescrub` rewrites rows and sets the sentinel (the porter
-//     tokenizer flip already landed at open via the boot ladder rung 6→7).
+//     tokenizer flip already landed at open via the boot ladder rung 7→8).
 //  4. Subsequent boot succeeds; raw secrets are gone, bracket tokens present.
 func TestE2E_MigrateRescrub(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "mem.db")
@@ -207,7 +207,7 @@ func TestE2E_MigrateRescrub(t *testing.T) {
 		t.Errorf("sentinel = %q, want '1'", sentinel)
 	}
 
-	// Tokenizer flip landed via the boot ladder rung 6→7 (not migrate):
+	// Tokenizer flip landed via the boot ladder rung 7→8 (not migrate):
 	// the stored CREATE VIRTUAL TABLE text carries the porter stemmer.
 	var ftsSQL string
 	if err := conn.QueryRow(
