@@ -3,7 +3,11 @@
 // Invoked by `droids-mem serve`. logic lives in internal/store; this
 // package only wires transport + auth + tool registration.
 //
-// Architecture rationale: docs/adr/0003-mcp-bridge-for-agentspan.md.
+// Two transports, same tool surface: Run (HTTP, loopback + bearer token, for
+// hosts that connect to a long-lived daemon) and RunStdio (stdin/stdout, for
+// hosts that spawn the server as a child). The HTTP half carries everything
+// the stdio half does not need — token, port, pid file, /identity proof,
+// ensure-server — so prefer stdio for any new host.
 package mcpserver
 
 import (
