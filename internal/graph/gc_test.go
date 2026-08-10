@@ -47,7 +47,7 @@ func TestSweepOrphans_RemovesOnlyVanishedRepos(t *testing.T) {
 	liveDir := seedCacheDir(t, base, cacheDirName(live), live)
 	goneDir := seedCacheDir(t, base, "bbbbbbbbbbbb", filepath.Join(t.TempDir(), "deleted-worktree"))
 
-	sweepOrphans(base)
+	sweepOrphans(context.Background(), base)
 
 	if _, err := os.Stat(liveDir); err != nil {
 		t.Errorf("swept a cache whose repo still exists: %v", err)
@@ -82,7 +82,7 @@ func TestSweepOrphans_RemovesReKeyedCache(t *testing.T) {
 	}
 	live := seedCacheDir(t, base, cacheDirName(canon), canon)
 
-	sweepOrphans(base)
+	sweepOrphans(context.Background(), base)
 
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Errorf("re-keyed cache survived: its repo exists but no longer keys here (err=%v)", err)
@@ -110,7 +110,7 @@ func TestSweepOrphans_LeavesUnprovableDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sweepOrphans(base)
+	sweepOrphans(context.Background(), base)
 
 	for _, d := range []string{noDB, noMeta} {
 		if _, err := os.Stat(d); err != nil {

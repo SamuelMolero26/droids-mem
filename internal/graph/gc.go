@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"io/fs"
@@ -26,7 +27,7 @@ import (
 //
 // Best-effort throughout — a sweep failure must never fail the build that
 // triggered it.
-func sweepOrphans(base string) {
+func sweepOrphans(ctx context.Context, base string) {
 	entries, err := os.ReadDir(base)
 	if err != nil {
 		return
@@ -36,7 +37,7 @@ func sweepOrphans(base string) {
 			continue
 		}
 		dir := filepath.Join(base, e.Name())
-		if orphanedCacheDir(dir) {
+		if orphanedCacheDir(ctx, dir) {
 			_ = os.RemoveAll(dir)
 		}
 	}
@@ -58,8 +59,8 @@ func sweepOrphans(base string) {
 // Stating the rule as "does this still key here" rather than "does the path
 // exist" also means any future change to the key scheme reclaims its own
 // leftovers automatically.
-func orphanedCacheDir(dir string) bool {
-	repo, ok := cachedRepoPath(filepath.Join(dir, "graph.db"))
+func orphanedCacheDir(ctx context.Context, dir string) bool {
+	repo, ok := cachedRepoPath(ctx, filepath.Join(dir, "graph.db"))
 	if !ok || repo == "" {
 		return false
 	}
@@ -78,7 +79,7 @@ func orphanedCacheDir(dir string) bool {
 
 // cachedRepoPath reads meta.repo out of a graph db, reporting whether it could
 // be read at all. Opened read-only so a sweep can never mutate a live graph.
-func cachedRepoPath(dbPath string) (string, bool) {
+func cachedRepoPath(ctx context.Context, dbPath string) (string, bool) {
 	if _, err := os.Stat(dbPath); err != nil {
 		return "", false
 	}
@@ -88,7 +89,7 @@ func cachedRepoPath(dbPath string) (string, bool) {
 	}
 	defer db.Close()
 	var repo string
-	if err := db.QueryRow(`SELECT value FROM meta WHERE key='repo'`).Scan(&repo); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='repo'`).Scan(&repo); err != nil {
 		return "", false
 	}
 	return repo, true

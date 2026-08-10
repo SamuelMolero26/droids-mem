@@ -222,7 +222,9 @@ func (m *Manager) buildAsync(bs *buildState, repo, path string) {
 	sweep := false
 	defer func() {
 		if sweep {
-			sweepOrphans(m.base)
+			// Background, not bs.ctx: reclaiming disk must not be skipped
+			// just because the build that triggered it was superseded.
+			sweepOrphans(context.Background(), m.base)
 		}
 	}()
 
@@ -282,7 +284,7 @@ func (m *Manager) finishColdBuild(repo, path, stamp string, err error) {
 	m.buildsMu.Unlock()
 	m.closeConn(path)
 	// Lock already released — the sweep does filesystem I/O.
-	sweepOrphans(m.base)
+	sweepOrphans(context.Background(), m.base)
 }
 
 // suppressedFailure reports whether stamp is the exact source that already

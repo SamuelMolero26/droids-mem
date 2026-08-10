@@ -94,7 +94,7 @@ func TestDoctor_HealthyDB(t *testing.T) {
 		Learned:  "y",
 	})
 
-	rep, err := s.Doctor(dbPath)
+	rep, err := s.Doctor(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Doctor: %v", err)
 	}

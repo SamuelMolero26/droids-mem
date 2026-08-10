@@ -101,7 +101,7 @@ func buildIndexLocked(ctx context.Context, repo, dbPath, stampVal string) error 
 	}
 	defer release()
 
-	if stampOnDisk(dbPath) == stampVal {
+	if stampOnDisk(ctx, dbPath) == stampVal {
 		return nil // another process built exactly this while we waited
 	}
 	return buildIndex(ctx, repo, dbPath, stampVal)
@@ -110,7 +110,7 @@ func buildIndexLocked(ctx context.Context, repo, dbPath, stampVal string) error 
 // stampOnDisk reads meta.stamp directly from the graph db, bypassing every
 // cached handle. Returns "" when the file is absent, unopenable, or has no
 // stamp — all of which mean "not the graph we want".
-func stampOnDisk(dbPath string) string {
+func stampOnDisk(ctx context.Context, dbPath string) string {
 	if _, err := os.Stat(dbPath); err != nil {
 		return ""
 	}
@@ -120,7 +120,7 @@ func stampOnDisk(dbPath string) string {
 	}
 	defer db.Close()
 	var s string
-	if err := db.QueryRow(`SELECT value FROM meta WHERE key='stamp'`).Scan(&s); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='stamp'`).Scan(&s); err != nil {
 		return ""
 	}
 	return s
