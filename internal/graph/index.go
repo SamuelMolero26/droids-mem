@@ -374,7 +374,7 @@ func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, sy
 	// ones distinct. The rename is atomic — last writer wins.
 	tmp := fmt.Sprintf("%s.tmp.%d.%d", dbPath, os.Getpid(), buildNonce.Add(1))
 	_ = os.Remove(tmp)
-	db, err := sql.Open("sqlite", "file:"+tmp)
+	db, err := sql.Open("sqlite", "file:"+tmp+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		return fmt.Errorf("create graph db: %w", err)
 	}

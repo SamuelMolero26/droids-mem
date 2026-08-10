@@ -16,7 +16,15 @@ const (
 )
 
 func writeJSON(v any) {
-	b, _ := json.Marshal(v)
+	b, err := json.Marshal(v)
+	if err != nil {
+		// Every command's contract is JSON on stdout. Printing nothing and
+		// exiting 0 would read to a consumer as a successful empty result,
+		// which is the worst possible shape for a machine-facing CLI — so an
+		// encoding failure has to be loud.
+		writeError("encode_failed", "cannot encode response: "+err.Error(), false)
+		exitWith(ExitError)
+	}
 	fmt.Fprintln(os.Stdout, string(b))
 }
 
@@ -46,8 +54,22 @@ func writeError(code, message string, retryable bool, opts ...func(*errResponse)
 	for _, o := range opts {
 		o(e)
 	}
-	b, _ := json.Marshal(e)
-	fmt.Fprintln(os.Stderr, string(b))
+	fmt.Fprintln(os.Stderr, string(errorEnvelope(e)))
+}
+
+// errorEnvelope renders e as JSON, always. Input is the only caller-supplied
+// field, so it is the only one that can hold something unmarshalable (a NaN
+// score, a channel); dropping it leaves a struct of strings and bools that
+// cannot fail. The literal is a last resort that should be unreachable.
+func errorEnvelope(e *errResponse) []byte {
+	if b, err := json.Marshal(e); err == nil {
+		return b
+	}
+	e.Input = nil
+	if b, err := json.Marshal(e); err == nil {
+		return b
+	}
+	return []byte(`{"status":"error","code":"encode_failed","message":"response could not be encoded","retryable":false}`)
 }
 
 func withField(field string) func(*errResponse) {

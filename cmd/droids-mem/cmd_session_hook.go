@@ -153,6 +153,12 @@ func emitStopBlock(ccID string) {
 		"`droids-mem session stage --session %s --title ... --what ... --learned ...`. "+
 		"If nothing this session is worth recalling, run "+
 		"`droids-mem session decline --session %s` instead.", ccID, ccID)
-	b, _ := json.Marshal(map[string]any{"decision": "block", "reason": reason})
+	b, err := json.Marshal(struct {
+		Decision string `json:"decision"`
+		Reason   string `json:"reason"`
+	}{Decision: "block", Reason: reason})
+	if err != nil {
+		return // fail open: a hook must never break the user's session
+	}
 	fmt.Println(string(b))
 }
