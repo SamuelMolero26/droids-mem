@@ -46,7 +46,10 @@ func runGit(ctx context.Context, dir string, args ...string) (string, error) {
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	if err := cmd.Run(); err != nil {
-		return out.String(), fmt.Errorf("git %s: %s", strings.Join(args, " "), strings.TrimSpace(out.String()))
+		// Wrap err, don't drop it: the boot fetch runs under a 15 s timeout, and
+		// without %w a caller cannot tell context.DeadlineExceeded from a real
+		// git failure — every cause collapses into the same opaque string.
+		return out.String(), fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(out.String()), err)
 	}
 	return out.String(), nil
 }
