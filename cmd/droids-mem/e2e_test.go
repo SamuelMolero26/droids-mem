@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -37,10 +38,8 @@ func cli(t *testing.T, dbPath string, allowedExits []int, args ...string) []byte
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
 			code := ee.ExitCode()
-			for _, allowed := range allowedExits {
-				if code == allowed {
-					return out
-				}
+			if slices.Contains(allowedExits, code) {
+				return out
 			}
 			t.Fatalf("cli %v exited %d (stderr: %s)", args, code, ee.Stderr)
 		}

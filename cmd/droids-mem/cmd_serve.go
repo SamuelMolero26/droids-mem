@@ -17,8 +17,9 @@ func newServeCmd(a *app) *cobra.Command {
 		Use:   "serve",
 		Short: "Run the MCP bridge server (Streamable HTTP + bearer auth)",
 		Long: `serve starts the droids-mem MCP bridge on the configured address.
-External agents (agentspan, remote droids) connect over JSON-RPC and call
-mem_save / mem_search / mem_context / mem_get.
+It is a LOCAL bridge: the default bind is loopback, and the only supported
+consumer is an agent host on this machine. Serving other machines is not a
+supported configuration — see future.todo "remote install".
 
 Requires DROIDS_MEM_MCP_TOKEN. Env overrides:
   DROIDS_MEM_MCP_ADDR     (default :7777)

@@ -374,21 +374,21 @@ func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, sy
 	// ones distinct. The rename is atomic — last writer wins.
 	tmp := fmt.Sprintf("%s.tmp.%d.%d", dbPath, os.Getpid(), buildNonce.Add(1))
 	_ = os.Remove(tmp)
-	db, err := sql.Open("sqlite", "file:"+tmp)
+	db, err := sql.Open("sqlite", "file:"+tmp+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		return fmt.Errorf("create graph db: %w", err)
 	}
 	err = func() error {
-		if _, err := db.Exec(schema); err != nil {
+		if _, err := db.ExecContext(ctx, schema); err != nil {
 			return fmt.Errorf("apply graph schema: %w", err)
 		}
-		tx, err := db.Begin()
+		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			return err
 		}
 		defer func() { _ = tx.Rollback() }()
 
-		symIns, err := tx.Prepare(`INSERT INTO symbols
+		symIns, err := tx.PrepareContext(ctx, `INSERT INTO symbols
 			(id, qname, name, kind, package, file, line, exported, signature, doc, source)
 			VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
 		if err != nil {
@@ -396,40 +396,40 @@ func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, sy
 		}
 		defer symIns.Close()
 		for _, s := range symbols {
-			if _, err := symIns.Exec(s.id, s.qname, s.name, s.kind, s.pkg, s.file, s.line,
+			if _, err := symIns.ExecContext(ctx, s.id, s.qname, s.name, s.kind, s.pkg, s.file, s.line,
 				s.exported, s.signature, s.doc, s.source); err != nil {
 				return fmt.Errorf("insert symbol %s: %w", s.qname, err)
 			}
 		}
-		edgeIns, err := tx.Prepare(`INSERT OR IGNORE INTO edges (caller, callee) VALUES (?,?)`)
+		edgeIns, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO edges (caller, callee) VALUES (?,?)`)
 		if err != nil {
 			return err
 		}
 		defer edgeIns.Close()
 		for e := range edges {
-			if _, err := edgeIns.Exec(e[0], e[1]); err != nil {
+			if _, err := edgeIns.ExecContext(ctx, e[0], e[1]); err != nil {
 				return err
 			}
 		}
-		implIns, err := tx.Prepare(`INSERT OR IGNORE INTO implements (iface, impl) VALUES (?,?)`)
+		implIns, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO implements (iface, impl) VALUES (?,?)`)
 		if err != nil {
 			return err
 		}
 		defer implIns.Close()
 		for e := range impls {
-			if _, err := implIns.Exec(e[0], e[1]); err != nil {
+			if _, err := implIns.ExecContext(ctx, e[0], e[1]); err != nil {
 				return err
 			}
 		}
 		// FTS mirror for the search fallback; rowid == symbols.id for the join back.
-		if _, err := tx.Exec(`INSERT INTO symbols_fts(rowid, qname, name, doc, signature)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO symbols_fts(rowid, qname, name, doc, signature)
 			SELECT id, qname, name, doc, signature FROM symbols`); err != nil {
 			return fmt.Errorf("populate symbols_fts: %w", err)
 		}
 		for k, v := range map[string]string{
 			"stamp": stampVal, "repo": repo, "module": module, "indexed_at": nowUTC(),
 		} {
-			if _, err := tx.Exec(`INSERT INTO meta (key, value) VALUES (?,?)`, k, v); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO meta (key, value) VALUES (?,?)`, k, v); err != nil {
 				return err
 			}
 		}
@@ -449,6 +449,17 @@ func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, sy
 	if err := ctx.Err(); err != nil {
 		_ = os.Remove(tmp)
 		return err
+	}
+	// Owner-only before publishing. SQLite creates the file at the umask
+	// default (typically 0644), and this one holds up to maxSourceBytes of
+	// verbatim source per symbol for every repo indexed. internal/db applies
+	// the same tightening to mem.db, on the reasoning that the 0700 state dir
+	// shields the files today but the files themselves hold unencrypted
+	// content — that argument is at least as strong here. Chmod before the
+	// rename so the published path is never world-readable.
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("tighten graph db perms: %w", err)
 	}
 	return os.Rename(tmp, dbPath)
 }
@@ -510,8 +521,8 @@ func recvTypeName(fl *ast.FieldList) string {
 func collapseWS(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return s[:i]
+	if before, _, ok := strings.Cut(s, "\n"); ok {
+		return before
 	}
 	return s
 }

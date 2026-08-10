@@ -1,0 +1,4 @@
+# Ignored modernization suggestions
+# Format: <date> <category> <description>
+2026-08-10 t-context Bulk t.Context() swap declined. 265 context.Background() sites in tests; nearly all pass the context straight into a synchronous store call that completes before the test returns, so the swap changes no behaviour and produces a 265-site diff. t.Context() is also cancelled just before t.Cleanup runs, which is a live hazard for the several helpers here that register cleanup (newTestStoreWithConn closes the DB there). Adopt t.Context() in NEW tests where cancellation actually matters; do not sweep.
+2026-08-10 pgo Not adopted. PGO needs a committed default.pgo plus a story for regenerating it; for a short-lived CLI the win is unproven. Revisit if a profile shows a hot path worth it.

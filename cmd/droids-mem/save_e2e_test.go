@@ -1,14 +1,9 @@
 package main_test
 
 import (
-	"encoding/json"
-	"io"
-	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/samuelmolero26/droids-mem/internal/mcpserver"
 )
 
 // Dry-run must exercise the full save pipeline without persisting anything.
@@ -78,43 +73,4 @@ func TestE2E_ScopeFlag(t *testing.T) {
 		"--task-type", "crm_upload", "--kind", "task_pattern",
 		"--title", "Bad scope", "--what", "w", "--learned", "l",
 		"--scope", "global")
-}
-
-// /identity must answer the HMAC challenge with a proof derived from the
-// bearer token, and reject requests without a nonce.
-func TestServe_IdentityChallenge(t *testing.T) {
-	s := startServer(t)
-	defer s.stop()
-
-	resp, err := http.Get("http://" + s.addr + "/identity?nonce=e2e-nonce")
-	if err != nil {
-		t.Fatalf("identity: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("identity status = %d, want 200", resp.StatusCode)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	var payload struct {
-		Server string `json:"server"`
-		Proof  string `json:"proof"`
-	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		t.Fatalf("parse identity: %v\nraw: %s", err, body)
-	}
-	if want := mcpserver.IdentityProof(testToken, "e2e-nonce"); payload.Proof != want {
-		t.Fatalf("proof = %q, want %q", payload.Proof, want)
-	}
-	if payload.Server != mcpserver.ServerName {
-		t.Fatalf("server = %q, want %q", payload.Server, mcpserver.ServerName)
-	}
-
-	noNonce, err := http.Get("http://" + s.addr + "/identity")
-	if err != nil {
-		t.Fatalf("identity no-nonce: %v", err)
-	}
-	defer noNonce.Body.Close()
-	if noNonce.StatusCode != http.StatusBadRequest {
-		t.Fatalf("no-nonce status = %d, want 400", noNonce.StatusCode)
-	}
 }

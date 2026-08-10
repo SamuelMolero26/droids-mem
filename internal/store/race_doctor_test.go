@@ -52,10 +52,8 @@ func TestSave_ConcurrentDedupe(t *testing.T) {
 	skipped := 0
 	var mu sync.Mutex
 
-	for i := 0; i < goroutines; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range goroutines {
+		wg.Go(func() {
 			resp, err := s.Save(context.Background(), req)
 			if err != nil {
 				errs <- err
@@ -69,7 +67,7 @@ func TestSave_ConcurrentDedupe(t *testing.T) {
 			case "skipped":
 				skipped++
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	close(errs)
@@ -96,7 +94,7 @@ func TestDoctor_HealthyDB(t *testing.T) {
 		Learned:  "y",
 	})
 
-	rep, err := s.Doctor(dbPath)
+	rep, err := s.Doctor(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("Doctor: %v", err)
 	}

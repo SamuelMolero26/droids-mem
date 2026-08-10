@@ -4,12 +4,12 @@
 package state
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/oklog/ulid/v2"
 )
 
 const (
@@ -30,6 +30,25 @@ func Dir() (string, error) {
 	return filepath.Join(home, ".droids-mem"), nil
 }
 
+// tokenBytes is the raw entropy behind a minted bearer token. 256 bits — well
+// past the 128-bit floor, and free: the token is written once and read back.
+const tokenBytes = 32
+
+// newToken mints a bearer token from crypto/rand. It must NOT come from a ULID
+// or any other seeded PRNG: oklog/ulid's default entropy is math/rand seeded
+// with time.Now().UnixNano(), so a token minted that way is recoverable from
+// the token file's own mtime, and the reader is monotonic on top of that. This
+// token is the only thing standing between another local account and the whole
+// memory corpus (the listener answers any process on loopback; the 0600 file
+// mode does not).
+func newToken() (string, error) {
+	b := make([]byte, tokenBytes)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate token: %w", err)
+	}
+	return "tok_" + base64.RawURLEncoding.EncodeToString(b), nil
+}
+
 // TokenPath returns Dir()/token.
 func TokenPath() (string, error) {
 	d, err := Dir()
@@ -42,7 +61,7 @@ func TokenPath() (string, error) {
 // LoadOrCreateToken returns the bearer token in this precedence:
 //  1. DROIDS_MEM_MCP_TOKEN env (callers can force a specific token)
 //  2. ~/.droids-mem/token (persisted across runs)
-//  3. A freshly generated `tok_<ULID>`, written 0600 to the token file
+//  3. A freshly generated `tok_<256 random bits>`, written 0600 to the token file
 //
 // File mode is 0600 so other local users cannot read the token. Parent dir
 // is created 0700 if missing.
@@ -68,7 +87,10 @@ func LoadOrCreateToken() (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create state dir: %w", err)
 	}
-	tok := "tok_" + ulid.Make().String()
+	tok, err := newToken()
+	if err != nil {
+		return "", err
+	}
 	if err := os.WriteFile(path, []byte(tok+"\n"), 0o600); err != nil {
 		return "", fmt.Errorf("write token file: %w", err)
 	}
