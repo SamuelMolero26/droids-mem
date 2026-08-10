@@ -37,7 +37,13 @@ Both suites isolate `DROIDS_MEM_DB` and `DROIDS_MEM_HOME` per test.
 | `DROIDS_MEM_MCP_ADDR` | `127.0.0.1:7777` | Bind address (loopback by default; non-loopback logs a plaintext warning) |
 | `DROIDS_MEM_MCP_ENDPOINT` | `/mcp` | `/healthz` + `/identity` always unauthenticated |
 
-State dir layout: `mem.db` (0600), `token` (0600), `mcp.pid`, `mcp.log`.
+State dir layout: `mem.db` (0600), `token` (0600), `mcp.pid`, `mcp.log`,
+`graph_last` (tool name; its **mtime** is the timestamp).
+
+`droids-mem statusline` prints `droids-mem:<tool>` when `graph_last` is under
+60 s old, nothing otherwise — a Claude Code `statusLine` segment that makes an
+agent's code-graph use visible instead of silent. Both the MCP handlers and the
+`graph` CLI leaves stamp it. Cosmetic only: write failures are swallowed.
 
 `/identity?nonce=<n>` answers `HMAC-SHA256(token, nonce)` — ensure-server uses it
 to verify a listener actually holds the token before reporting `already_running`
@@ -48,7 +54,7 @@ to verify a listener actually holds the token before reporting `already_running`
 Single binary, layered. Don't bypass layers:
 
 1. **`cmd/droids-mem/`** — cobra subcommands. One `cmd_*.go` per command; delegates to store, emits JSON via `output.go`. No business logic.
-2. **`internal/mcpserver/`** — MCP bridge (`server.go` wires HTTP + auth, `stdio.go` the stdio transport for host-spawned servers (`serve --stdio` — no port/token; instructions string forks one summary sentence per transport), `tools.go` defines the 4 memory tools, `graph_tools.go` the 2 code-graph tools). Operator commands (`list`, `schema`, `doctor`, `prune`) intentionally not exposed here.
+2. **`internal/mcpserver/`** — MCP bridge (`server.go` wires HTTP + auth, `stdio.go` the stdio transport for host-spawned servers (`serve --stdio` — no port/token; instructions string forks one summary sentence per transport), `tools.go` defines the 5 memory tools, `graph_tools.go` the 3 code-graph tools). Operator commands (`list`, `schema`, `doctor`, `prune`) intentionally not exposed here.
 3. **`internal/store/`** — all business logic shared by CLI and MCP. Key files:
    - `save.go` — validate → scrub → fingerprint → dedupe (2 layers) → insert; owns scrub *policy* (which fields, tag + identifier strict-reject, empty-after-scrub)
    - `search.go` — FTS5 MATCH queries
@@ -59,7 +65,7 @@ Single binary, layered. Don't bypass layers:
 4. **`internal/scrub/`** — the scrub *engine*: `spec.yaml` (embedded declarative detector spec, single source of truth, pinned-hash version enforcement), `scrub.go` (single-pass collect → overlap-resolve → splice, windowed scanning), `entropy.go` (deterministic gate for usage-class detectors), `corpus.go` + `testdata/` (fixture corpus, `[CUT]` defang convention). No store imports.
 5. **`internal/db/`** — `db.go` opens connection + applies pragmas; `schema.go` holds raw DDL string.
 6. **`internal/state/`** — `LoadOrCreateToken()` is the canonical bearer-token resolver. Owns all `~/.droids-mem/` file ops.
-7. **`internal/graph/`** — native code-graph subsystem: per-repo Go symbol/call-edge index under `~/.droids-mem/graphs/<hash>/graph.db`, built with `go/packages` + `callgraph/cha` (interface dispatch resolved, over-approximate). Staleness-check-on-query via a `.go` count/size/max-mtime stamp; a repo that stops type-checking serves the last good graph with `stale: true`. Shares NOTHING with the Memory model — no scrub, no dedupe, no retention, never mem.db. Consumed by `cmd_graph.go` (boot-gate bypassed — annotations don't inherit, each leaf carries the bypass) and `internal/mcpserver/graph_tools.go`. A call *into* a closure is not an edge; a call made *from* inside a closure is, attributed to the enclosing declaration.
+7. **`internal/graph/`** — native code-graph subsystem: per-repo Go symbol/call-edge index under `~/.droids-mem/graphs/<hash>/graph.db`, built with `go/packages` + `callgraph/cha` (interface dispatch resolved, over-approximate). Staleness-check-on-query via a `.go` count/size/max-mtime stamp; a repo that stops type-checking serves the last good graph with `stale: true`. A stamp whose build already failed is **not** rebuilt again until the stamp moves — retrying identical broken source once per query burns a full `go/packages` load exactly when an agent queries most. The per-repo build lock is a 1-buffered channel, not a mutex: an abandoned cold build holds it until it lands, so waiting on it must be abandonable or every other caller's deadline is unenforceable — `acquireLock` takes an uncontended lock unconditionally and only a contended one respects ctx. Graph db handles are refcounted (`connEntry`): a rebuild landing mid-query retires the handle but cannot close it until the last caller releases, so `ensureFresh`'s returned `release` func must always be deferred. `<hash>` is `sha256(canonical repo path)[:6]`, and that path is **normalized to the module root** (nearest ancestor `go.mod`) — a subdirectory would otherwise key a second cache built from only that subtree while `meta.module` still named the whole module, silently under-reporting callers and `transitive_callers`. That channel lock lives on `Manager`, so it cannot see other processes; under stdio (one server process per agent session) N sessions each ran a full type-check of the same tree. Builds therefore also take a `flock` on `<dir>/.build.lock` and **re-check the on-disk stamp after acquiring it** — the re-check is what turns queueing into coalescing, and it reads the stamp straight off disk because the file was replaced by a *different* process. A successful build sweeps cache dirs nothing can reach: repo path gone (deleted worktree, temp dir), or a repo that no longer keys to that dir. The sweep never deletes what it cannot prove — an unopenable db, a missing `meta.repo`, or a `Stat` error that is not `fs.ErrNotExist` all mean keep. Shares NOTHING with the Memory model — no scrub, no dedupe, no retention, never mem.db. Consumed by `cmd_graph.go` (boot-gate bypassed — annotations don't inherit, each leaf carries the bypass) and `internal/mcpserver/graph_tools.go`. A call *into* a closure is not an edge; a call made *from* inside a closure is, attributed to the enclosing declaration.
 
 ## Data model invariants
 
@@ -104,7 +110,7 @@ Session retention: on `session_summary` save, delete oldest if > 5 for that `tas
 
 ## MCP contract
 
-6 tools: `mem_save`, `mem_search`, `mem_context`, `mem_get` (memory) + `graph_symbol`, `graph_package` (code graph — signatures-first, agent passes `repo` = absolute project root).
+8 tools: `mem_save`, `mem_search`, `mem_context`, `mem_get`, `mem_corpus` (memory) + `graph_symbol`, `graph_package`, `graph_build_wait` (code graph — signatures-first, agent passes `repo` = absolute project root).
 
 - `mem_context` mints `session_id` (stateless server — agent stores and reuses it).
 - Auth: `Authorization: Bearer <token>` on every `/mcp` request. Stdio transport (`serve --stdio`) has no port/token — the pipe is private to the spawning host; same tool surface, only the instructions string's summary sentence differs (stdio hosts self-save a `session_summary`).

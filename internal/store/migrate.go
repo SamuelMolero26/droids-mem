@@ -10,15 +10,16 @@ import (
 	"github.com/samuelmolero26/droids-mem/internal/scrub"
 )
 
-// MigrateOptions controls the v1.0 baseline migration. Exactly one mode is
+// MigrateOptions controls the scrub-baseline migration. Exactly one mode is
 // expected at this layer — the CLI is responsible for rejecting ambiguous
 // flag combos before calling.
 type MigrateOptions struct {
 	// Rescrub rewrites every memory row with the current scrub patterns,
-	// refreshes its fingerprint + scrub_counts, and drops + recreates the FTS
-	// index with the v1.0 tokenizer. When false, Migrate runs the lighter
-	// `--no-rescrub` path: it still flips the FTS tokenizer (so search
-	// behavior is uniform across DBs) but leaves row bodies untouched.
+	// refreshing its fingerprint + scrub_counts. The tokenizer flip (porter
+	// stemmer) is owned by the db ladder's rung 7→8, applied automatically at
+	// boot — Migrate never touches the index. When false, Migrate runs the
+	// lighter `--no-rescrub` path: it stamps the scrub-baseline sentinel
+	// without touching row bodies.
 	Rescrub bool
 }
 
@@ -27,35 +28,89 @@ type MigrateOptions struct {
 type MigrateSummary struct {
 	Mode               string `json:"mode"`                        // "rescrub" | "no-rescrub"
 	RowsScanned        int    `json:"rows_scanned"`                // total rows visited
-	RowsRewritten      int    `json:"rows_rewritten"`              // UPDATEs issued
+	RowsRewritten      int    `json:"rows_rewritten"`              // rows whose title/what/learned actually changed after scrub
 	RowsWithRedactions int    `json:"rows_with_redactions"`        // subset whose scrub fired
 	TotalRedactions    int    `json:"total_redactions"`            // sum across all fields
-	FTSRebuilt         bool   `json:"fts_rebuilt"`                 // true once the tokenizer flip lands
 	BaselineSet        bool   `json:"scrub_baseline_complete_set"` // sentinel persisted
 	PatternVersion     int    `json:"pattern_version"`             // scrub.Version used
 }
 
-// Migrate establishes the v1.0 scrub baseline on s.DB(). It is intended to
-// be invoked by the `migrate` subcommand and runs atomically: any failure
-// rolls the database back to its pre-migrate shape. The boot gate uses the
-// `meta.scrub_baseline_complete='1'` sentinel this function sets, so callers
-// can read it back via db.AssertBootReady afterward.
-func Migrate(s *Store, opts MigrateOptions) (*MigrateSummary, error) {
+// SchemaVersionError aborts store.Migrate when the database's user_version is
+// not the binary's CurrentSchemaVersion. The ladder owns schema shape
+// (including the rung 7→8 tokenizer flip); store.Migrate only performs the
+// optional rescrub rewrite + sentinel stamp and must not run against a schema
+// the ladder has not brought current yet.
+//
+// This is defensive/test-only on the normal path — the CLI always opens via
+// db.Open → Init, which ladders first. The message deliberately says to open
+// with a current binary, never "run migrate --rescrub", so an old binary on a
+// NEWER database is not mis-advised (its ladder cannot catch up).
+type SchemaVersionError struct {
+	Current  int // the database's user_version
+	Required int // db.CurrentSchemaVersion the ladder targets
+}
+
+func (e *SchemaVersionError) Error() string {
+	return fmt.Sprintf("cannot migrate: database schema is v%d but the migration ladder requires v%d — open the database with a current binary once to apply pending ladder rungs", e.Current, e.Required)
+}
+
+// FingerprintCollisionError aborts --rescrub when two rows converge to the
+// same post-scrub fingerprint. The operator resolves the duplicate; there is
+// no auto-merge (locked decision 3).
+type FingerprintCollisionError struct {
+	RowID        string // row being rewritten
+	CollidesWith string // existing row already holding the fingerprint
+	Fingerprint  string
+}
+
+// Error carries the full remediation, not just the diagnosis, because on the
+// auto-migration path this string is all the operator gets: the boot gate
+// returns its own error and only logs this one, so the `migrate` command's
+// suggestion field never renders. Deduping the row requires `prune`, which
+// does not bypass the gate — hence the --no-rescrub step.
+func (e *FingerprintCollisionError) Error() string {
+	return fmt.Sprintf("rescrub collision: row %q re-fingerprints to %q, already held by row %q — delete or merge one of the two, then re-run 'droids-mem migrate --rescrub'. While the boot gate is still closed no command can reach the rows: open it first with 'droids-mem migrate --no-rescrub', which marks the scrub baseline complete on still-unscrubbed rows — so the closing --rescrub is required, not optional",
+		e.RowID, e.Fingerprint, e.CollidesWith)
+}
+
+// Migrate establishes the scrub baseline on s.DB(): optionally rewrites every
+// row through the current scrub patterns and stamps the
+// meta.scrub_baseline_complete='1' sentinel the boot gate checks. It is
+// intended to be invoked by the `migrate` subcommand and runs atomically: any
+// failure rolls the database back to its pre-migrate shape.
+//
+// Schema shape (including the tokenizer flip) is the ladder's job — see
+// SchemaVersionError. Migrate performs no schema or index work of its own.
+//
+// ctx cancels the rescrub: it is the longest-running write in the binary and
+// also runs unattended from the boot gate's auto-migration, so a caller that
+// gives up must be able to stop it. Cancelling aborts inside BEGIN IMMEDIATE,
+// so the database rolls back to its pre-migrate shape with no sentinel — the
+// gate stays closed and the operator can retry.
+func Migrate(ctx context.Context, s *Store, opts MigrateOptions) (*MigrateSummary, error) {
 	summary := &MigrateSummary{
+		Mode:           "no-rescrub",
 		PatternVersion: scrub.Version,
 	}
 	if opts.Rescrub {
 		summary.Mode = "rescrub"
-	} else {
-		summary.Mode = "no-rescrub"
 	}
 
-	ctx := context.Background()
 	conn, err := s.DB().Conn(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("acquire conn: %w", err)
 	}
 	defer conn.Close()
+
+	// Precondition (read-only, before any write): refuse to run the data
+	// migration against a schema the ladder has not brought current yet.
+	var v int
+	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&v); err != nil {
+		return nil, fmt.Errorf("read user_version: %w", err)
+	}
+	if v != db.CurrentSchemaVersion {
+		return nil, &SchemaVersionError{Current: v, Required: db.CurrentSchemaVersion}
+	}
 
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return nil, fmt.Errorf("begin immediate: %w", err)
@@ -63,33 +118,18 @@ func Migrate(s *Store, opts MigrateOptions) (*MigrateSummary, error) {
 	committed := false
 	defer func() {
 		if !committed {
-			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+			// Background, not ctx: cancellation is the main reason this fires,
+			// and the rollback still has to run on a dead ctx (same pattern as
+			// save.go / prune.go).
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 		}
 	}()
-
-	// Tear down the FTS index + triggers up front so subsequent row UPDATEs
-	// (when --rescrub) don't fire trigger writes against a soon-to-be-dropped
-	// table. The recreate at the end of the migration uses the v1.0 DDL.
-	if err := dropFTSAndTriggers(ctx, conn); err != nil {
-		return nil, fmt.Errorf("drop FTS for rebuild: %w", err)
-	}
 
 	if opts.Rescrub {
 		if err := rewriteAllRows(ctx, conn, summary); err != nil {
 			return nil, fmt.Errorf("rescrub rows: %w", err)
 		}
 	}
-
-	if _, err := conn.ExecContext(ctx, db.FTSSchema); err != nil {
-		return nil, fmt.Errorf("recreate FTS: %w", err)
-	}
-	if _, err := conn.ExecContext(ctx, `
-		INSERT INTO memories_fts(rowid, title, what, learned, tags)
-		SELECT rowid, title, what, learned, tags FROM memories
-	`); err != nil {
-		return nil, fmt.Errorf("reindex FTS: %w", err)
-	}
-	summary.FTSRebuilt = true
 
 	if _, err := conn.ExecContext(ctx, `
 		INSERT INTO meta(key, value) VALUES('scrub_baseline_complete', '1')
@@ -104,21 +144,6 @@ func Migrate(s *Store, opts MigrateOptions) (*MigrateSummary, error) {
 	}
 	committed = true
 	return summary, nil
-}
-
-func dropFTSAndTriggers(ctx context.Context, conn *sql.Conn) error {
-	stmts := []string{
-		`DROP TRIGGER IF EXISTS memories_ai`,
-		`DROP TRIGGER IF EXISTS memories_ad`,
-		`DROP TRIGGER IF EXISTS memories_au`,
-		`DROP TABLE IF EXISTS memories_fts`,
-	}
-	for _, stmt := range stmts {
-		if _, err := conn.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("%s: %w", stmt, err)
-		}
-	}
-	return nil
 }
 
 // rewriteAllRows walks every memory row, re-runs the current scrub patterns,
@@ -165,7 +190,18 @@ func rewriteAllRows(ctx context.Context, conn *sql.Conn, summary *MigrateSummary
 
 	summary.RowsScanned = len(states)
 
+	// fpOwners maps each post-scrub fingerprint to the first row holding it,
+	// so a re-fingerprint collision is detected in the collect pass — BEFORE
+	// the apply pass issues any UPDATE. The txn rollback remains the backstop
+	// for anything this misses (e.g. a DB-level UNIQUE violation).
+	fpOwners := make(map[string]string, len(states))
 	for i := range states {
+		// The scrub pass is pure Go between SQL statements, so without this a
+		// cancelled caller would keep scrubbing the whole corpus before the
+		// next ExecContext noticed.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		st := &states[i]
 		titleOut, titleRep := scrub.Scrub(st.title)
 		whatOut, whatRep := scrub.Scrub(st.what)
@@ -177,6 +213,11 @@ func rewriteAllRows(ctx context.Context, conn *sql.Conn, summary *MigrateSummary
 		st.what = whatOut
 		st.learned = learnedOut
 		st.fp = fingerprint(st.taskType, st.kind, st.title, st.learned)
+
+		if owner, exists := fpOwners[st.fp]; exists {
+			return &FingerprintCollisionError{RowID: st.id, CollidesWith: owner, Fingerprint: st.fp}
+		}
+		fpOwners[st.fp] = st.id
 
 		if st.report.RedactionCount > 0 {
 			summary.RowsWithRedactions++
@@ -210,7 +251,11 @@ func rewriteAllRows(ctx context.Context, conn *sql.Conn, summary *MigrateSummary
 		); err != nil {
 			return fmt.Errorf("update %s: %w", st.id, err)
 		}
-		summary.RowsRewritten++
+		// rows_rewritten counts rows whose content actually changed after
+		// scrub, not UPDATEs issued (SM-R4).
+		if st.changed {
+			summary.RowsRewritten++
+		}
 	}
 	return nil
 }

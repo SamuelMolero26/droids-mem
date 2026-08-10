@@ -11,6 +11,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/samuelmolero26/droids-mem/internal/graph"
+	"github.com/samuelmolero26/droids-mem/internal/state"
 )
 
 // registerGraphTools exposes the native code-graph subsystem (ADR-0020) as
@@ -62,6 +63,7 @@ STALE GRAPH: the freshness.stale flag is true when the repo changed but no longe
 
 func graphSymbolHandler(gm *graph.Manager) func(context.Context, mcp.CallToolRequest, graphSymbolArgs) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, _ mcp.CallToolRequest, a graphSymbolArgs) (*mcp.CallToolResult, error) {
+		state.RecordGraphUse("graph_symbol")
 		resp, err := gm.Symbol(ctx, graph.SymbolRequest{
 			Repo:      a.Repo,
 			Symbol:    a.Symbol,
@@ -99,6 +101,7 @@ STALE GRAPH: same staleness semantics as graph_symbol. When freshness.stale is t
 
 func graphPackageHandler(gm *graph.Manager) func(context.Context, mcp.CallToolRequest, graphPackageArgs) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, _ mcp.CallToolRequest, a graphPackageArgs) (*mcp.CallToolResult, error) {
+		state.RecordGraphUse("graph_package")
 		resp, err := gm.Package(ctx, graph.PackageRequest{Repo: a.Repo, Package: a.Package})
 		if err != nil {
 			return graphToolErr(err), nil
@@ -109,6 +112,12 @@ func graphPackageHandler(gm *graph.Manager) func(context.Context, mcp.CallToolRe
 
 // ---------- graph_build_wait ----------
 
+// Bounds for graph_build_wait, mirrored in the tool schema below.
+const (
+	defaultBuildWait = 10 * time.Second
+	maxBuildWait     = 60 * time.Second
+)
+
 type graphBuildWaitArgs struct {
 	Repo    string `json:"repo"`
 	Timeout int    `json:"timeout,omitempty"` // seconds, default 10
@@ -116,7 +125,7 @@ type graphBuildWaitArgs struct {
 
 func graphBuildWaitToolDef() mcp.Tool {
 	return mcp.NewTool("graph_build_wait",
-		mcp.WithDescription("Block until any active async rebuild for the repo finishes, or until timeout. Returns the final freshness state. Use after graph_symbol returns rebuilding: true."),
+		mcp.WithDescription("Bring the repo's graph up to date and block until that finishes, or until timeout. Attaches to a rebuild already in flight, and triggers one if the graph is stale but no build has started. Returns the final freshness state; completed: false means the timeout expired first, not that anything failed. Use after graph_symbol returns rebuilding: true."),
 		mcp.WithString("repo", mcp.Required(),
 			mcp.Description("Absolute path to the repo root (your project working directory).")),
 		mcp.WithNumber("timeout",
@@ -128,10 +137,15 @@ func graphBuildWaitToolDef() mcp.Tool {
 
 func graphBuildWaitHandler(gm *graph.Manager) func(context.Context, mcp.CallToolRequest, graphBuildWaitArgs) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, _ mcp.CallToolRequest, a graphBuildWaitArgs) (*mcp.CallToolResult, error) {
+		state.RecordGraphUse("graph_build_wait")
+		// Clamp server-side: mcp.Min/Max above is schema advice to the client,
+		// not a guarantee, so a client that ignores it must not pin a build slot
+		// for an unbounded wait. Depth on graph_symbol is clamped the same way.
 		timeout := time.Duration(a.Timeout) * time.Second
 		if a.Timeout <= 0 {
-			timeout = 10 * time.Second
+			timeout = defaultBuildWait
 		}
+		timeout = min(timeout, maxBuildWait)
 		resp, err := gm.WaitBuild(ctx, a.Repo, timeout)
 		if err != nil {
 			return graphToolErr(err), nil

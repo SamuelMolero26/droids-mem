@@ -196,7 +196,7 @@ func spawnDetached(addr, token string) (int, error) {
 
 	pid := cmd.Process.Pid
 	pidPath := filepath.Join(dir, state.PidFile)
-	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", pid)), 0o600); err != nil {
+	if err := os.WriteFile(pidPath, fmt.Appendf(nil, "%d\n", pid), 0o600); err != nil {
 		// Non-fatal: server still spawned. Surface as log line in mcp.log.
 		fmt.Fprintf(logFile, "warn: write pidfile: %v\n", err)
 	}

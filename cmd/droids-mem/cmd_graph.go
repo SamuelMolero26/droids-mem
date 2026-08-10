@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -26,6 +28,26 @@ func graphTarget(args []string, flagVal, kind string) (string, error) {
 	default:
 		return "", fmt.Errorf("provide a %s: as an argument (`graph %s <%s>`) or via --%s", kind, kind, kind, kind)
 	}
+}
+
+// graphCLIWait bounds how long a one-shot CLI query waits for a rebuild it
+// triggered. Generous, because the alternative is answering from a graph that
+// is known to be out of date.
+const graphCLIWait = 60 * time.Second
+
+// freshenForCLI brings the repo's graph up to date before a read query.
+//
+// The CLI is a one-shot process: it exits the moment the command returns, so an
+// async rebuild has nobody to hand its result to and dies unfinished. Without
+// this, a stale graph on the CLI path could never refresh — every invocation
+// restarted the same build and then killed it. `graph index` is unaffected: it
+// already rebuilds synchronously.
+//
+// Failures are deliberately swallowed. WaitBuild returning an error (or timing
+// out) is not fatal here: the query below still serves the last good graph, and
+// its freshness line reports the staleness and the index error.
+func freshenForCLI(ctx context.Context, gm *graph.Manager, repo string) {
+	_, _ = gm.WaitBuild(ctx, repo, graphCLIWait)
 }
 
 // graphManager builds the code-graph manager rooted at <state dir>/graphs.
@@ -73,6 +95,7 @@ automatically when the repo changes. See docs/adr/0020-native-code-graph.md.`,
 				return err
 			}
 			defer gm.Close()
+			state.RecordGraphUse("graph_index")
 			resp, err := gm.Index(cmd.Context(), resolveRepo())
 			if err != nil {
 				writeError("graph_index_failed", err.Error(), true)
@@ -102,6 +125,8 @@ automatically when the repo changes. See docs/adr/0020-native-code-graph.md.`,
 				return err
 			}
 			defer gm.Close()
+			state.RecordGraphUse("graph_symbol")
+			freshenForCLI(cmd.Context(), gm, resolveRepo())
 			resp, err := gm.Symbol(cmd.Context(), graph.SymbolRequest{
 				Repo:      resolveRepo(),
 				Symbol:    target,
@@ -138,6 +163,8 @@ automatically when the repo changes. See docs/adr/0020-native-code-graph.md.`,
 				return err
 			}
 			defer gm.Close()
+			state.RecordGraphUse("graph_package")
+			freshenForCLI(cmd.Context(), gm, resolveRepo())
 			resp, err := gm.Package(cmd.Context(), graph.PackageRequest{
 				Repo:    resolveRepo(),
 				Package: target,

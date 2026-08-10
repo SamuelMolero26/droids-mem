@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"fmt"
 	"os"
 )
@@ -33,7 +34,11 @@ type DoctorReport struct {
 // optimizes it, and VACUUMs the database. Returns a structured report.
 //
 // dbPath is needed only to stat the file before/after for bytes_freed.
-func (s *Store) Doctor(dbPath string) (*DoctorReport, error) {
+//
+// ctx is threaded into every statement: VACUUM rewrites the whole database and
+// on a large corpus is by far the longest operation this binary runs, so a
+// caller that gives up must be able to stop it.
+func (s *Store) Doctor(ctx context.Context, dbPath string) (*DoctorReport, error) {
 	rep := &DoctorReport{Status: "ok"}
 
 	if info, err := os.Stat(dbPath); err == nil {
@@ -42,10 +47,10 @@ func (s *Store) Doctor(dbPath string) (*DoctorReport, error) {
 
 	// integrity-check raises an error if the FTS index is out of sync with
 	// the base table. We capture and report rather than failing the call.
-	if _, err := s.db.Exec(`INSERT INTO memories_fts(memories_fts) VALUES('integrity-check')`); err != nil {
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO memories_fts(memories_fts) VALUES('integrity-check')`); err != nil {
 		rep.IntegrityOK = false
 		rep.IntegrityErr = err.Error()
-		if _, rerr := s.db.Exec(`INSERT INTO memories_fts(memories_fts) VALUES('rebuild')`); rerr != nil {
+		if _, rerr := s.db.ExecContext(ctx, `INSERT INTO memories_fts(memories_fts) VALUES('rebuild')`); rerr != nil {
 			return nil, fmt.Errorf("rebuild fts: %w", rerr)
 		}
 		rep.Rebuilt = true
@@ -53,12 +58,12 @@ func (s *Store) Doctor(dbPath string) (*DoctorReport, error) {
 		rep.IntegrityOK = true
 	}
 
-	if _, err := s.db.Exec(`INSERT INTO memories_fts(memories_fts) VALUES('optimize')`); err != nil {
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO memories_fts(memories_fts) VALUES('optimize')`); err != nil {
 		return nil, fmt.Errorf("optimize fts: %w", err)
 	}
 	rep.Optimized = true
 
-	if _, err := s.db.Exec(`VACUUM`); err != nil {
+	if _, err := s.db.ExecContext(ctx, `VACUUM`); err != nil {
 		return nil, fmt.Errorf("vacuum: %w", err)
 	}
 	rep.Vacuumed = true
@@ -68,7 +73,7 @@ func (s *Store) Doctor(dbPath string) (*DoctorReport, error) {
 		rep.BytesFreed = rep.BytesBefore - rep.BytesAfter
 	}
 
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM memories`).Scan(&rep.TotalRows); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memories`).Scan(&rep.TotalRows); err != nil {
 		return nil, fmt.Errorf("count memories: %w", err)
 	}
 

@@ -39,7 +39,7 @@ Safe to run at any time.`,
 				writeJSON(rep)
 				return nil
 			}
-			rep, err := s.Doctor(db.ResolvePath())
+			rep, err := s.Doctor(cmd.Context(), db.ResolvePath())
 			if err != nil {
 				writeError("doctor_failed", err.Error(), true)
 				exitWith(ExitError)

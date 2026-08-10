@@ -57,7 +57,7 @@ All output is JSON on stdout; errors are JSON on stderr. Exit codes: `0` ok,
 ### Wire it to your agent
 
 ```shell
-# One-shot: hooks, MCP bridge, and CLAUDE.md block
+# One-shot: hooks, stdio MCP registration, and CLAUDE.md block
 droids-mem install --all
 
 # Or per host
@@ -65,7 +65,8 @@ droids-mem install --host opencode
 droids-mem install --host codex
 ```
 
-Done. Your agent now has persistent memory.
+Done. Your agent now has persistent memory. Claude Code connects over **stdio**
+(`serve --stdio`) — no port, no token file; the host owns the server lifecycle.
 
 ---
 
@@ -121,7 +122,7 @@ droids-mem hooks into Claude Code's lifecycle natively:
 
 | Event | What happens |
 |---|---|
-| `SessionStart` | Starts the MCP bridge; recovers crashed-run summaries |
+| `SessionStart` | Recovers crashed-run summaries (the host spawns `serve --stdio` itself) |
 | `UserPromptSubmit` | Injects relevant prior memories for the prompt |
 | `PostToolUse` | Counts meaningful work (intake gate) |
 | `Stop` | Once enough is unstaged, asks the model to record progress |
@@ -199,18 +200,21 @@ cd droids-mem && go build ./cmd/droids-mem
 
 ## MCP tools
 
-Six tools over the MCP bridge (bearer auth, or stdio for host-spawned servers):
+Eight tools over the MCP bridge (bearer auth, or stdio for host-spawned
+servers):
 
 **Memory**
 - `mem_save` — persist a lesson (scrubs + dedupes).
 - `mem_search` — full-text search (BM25 ranked).
 - `mem_context` — two-tier context bundle for a `task_type`; mints a `session_id`.
 - `mem_get` — fetch one memory by ID.
+- `mem_corpus` — census of the corpus (task types, counts, recent summaries).
 
 **Code graph** (Go repos)
 - `graph_symbol` — a symbol's source plus callers/callees (and interface↔concrete
   `implements` edges) as signature stubs.
 - `graph_package` — a package's exported surface, signatures only.
+- `graph_build_wait` — block until the repo's graph index is fresh.
 
 Graph responses render as **TOON** (Token-Oriented Object Notation) — one shared
 header per neighbor array instead of repeating JSON keys on every row — to keep
@@ -222,7 +226,7 @@ Operator commands (`list`, `schema`, `doctor`, `migrate`, `prune`, `scrub`) are
 ```shell
 droids-mem ensure-server   # ping /healthz, spawn detached serve if down
 droids-mem serve           # foreground MCP bridge (Streamable HTTP)
-droids-mem serve --stdio   # MCP over stdin/stdout (for codex, opencode, cursor)
+droids-mem serve --stdio   # MCP over stdin/stdout (for Claude Code, codex, opencode)
 ```
 
 Auth: `Authorization: Bearer <token>` on every `/mcp` request.
@@ -242,9 +246,10 @@ Auth: `Authorization: Bearer <token>` on every `/mcp` request.
 | `tui` | Interactive terminal browser |
 | `prune` | Delete memories or find duplicate clusters |
 | `graph` | Query a Go repo's code graph (index, symbol, package) |
+| `statusline` | Print `droids-mem:<tool>` when a graph tool ran in the last 60 s (for a Claude Code status line) |
 | `recent-sessions` | List auto-saved session summaries |
 | `session` | Session-memory plumbing (stage, check, flush, recover, hook) |
-| `install` | Wire into a host: Claude Code hooks, or `--host codex\|opencode` |
+| `install` | Wire into a host: Claude Code hooks + stdio MCP, or `--host codex\|opencode` |
 | `uninstall` | Reverse `install`: unwire hooks, deregister bridge, strip CLAUDE.md block |
 | `doctor` | FTS integrity/rebuild, optimize, VACUUM, scrub stats |
 | `schema` | Show parameter schema for a command |

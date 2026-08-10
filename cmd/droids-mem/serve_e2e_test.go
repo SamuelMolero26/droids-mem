@@ -16,6 +16,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/samuelmolero26/droids-mem/internal/mcpserver"
 )
 
 const (
@@ -161,9 +163,9 @@ func stripSSE(b []byte) []byte {
 	if !strings.Contains(s, "data:") {
 		return b
 	}
-	for _, line := range strings.Split(s, "\n") {
-		if strings.HasPrefix(line, "data:") {
-			return []byte(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+	for line := range strings.SplitSeq(s, "\n") {
+		if after, ok := strings.CutPrefix(line, "data:"); ok {
+			return []byte(strings.TrimSpace(after))
 		}
 	}
 	return b
@@ -405,5 +407,46 @@ func TestServeE2E_GracefulShutdownExitsZero(t *testing.T) {
 	}
 	if !strings.Contains(s.stderr.String(), "shutdown complete") {
 		t.Errorf("missing 'shutdown complete' log; stderr=%s", s.stderr.String())
+	}
+}
+
+// ---------- /identity challenge-response ----------
+
+// /identity must answer the HMAC challenge with a proof derived from the
+// bearer token, and reject requests without a nonce.
+func TestServe_IdentityChallenge(t *testing.T) {
+	s := startServer(t)
+	defer s.stop()
+
+	resp, err := http.Get("http://" + s.addr + "/identity?nonce=e2e-nonce")
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("identity status = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	var payload struct {
+		Server string `json:"server"`
+		Proof  string `json:"proof"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("parse identity: %v\nraw: %s", err, body)
+	}
+	if want := mcpserver.IdentityProof(testToken, "e2e-nonce"); payload.Proof != want {
+		t.Fatalf("proof = %q, want %q", payload.Proof, want)
+	}
+	if payload.Server != mcpserver.ServerName {
+		t.Fatalf("server = %q, want %q", payload.Server, mcpserver.ServerName)
+	}
+
+	noNonce, err := http.Get("http://" + s.addr + "/identity")
+	if err != nil {
+		t.Fatalf("identity no-nonce: %v", err)
+	}
+	defer noNonce.Body.Close()
+	if noNonce.StatusCode != http.StatusBadRequest {
+		t.Fatalf("no-nonce status = %d, want 400", noNonce.StatusCode)
 	}
 }

@@ -131,14 +131,8 @@ func appendWindowedMatches(raws []rawMatch, d detector, idx int, text, haystack 
 				off = pos + len(n)
 				continue
 			}
-			start := pos - windowMargin
-			if start < 0 {
-				start = 0
-			}
-			end := pos + d.window
-			if end > len(text) {
-				end = len(text)
-			}
+			start := max(pos-windowMargin, 0)
+			end := min(pos+d.window, len(text))
 			for _, loc := range d.re.FindAllStringSubmatchIndex(text[start:end], -1) {
 				if seen[loc[0]+start] {
 					continue
@@ -183,10 +177,7 @@ const guardSpan = 64
 // after pos. A prose mention of "token" has no nearby ':'/'=' and is skipped
 // before the (comparatively expensive) window regex runs.
 func guardNearby(haystack string, pos int, guardChars string) bool {
-	end := pos + guardSpan
-	if end > len(haystack) {
-		end = len(haystack)
-	}
+	end := min(pos+guardSpan, len(haystack))
 	return strings.ContainsAny(haystack[pos:end], guardChars)
 }
 

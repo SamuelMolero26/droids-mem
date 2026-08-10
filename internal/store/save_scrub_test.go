@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -159,7 +160,7 @@ func TestSave_TagContainsSecret_EmailTag(t *testing.T) {
 	if len(ve.OffendingTags) != 1 || ve.OffendingTags[0] != "alice@example.com" {
 		t.Errorf("offending_tags = %v, want [alice@example.com]", ve.OffendingTags)
 	}
-	if !contains(ve.MatchedPatterns, "email") {
+	if !slices.Contains(ve.MatchedPatterns, "email") {
 		t.Errorf("matched_patterns = %v, want to contain 'email'", ve.MatchedPatterns)
 	}
 }
@@ -173,8 +174,47 @@ func TestSave_TagContainsSecret_AwsToken(t *testing.T) {
 	if ve.Code != "tag_contains_secret" {
 		t.Errorf("code = %q, want 'tag_contains_secret'", ve.Code)
 	}
-	if !contains(ve.MatchedPatterns, "aws_key") {
+	if !slices.Contains(ve.MatchedPatterns, "aws_key") {
 		t.Errorf("matched_patterns = %v, want to contain 'aws_key'", ve.MatchedPatterns)
+	}
+}
+
+// Identifier fields (task_type, session_id) are persisted unscrubbed, so any
+// scrub-detector hit must strict-reject the save — mirror of the tags policy
+// above.
+func TestSave_RejectsSecretInIdentifiers(t *testing.T) {
+	s := newTestStore(t)
+
+	secretTaskType := "sk-ant-" + strings.Repeat("a", 50)
+	req := store.SaveRequest{
+		TaskType: secretTaskType,
+		Kind:     "task_pattern",
+		Title:    "t",
+		What:     "w",
+		Learned:  "l",
+	}
+	_, err := s.Save(context.Background(), req)
+	ve := mustValidationError(t, err)
+	if ve.Code != "task_type_contains_secret" || ve.Field != "task_type" {
+		t.Fatalf("got code=%q field=%q, want task_type_contains_secret/task_type", ve.Code, ve.Field)
+	}
+	if !ve.Retryable {
+		t.Fatal("identifier secret rejection must be retryable")
+	}
+
+	req.TaskType = "crm_upload"
+	req.SessionID = "sess_x7Kp9q2mNv8wLz4r" // benign — must save
+	if _, err := s.Save(context.Background(), req); err != nil {
+		t.Fatalf("benign session_id rejected: %v", err)
+	}
+
+	req.Title = "different title entirely for new fingerprint"
+	req.Learned = "another lesson body to avoid dedupe"
+	req.SessionID = "ghp_" + strings.Repeat("A", 36)
+	_, err = s.Save(context.Background(), req)
+	ve = mustValidationError(t, err)
+	if ve.Code != "session_id_contains_secret" {
+		t.Fatalf("got code=%q, want session_id_contains_secret", ve.Code)
 	}
 }
 
@@ -206,7 +246,7 @@ func TestSave_ScrubsEmailFromLearned(t *testing.T) {
 	if resp.Scrub.PerPatternCounts["email"] != 1 {
 		t.Errorf("email count = %d, want 1", resp.Scrub.PerPatternCounts["email"])
 	}
-	if !contains(resp.Scrub.FieldsRedacted, "learned") {
+	if !slices.Contains(resp.Scrub.FieldsRedacted, "learned") {
 		t.Errorf("fields_redacted = %v, want to contain 'learned'", resp.Scrub.FieldsRedacted)
 	}
 	if resp.Scrub.PatternVersion != scrub.Version {
@@ -332,15 +372,6 @@ func mustValidationError(t *testing.T, err error) *store.ValidationError {
 		t.Fatalf("expected *store.ValidationError, got %T: %v", err, err)
 	}
 	return ve
-}
-
-func contains(haystack []string, needle string) bool {
-	for _, s := range haystack {
-		if s == needle {
-			return true
-		}
-	}
-	return false
 }
 
 func readScope(t *testing.T, s *store.Store, id string) string {

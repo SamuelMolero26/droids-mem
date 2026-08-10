@@ -51,7 +51,7 @@ func TestGet_MultipleIncrements(t *testing.T) {
 	s := newTestStore(t)
 	saved, _ := s.Save(context.Background(), validReq())
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if _, err := s.Get(context.Background(), saved.ID); err != nil {
 			t.Fatalf("Get #%d: %v", i, err)
 		}

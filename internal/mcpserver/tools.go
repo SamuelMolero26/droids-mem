@@ -345,7 +345,12 @@ func toolErr(err error) *mcp.CallToolResult {
 			MatchedPatterns: ve.MatchedPatterns,
 			Scrub:           ve.Scrub,
 		}
-		b, _ := json.Marshal(payload)
+		b, merr := json.Marshal(payload)
+		if merr != nil {
+			// Scrub carries float rates; an unencodable one must not cost the
+			// agent the reason its save was rejected.
+			return mcp.NewToolResultError(ve.Message)
+		}
 		return mcp.NewToolResultError(string(b))
 	}
 	// Runtime errors (dominant case: BEGIN IMMEDIATE write-lock timeout under
@@ -354,7 +359,7 @@ func toolErr(err error) *mcp.CallToolResult {
 	// ponytail: retryable:true for all runtime errors here — the common one is
 	// transient (busy); the rare non-retryable ones (marshal/disk) self-limit
 	// on one retry. Sniff the sqlite code only if that becomes a real problem.
-	b, _ := json.Marshal(struct {
+	b, merr := json.Marshal(struct {
 		Status     string `json:"status"`
 		Error      string `json:"error"`
 		Message    string `json:"message"`
@@ -367,5 +372,8 @@ func toolErr(err error) *mcp.CallToolResult {
 		Retryable:  true,
 		Suggestion: "retry after a short backoff",
 	})
+	if merr != nil {
+		return mcp.NewToolResultError(err.Error())
+	}
 	return mcp.NewToolResultError(string(b))
 }
