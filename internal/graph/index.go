@@ -450,6 +450,17 @@ func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, sy
 		_ = os.Remove(tmp)
 		return err
 	}
+	// Owner-only before publishing. SQLite creates the file at the umask
+	// default (typically 0644), and this one holds up to maxSourceBytes of
+	// verbatim source per symbol for every repo indexed. internal/db applies
+	// the same tightening to mem.db, on the reasoning that the 0700 state dir
+	// shields the files today but the files themselves hold unencrypted
+	// content — that argument is at least as strong here. Chmod before the
+	// rename so the published path is never world-readable.
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("tighten graph db perms: %w", err)
+	}
 	return os.Rename(tmp, dbPath)
 }
 
