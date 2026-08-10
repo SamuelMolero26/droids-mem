@@ -26,10 +26,13 @@ type migration struct {
 //
 // The FTS5 tokenizer flip (decision #17 in the v1.0 plan) lives in rung 7→8:
 // the auto-applied ladder drops the trigram FTS + sync triggers, recreates
-// them from FTSSchema (porter stemmer), and reindexes from memories — all
-// inside the rung transaction. store.Migrate no longer owns any FTS work; it
-// performs only the optional rescrub row rewrite and the scrub-baseline
-// sentinel stamp.
+// them with the porter stemmer, and reindexes from memories — all inside the
+// rung transaction. store.Migrate no longer owns any FTS work; it performs
+// only the optional rescrub row rewrite and the scrub-baseline sentinel stamp.
+//
+// Every rung's SQL is frozen at the shape it shipped with and never composed
+// from the live schema.go consts — see ftsSchemaV8 for why, and
+// TestMigrations_RungsDoNotEmbedLiveSchema for the guard.
 var migrations = []migration{
 	{from: 0, to: 1, sql: migrationV0ToV1},
 	{from: 1, to: 2, sql: migrationV1ToV2},
@@ -167,15 +170,66 @@ CREATE TABLE IF NOT EXISTS archived_memories (
 
 // migrationV7ToV8 flips the FTS5 tokenizer from trigram to porter
 // (decision #17): drop the trigram index + its sync triggers, recreate both
-// from FTSSchema (schema.go — single source of truth), and reindex from
-// memories. Pure SQL, idempotent (IF EXISTS/IF NOT EXISTS + version gate
-// skips at v8), and row-preserving (explicit rowid in the SELECT — no
-// INSERT OR REPLACE on memories). SQLite DDL is transactional, so the rung
-// either fully lands with its user_version bump or rolls back whole.
+// at the v8 shape, and reindex from memories. Pure SQL, idempotent (IF
+// EXISTS/IF NOT EXISTS + version gate skips at v8), and row-preserving
+// (explicit rowid in the SELECT — no INSERT OR REPLACE on memories). SQLite
+// DDL is transactional, so the rung either fully lands with its user_version
+// bump or rolls back whole.
 //
 // The tokenizer flip moved here from store.Migrate so the boot ladder owns
 // the flip once per DB at upgrade; `migrate` no longer touches FTS.
-const migrationV7ToV8 = dropFTSTriggersAndTable + FTSSchema + reindexFromMemories
+const migrationV7ToV8 = dropFTSTriggersAndTable + ftsSchemaV8 + reindexFromMemories
+
+// ftsSchemaV8 is the FTS5 virtual table + sync triggers FROZEN at the shape
+// rung 7→8 shipped with. It is a deliberate byte-copy of schema.go's FTSSchema
+// as of v8 and must never be edited: a rung is history, so the SQL a given
+// user_version transition executes has to stay fixed for every database that
+// has not run it yet. Referencing the live FTSSchema instead would mean the
+// next tokenizer or column change silently rewrites this rung — and if that
+// change also ships as rung 8→9, a v7 database applies it twice while a v8
+// database applies it once.
+//
+// A future FTS change belongs in a new rung plus schema.go, not here.
+// TestMigrations_RungsDoNotEmbedLiveSchema enforces the split;
+// TestInit_FreshMatchesMigratedShape then catches a schema.go change that
+// forgot its rung.
+const ftsSchemaV8 = `
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+    title,
+    what,
+    learned,
+    tags,
+    content='memories',
+    content_rowid='rowid',
+    tokenize='porter unicode61 tokenchars ''_-'''
+);
+
+-- FTS sync: INSERT
+CREATE TRIGGER IF NOT EXISTS memories_ai
+AFTER INSERT ON memories BEGIN
+    INSERT INTO memories_fts(rowid, title, what, learned, tags)
+    VALUES (NEW.rowid, NEW.title, NEW.what, NEW.learned, NEW.tags);
+END;
+
+-- FTS sync: DELETE
+CREATE TRIGGER IF NOT EXISTS memories_ad
+AFTER DELETE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, title, what, learned, tags)
+    VALUES ('delete', OLD.rowid, OLD.title, OLD.what, OLD.learned, OLD.tags);
+END;
+
+-- FTS sync: UPDATE (delete old entry, insert new). Deliberately scoped to the
+-- indexed text columns so metadata-only updates — the Expand signal increment
+-- in particular — do NOT trigger a full FTS delete+reinsert. An UPDATE that
+-- touches none of title/what/learned/tags has no business re-indexing FTS.
+CREATE TRIGGER IF NOT EXISTS memories_au
+AFTER UPDATE OF title, what, learned, tags ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, title, what, learned, tags)
+    VALUES ('delete', OLD.rowid, OLD.title, OLD.what, OLD.learned, OLD.tags);
+    INSERT INTO memories_fts(rowid, title, what, learned, tags)
+    VALUES (NEW.rowid, NEW.title, NEW.what, NEW.learned, NEW.tags);
+END;
+`
 
 // dropFTSTriggersAndTable tears down the pre-v8 trigram FTS index and its
 // sync triggers before FTSSchema recreates them with the porter tokenizer.
