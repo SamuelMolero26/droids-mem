@@ -198,17 +198,15 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 		}
 	}()
 
-	// layer 1: exact fingerprint match
-	existing, err := findByFingerprintConn(ctx, conn, fp)
-	if err != nil {
-		return nil, fmt.Errorf("fingerprint check: %w", err)
-	}
-	if existing != nil {
+	// Both dedupe layers end the same way: force overwrites the matched row,
+	// otherwise the save is skipped and reports what it matched.
+	hitDupe := func(m *matchedRow, reason, outcome string, sim float64) (*SaveResponse, error) {
 		if req.Force {
-			resp, err := forceUpdateConn(ctx, conn, existing.ID, sessionID, req, fp, now, scrubCountsJSON)
+			resp, err := forceUpdateConn(ctx, conn, m.ID, sessionID, req, fp, now, scrubCountsJSON)
 			if err != nil {
 				return nil, err
 			}
+			resp.Score = sim
 			resp.Scrub = responseScrub
 			if err := endTxn(ctx, conn, req.DryRun); err != nil {
 				return nil, fmt.Errorf("commit force update: %w", err)
@@ -220,16 +218,26 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 			return nil, fmt.Errorf("commit skip: %w", err)
 		}
 		committed = true
-		logSaveOutcome(req, "skipped_fingerprint", 0, existing.ID)
+		logSaveOutcome(req, outcome, sim, m.ID)
 		return &SaveResponse{
 			Status:         "skipped",
-			Reason:         "duplicate",
-			MatchedID:      existing.ID,
-			MatchedTitle:   existing.Title,
-			MatchedLearned: existing.Learned,
+			Reason:         reason,
+			MatchedID:      m.ID,
+			MatchedTitle:   m.Title,
+			MatchedLearned: m.Learned,
+			Score:          sim,
 			SessionID:      sessionID,
 			Scrub:          responseScrub,
 		}, nil
+	}
+
+	// layer 1: exact fingerprint match
+	existing, err := findByFingerprintConn(ctx, conn, fp)
+	if err != nil {
+		return nil, fmt.Errorf("fingerprint check: %w", err)
+	}
+	if existing != nil {
+		return hitDupe(existing, "duplicate", "skipped_fingerprint", 0)
 	}
 
 	// layer 2: near-duplicate via BM25 top-K + Jaccard
@@ -238,34 +246,7 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 		return nil, fmt.Errorf("near-duplicate check: %w", err)
 	}
 	if matched != nil && similarity >= jaccardDupeThreshold {
-		if req.Force {
-			resp, err := forceUpdateConn(ctx, conn, matched.ID, sessionID, req, fp, now, scrubCountsJSON)
-			if err != nil {
-				return nil, err
-			}
-			resp.Score = similarity
-			resp.Scrub = responseScrub
-			if err := endTxn(ctx, conn, req.DryRun); err != nil {
-				return nil, fmt.Errorf("commit force update: %w", err)
-			}
-			committed = true
-			return resp, nil
-		}
-		if err := endTxn(ctx, conn, req.DryRun); err != nil {
-			return nil, fmt.Errorf("commit skip: %w", err)
-		}
-		committed = true
-		logSaveOutcome(req, "skipped_jaccard", similarity, matched.ID)
-		return &SaveResponse{
-			Status:         "skipped",
-			Reason:         "near_duplicate",
-			MatchedID:      matched.ID,
-			MatchedTitle:   matched.Title,
-			MatchedLearned: matched.Learned,
-			Score:          similarity,
-			SessionID:      sessionID,
-			Scrub:          responseScrub,
-		}, nil
+		return hitDupe(matched, "near_duplicate", "skipped_jaccard", similarity)
 	}
 
 	id := "mem_" + ulid.Make().String()

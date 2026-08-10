@@ -3,7 +3,11 @@
 // Invoked by `droids-mem serve`. logic lives in internal/store; this
 // package only wires transport + auth + tool registration.
 //
-// Architecture rationale: docs/adr/0003-mcp-bridge-for-agentspan.md.
+// Two transports, same tool surface: Run (HTTP, loopback + bearer token, for
+// hosts that connect to a long-lived daemon) and RunStdio (stdin/stdout, for
+// hosts that spawn the server as a child). The HTTP half carries everything
+// the stdio half does not need — token, port, pid file, /identity proof,
+// ensure-server — so prefer stdio for any new host.
 package mcpserver
 
 import (
@@ -19,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -64,7 +69,7 @@ const (
 // the redundant self-save harmless.
 const instructionsCore = `droids-mem is your persistent memory across sessions. Prior lessons — fixes, decisions, conventions — are stored here so you do not relearn them. Call these tools on your own; do not wait to be asked.
 
-Available tools: mem_save, mem_search, mem_context, mem_get, mem_corpus, graph_symbol, graph_package
+Available tools: mem_save, mem_search, mem_context, mem_get, mem_corpus, graph_symbol, graph_package, graph_build_wait
 
 AT THE START of a task, and again whenever the topic shifts:
 - Call mem_search with a short description of what you are about to do. This surfaces relevant prior lessons by relevance and needs no task_type. Each result includes an overlap_score (0-1): higher means more literal token overlap with your query, lower means the connection is looser (synonyms, rewording). Judge relevance yourself — ignore weak results. If you are investigating a problem that may span repos, pass all_projects=true to search every project's memories.
@@ -177,7 +182,13 @@ func Run(ctx context.Context, cfg Config, st *store.Store) error {
 	// detached server's single DB connection is never blocked at startup.
 	// stopCtx (not ctx) so a SIGTERM cancels an in-flight fetch before the
 	// caller's deferred db.Close runs.
-	startBootFetch(stopCtx, st, logger)
+	// Waited on before returning: canceling stopCtx only *asks* the fetch to
+	// stop, it does not wait for it. Returning while the goroutine is still
+	// mid-import would let the caller's deferred db.Close land under a live
+	// write — exactly the guarantee this function's doc comment makes.
+	var fetchWG sync.WaitGroup
+	startBootFetch(stopCtx, st, logger, &fetchWG)
+	defer fetchWG.Wait()
 
 	select {
 	case err := <-serveErr:
@@ -205,13 +216,14 @@ const bootFetchTimeout = 15 * time.Second
 // startBootFetch runs one best-effort Fetch of the configured shared pool in its
 // own goroutine (ADR-0029 §5) so a teammate's memories reach this agent without
 // a human remembering to pull. No repo configured → no-op. Failure is logged,
-// never fatal — a stale or unreachable pool must not degrade serving.
-func startBootFetch(ctx context.Context, st *store.Store, logger *log.Logger) {
+// never fatal — a stale or unreachable pool must not degrade serving. The
+// caller owns wg and must Wait on it before releasing the store.
+func startBootFetch(ctx context.Context, st *store.Store, logger *log.Logger, wg *sync.WaitGroup) {
 	repo := shareRepo()
 	if repo == "" {
 		return
 	}
-	go func() {
+	wg.Go(func() {
 		fctx, cancel := context.WithTimeout(ctx, bootFetchTimeout)
 		defer cancel()
 		res, err := share.Fetch(fctx, repo, st)
@@ -221,7 +233,7 @@ func startBootFetch(ctx context.Context, st *store.Store, logger *log.Logger) {
 		}
 		logger.Printf("boot fetch: imported %d, skipped %d, failed %d from %s",
 			res.Imported, res.Skipped, res.Failed, repo)
-	}()
+	})
 }
 
 // shareRepo resolves the shared-pool repo path: DROIDS_MEM_SHARE_REPO overrides

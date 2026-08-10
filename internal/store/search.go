@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -137,7 +138,10 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 	// it feeds CompositeScore below.
 	internalLimit := min(limit*internalFetchMultiplier, maxInternalFetch)
 
-	pageArgs := append(args, internalLimit)
+	// slices.Clip: append must not write into args' spare capacity, or a later
+	// query reusing args silently sees internalLimit appended. cmd_uninstall.go
+	// already guards the same way with a three-index slice.
+	pageArgs := append(slices.Clip(args), internalLimit)
 	// #nosec G201 -- same as above: hardcoded conditions, parameterized values.
 	stmt := fmt.Sprintf(`
 		SELECT m.id, m.kind, m.title, m.learned, m.task_type, m.created_at,

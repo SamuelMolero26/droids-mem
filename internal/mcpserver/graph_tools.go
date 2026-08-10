@@ -112,6 +112,12 @@ func graphPackageHandler(gm *graph.Manager) func(context.Context, mcp.CallToolRe
 
 // ---------- graph_build_wait ----------
 
+// Bounds for graph_build_wait, mirrored in the tool schema below.
+const (
+	defaultBuildWait = 10 * time.Second
+	maxBuildWait     = 60 * time.Second
+)
+
 type graphBuildWaitArgs struct {
 	Repo    string `json:"repo"`
 	Timeout int    `json:"timeout,omitempty"` // seconds, default 10
@@ -132,10 +138,14 @@ func graphBuildWaitToolDef() mcp.Tool {
 func graphBuildWaitHandler(gm *graph.Manager) func(context.Context, mcp.CallToolRequest, graphBuildWaitArgs) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, _ mcp.CallToolRequest, a graphBuildWaitArgs) (*mcp.CallToolResult, error) {
 		state.RecordGraphUse("graph_build_wait")
+		// Clamp server-side: mcp.Min/Max above is schema advice to the client,
+		// not a guarantee, so a client that ignores it must not pin a build slot
+		// for an unbounded wait. Depth on graph_symbol is clamped the same way.
 		timeout := time.Duration(a.Timeout) * time.Second
 		if a.Timeout <= 0 {
-			timeout = 10 * time.Second
+			timeout = defaultBuildWait
 		}
+		timeout = min(timeout, maxBuildWait)
 		resp, err := gm.WaitBuild(ctx, a.Repo, timeout)
 		if err != nil {
 			return graphToolErr(err), nil

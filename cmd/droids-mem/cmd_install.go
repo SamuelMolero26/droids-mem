@@ -11,9 +11,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-
-	"github.com/samuelmolero26/droids-mem/internal/mcpserver"
-	"github.com/samuelmolero26/droids-mem/internal/state"
 )
 
 // claudeSnippet is the CLAUDE.md compose-guidance block (the model-judgment
@@ -45,23 +42,21 @@ var claudeHookEvents = []hookEvent{
 
 // newInstallCmd wires droids-mem session memory into Claude Code in one shot:
 // it merges the hook entries into settings.json, idempotently, pointing every
-// event at `<this binary> session hook`, and registers droids-mem as a stdio
-// MCP server in ~/.claude/mcp/droids-mem.json. No shell scripts, no jq.
+// event at `<this binary> session hook`. No shell scripts, no jq.
 func newInstallCmd() *cobra.Command {
 	var project, printOnly, all bool
 	var host string
 	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Wire droids-mem into an agent host (Claude Code, codex, opencode)",
-		Long: "Merge the session-memory hooks into Claude Code's settings.json\n" +
-			"and register droids-mem as a stdio MCP server in ~/.claude/mcp/droids-mem.json.\n" +
+		Long: "Merge the session-memory hooks into Claude Code's settings.json.\n" +
 			"Default target is the user settings (~/.claude/settings.json); use\n" +
 			"--project to target ./.claude/settings.json instead. Idempotent and\n" +
 			"non-destructive — existing settings and hooks are preserved.\n\n" +
-			"--all performs the full bootstrap in one shot: hooks + MCP stdio\n" +
-			"server + start the MCP bridge + register it with the Claude Code CLI\n" +
-			"(user scope, HTTP transport) + append the compose-guidance block to\n" +
-			"CLAUDE.md. Each step is idempotent.\n\n" +
+			"--all performs the full bootstrap in one shot: hooks + register the\n" +
+			"server with the Claude Code CLI (user scope, stdio transport: Claude\n" +
+			"spawns it per session, so there is no daemon and no token) + append\n" +
+			"the compose-guidance block to CLAUDE.md. Each step is idempotent.\n\n" +
 			"--host codex|opencode registers droids-mem as a stdio MCP server in\n" +
 			"that host's config instead (codex: ~/.codex/config.toml; opencode:\n" +
 			"~/.config/opencode/opencode.json). Idempotent; --all not supported.",
@@ -81,11 +76,7 @@ func newInstallCmd() *cobra.Command {
 			hookCmd := self + " session hook"
 
 			if printOnly {
-				out := buildHooksBlock(hookCmd) // {"hooks":{...}}
-				out["mcp_servers"] = map[string]any{
-					"droids-mem": mcpStdioEntry(self),
-				}
-				writeJSON(out)
+				writeJSON(buildHooksBlock(hookCmd)) // {"hooks":{...}}
 				return nil
 			}
 
@@ -99,14 +90,11 @@ func newInstallCmd() *cobra.Command {
 				writeError("install_failed", err.Error(), true)
 				exitWith(ExitError)
 			}
-			stdioResult := installClaudeMCPStdio(self)
 			result := map[string]any{
 				"status":       "installed",
 				"settings":     settingsPath,
 				"events_added": added,
 				"command":      hookCmd,
-				"mcp_stdio":    stepStatus(stdioResult),
-				"mcp_config":   claudeMCPStdioPath(),
 			}
 
 			if !all {
@@ -117,8 +105,7 @@ func newInstallCmd() *cobra.Command {
 
 			// --all: best-effort per step — report each outcome instead of
 			// aborting the whole bootstrap on the first failure.
-			result["server"] = stepStatus(runEnsureServer(self))
-			result["mcp_registration"] = stepStatus(registerClaudeMCP())
+			result["mcp_registration"] = stepStatus(registerClaudeMCP(self))
 			mdPath, appended, err := appendClaudeSnippet(project)
 			switch {
 			case err != nil:
@@ -134,63 +121,9 @@ func newInstallCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&project, "project", false, "Install into ./.claude/settings.json instead of the user settings")
 	cmd.Flags().BoolVar(&printOnly, "print", false, "Print the hooks block + MCP config instead of writing files")
-	cmd.Flags().BoolVar(&all, "all", false, "Full bootstrap: hooks + MCP stdio + ensure-server + claude mcp add (HTTP) + CLAUDE.md snippet")
+	cmd.Flags().BoolVar(&all, "all", false, "Full bootstrap: hooks + claude mcp add (stdio) + CLAUDE.md snippet")
 	cmd.Flags().StringVar(&host, "host", "claude", "Target host: claude, codex, or opencode")
 	return cmd
-}
-
-// claudeMCPStdioPath returns the path to the Claude Code stdio MCP config file.
-func claudeMCPStdioPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".claude", "mcp", "droids-mem.json")
-}
-
-// mcpStdioEntry returns the MCP server entry for stdio transport.
-func mcpStdioEntry(self string) map[string]any {
-	return map[string]any{
-		"command": self,
-		"args":    []any{"serve", "--stdio"},
-	}
-}
-
-// installClaudeMCPStdio writes ~/.claude/mcp/droids-mem.json to register
-// droids-mem as a stdio MCP server for Claude Code. Idempotent: if the file
-// already points at the same binary path, it's left untouched.
-func installClaudeMCPStdio(self string) error {
-	path := claudeMCPStdioPath()
-	if path == "" {
-		return errors.New("resolve home dir")
-	}
-
-	existing, err := os.ReadFile(path) // #nosec G304 -- fixed config location (~/.claude/mcp/), not user input
-	if err == nil {
-		var cfg struct {
-			Command string   `json:"command"`
-			Args    []string `json:"args"`
-		}
-		if json.Unmarshal(existing, &cfg) == nil && cfg.Command == self {
-			return nil // already points at this binary — idempotent
-		}
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("read %s: %w", path, err)
-	}
-
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return fmt.Errorf("create mcp dir: %w", err)
-	}
-
-	entry := mcpStdioEntry(self)
-	out, err := json.MarshalIndent(entry, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal: %w", err)
-	}
-	if err := os.WriteFile(path, append(out, '\n'), 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
-	}
-	return nil
 }
 
 // codexMCPBlock renders the config.toml table registering the stdio bridge.
@@ -334,40 +267,27 @@ func stepStatus(err error) string {
 	return "ok"
 }
 
-// runEnsureServer starts (or confirms) the MCP bridge via `<self> ensure-server`.
-func runEnsureServer(self string) error {
-	// #nosec G204 -- re-exec of our own binary (os.Executable), fixed argv.
-	if out, err := exec.Command(self, "ensure-server").CombinedOutput(); err != nil {
-		return fmt.Errorf("ensure-server: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-// registerClaudeMCP registers the bridge with the Claude Code CLI at user scope
-// (available in every project) unless already registered. Registration is the
-// one bootstrap step MCP itself cannot do — a server cannot add itself to a
-// client's config — so we drive the client's own CLI.
-func registerClaudeMCP() error {
+// registerClaudeMCP registers droids-mem with the Claude Code CLI at user
+// scope (available in every project) over the STDIO transport: Claude spawns
+// `<self> serve --stdio` as a child and owns its lifecycle, so there is no
+// port to find, no daemon to keep alive and no bearer token to pass.
+// Registration is the one bootstrap step MCP itself cannot do — a server
+// cannot add itself to a client's config — so we drive the client's own CLI.
+func registerClaudeMCP(self string) error {
 	claude, err := exec.LookPath("claude")
 	if err != nil {
-		return errors.New("claude CLI not found in PATH — register manually: claude mcp add --scope user --transport http droids-mem <url> --header 'Authorization: Bearer <token>'")
+		return errors.New("claude CLI not found in PATH — register manually: claude mcp add --scope user droids-mem -- " + self + " serve --stdio")
 	}
+	// Remove first, unconditionally. `mcp get` succeeds for an existing HTTP
+	// registration too, so an existence check would leave anyone upgrading from
+	// the daemon pinned to the old transport for ever. A remove with nothing
+	// registered fails harmlessly, which is why its error is ignored.
 	// #nosec G204 -- claude path from exec.LookPath, fixed argv.
-	if exec.Command(claude, "mcp", "get", "droids-mem").Run() == nil {
-		return nil // already registered
-	}
-	tok, err := state.LoadOrCreateToken()
-	if err != nil {
-		return fmt.Errorf("load token: %w", err)
-	}
-	url := baseURL(envOr("DROIDS_MEM_MCP_ADDR", mcpserver.DefaultAddr)) +
-		envOr("DROIDS_MEM_MCP_ENDPOINT", mcpserver.DefaultEndpoint)
-	// #nosec G204 -- claude path from exec.LookPath, token is our own bearer.
+	_ = exec.Command(claude, "mcp", "remove", "--scope", "user", "droids-mem").Run()
+
+	// #nosec G204 -- claude from exec.LookPath; self from os.Executable.
 	out, err := exec.Command(claude, "mcp", "add",
-		"--scope", "user",
-		"--transport", "http",
-		"droids-mem", url,
-		"--header", "Authorization: Bearer "+tok,
+		"--scope", "user", "droids-mem", "--", self, "serve", "--stdio",
 	).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("claude mcp add: %w: %s", err, strings.TrimSpace(string(out)))

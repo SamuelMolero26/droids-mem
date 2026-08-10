@@ -649,11 +649,9 @@ func TestContext_ConcurrentWritesNoCorruption(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make(chan error, readers*iters+writers*iters)
 
-	for r := 0; r < readers; r++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := 0; i < iters; i++ {
+	for range readers {
+		wg.Go(func() {
+			for range iters {
 				resp, err := s.Context(context.Background(), store.ContextRequest{TaskType: "crm_upload", Query: "phone csv"})
 				if err != nil {
 					errs <- err
@@ -669,14 +667,12 @@ func TestContext_ConcurrentWritesNoCorruption(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 
-	for w := 0; w < writers; w++ {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-			for i := 0; i < iters; i++ {
+	for id := range writers {
+		wg.Go(func() {
+			for i := range iters {
 				// distinct content per iter to avoid Layer 1/2 dedupe
 				req := store.SaveRequest{
 					TaskType: "crm_upload",
@@ -691,7 +687,7 @@ func TestContext_ConcurrentWritesNoCorruption(t *testing.T) {
 					return
 				}
 			}
-		}(w)
+		})
 	}
 
 	wg.Wait()
@@ -708,7 +704,7 @@ func (e *snapshotErr) Error() string { return e.msg }
 func TestContext_SessionSummaryRetention(t *testing.T) {
 	s := newTestStore(t)
 
-	for i := 0; i < 7; i++ {
+	for i := range 7 {
 		time.Sleep(time.Millisecond)
 		s.Save(context.Background(), store.SaveRequest{
 			TaskType: "crm_upload",

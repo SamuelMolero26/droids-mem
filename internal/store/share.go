@@ -58,8 +58,8 @@ func (s *Store) ExportShared(ctx context.Context, w io.Writer) error {
 	return nil
 }
 
-// CountShared returns how many scope='shared' memories exist. Reserved for the
-// in-process TUI sharing surface; no CLI caller after the transport was dropped.
+// CountShared returns how many scope='shared' memories exist. Drives the TUI
+// sharing surface (model.go); no CLI caller after the transport was dropped.
 func (s *Store) CountShared(ctx context.Context) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx,

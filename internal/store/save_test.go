@@ -3,7 +3,6 @@ package store_test
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"testing"
 
 	"github.com/samuelmolero26/droids-mem/internal/db"
@@ -138,13 +137,14 @@ func TestSave_Validation_MissingTaskType(t *testing.T) {
 func TestSave_Validation_TaskTypePathTraversal(t *testing.T) {
 	s := newTestStore(t)
 	for _, bad := range []string{"../etc", "a/b", ".."} {
-		req := validReq()
-		req.TaskType = bad
-		_, err := s.Save(context.Background(), req)
-		var ve *store.ValidationError
-		if ok := isValidationError(err, &ve); !ok || ve.Field != "task_type" {
-			t.Errorf("task_type %q: expected ValidationError on task_type, got %v", bad, err)
-		}
+		t.Run(bad, func(t *testing.T) {
+			req := validReq()
+			req.TaskType = bad
+			_, err := s.Save(context.Background(), req)
+			if ve := mustValidationError(t, err); ve.Field != "task_type" {
+				t.Errorf("expected ValidationError on task_type, got field %q", ve.Field)
+			}
+		})
 	}
 }
 
@@ -153,12 +153,8 @@ func TestSave_Validation_InvalidKind(t *testing.T) {
 	req := validReq()
 	req.Kind = "bad_kind"
 	_, err := s.Save(context.Background(), req)
-	if err == nil {
-		t.Error("expected validation error for invalid kind")
-	}
-	var ve *store.ValidationError
-	if ok := isValidationError(err, &ve); !ok || ve.Field != "kind" {
-		t.Errorf("expected ValidationError on field kind, got %v", err)
+	if ve := mustValidationError(t, err); ve.Field != "kind" {
+		t.Errorf("expected ValidationError on field kind, got %q", ve.Field)
 	}
 }
 
@@ -315,14 +311,4 @@ func TestSave_ForceBypassesBM25(t *testing.T) {
 	if resp.Status == "skipped" {
 		t.Error("force=true should bypass BM25 check, but got skipped")
 	}
-}
-
-// isValidationError checks err is a *store.ValidationError and assigns it.
-func isValidationError(err error, target **store.ValidationError) bool {
-	var ve *store.ValidationError
-	if errors.As(err, &ve) {
-		*target = ve
-		return true
-	}
-	return false
 }
