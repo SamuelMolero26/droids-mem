@@ -5,8 +5,6 @@ All notable changes to droids-mem are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
 ## [1.2.1] — 2026-08-10
 
 Headline: the MCP bridge stops trusting predictable secrets and loopback HTTP —
@@ -351,7 +349,6 @@ normally.
 - `workspace.yml` / inline scrub config → v1.1. v1.0 pattern set + order are
   hardcoded.
 
-[Unreleased]: https://github.com/SamuelMolero26/droids-mem/compare/v1.2.1...HEAD
 [1.2.1]: https://github.com/SamuelMolero26/droids-mem/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/SamuelMolero26/droids-mem/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/SamuelMolero26/droids-mem/compare/v1.1.0...v1.1.1
