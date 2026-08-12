@@ -7,6 +7,24 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Code-graph cache now invalidates on a schema change.** `ensureFresh` gated
+  only on the file-census stamp, and `graph.db` records no schema version, so
+  editing the schema left every cached graph serving rows in the old shape
+  until an unrelated source edit happened to move the stamp — a repo whose
+  `.go` files were untouched kept the stale shape indefinitely. The stamp's
+  generation is now derived from `sha256(schema + indexed extensions)` instead
+  of a hand-written literal, so it cannot be forgotten. **Existing graphs
+  rebuild once** on the first query after upgrading.
+- **Non-Go repositories no longer split their cache.** `moduleRoot` anchored on
+  `go.mod` only, so a tree without one had no anchor and naming a subdirectory
+  keyed a second cache built from that subtree alone. It now falls back to the
+  nearest ancestor `.git`, keeping `go.mod` first so a nested module still
+  resolves to itself.
+- **Build output is excluded from the source walk**: `dist`, `build`, `target`
+  and `__pycache__` join the existing dotdir/`vendor`/`node_modules`
+  exclusions, so a build no longer moves the staleness stamp.
+
 ## [1.2.1] — 2026-08-10
 
 Headline: the MCP bridge stops trusting predictable secrets and loopback HTTP —

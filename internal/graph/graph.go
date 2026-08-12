@@ -359,24 +359,42 @@ func canonicalRepo(repo string) (string, error) {
 	return moduleRoot(abs), nil
 }
 
-// moduleRoot walks up from dir to the nearest ancestor holding a go.mod, which
-// is exactly the scope buildIndex loads (`packages.Load(Dir: repo, "./...")`).
-// Without it, an agent naming a subdirectory keys a SECOND cache built from
-// only that subtree while meta.module still names the whole module — a graph
-// whose callers and transitive_callers are silently incomplete.
+// moduleRoot walks up from dir to the repository scope that should own the
+// cache entry. Without it, an agent naming a subdirectory keys a SECOND cache
+// built from only that subtree while meta.module still names the whole module
+// — a graph whose callers and transitive_callers are silently incomplete.
 //
-// Stops at the first go.mod so a nested module resolves to itself, not its
-// parent. Returns dir unchanged when no go.mod exists anywhere above (a
-// GOPATH-style tree, or simply not Go), preserving the previous behaviour so
-// buildIndex still reports its own "no Go packages found".
+// go.mod wins, because it is exactly the scope buildIndex loads
+// (`packages.Load(Dir: repo, "./...")`), and the walk stops at the FIRST one so
+// a nested module resolves to itself rather than its parent.
+//
+// A checkout with no go.mod above it falls back to the nearest ancestor .git,
+// the language-neutral equivalent: a repository is a repository whether or not
+// it holds Go. Without that fallback the split-cache bug is merely moved rather
+// than fixed — it reappears for every non-Go tree, where nothing anchors the
+// walk at all.
+//
+// Returns dir unchanged when neither exists (a bare directory, or a GOPATH-style
+// tree), preserving the previous behaviour so buildIndex still reports its own
+// "no Go packages found".
 func moduleRoot(dir string) string {
+	for _, anchor := range []string{"go.mod", ".git"} {
+		if root, ok := walkUpFor(dir, anchor); ok {
+			return root
+		}
+	}
+	return dir
+}
+
+// walkUpFor returns the nearest ancestor of dir (inclusive) containing name.
+func walkUpFor(dir, name string) (string, bool) {
 	for cur := dir; ; {
-		if _, err := os.Stat(filepath.Join(cur, "go.mod")); err == nil {
-			return cur
+		if _, err := os.Stat(filepath.Join(cur, name)); err == nil {
+			return cur, true
 		}
 		parent := filepath.Dir(cur)
 		if parent == cur { // filesystem root
-			return dir
+			return "", false
 		}
 		cur = parent
 	}
