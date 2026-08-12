@@ -61,6 +61,9 @@ func managerFor(t *testing.T) *Manager {
 
 func writeFile(t *testing.T, repo, name, body string) {
 	t.Helper()
+	if err := os.MkdirAll(repo, 0o750); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(repo, name), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}

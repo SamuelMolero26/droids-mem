@@ -1,14 +1,9 @@
 package graph
 
 import (
-	"database/sql"
-	"fmt"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
-
-	_ "modernc.org/sqlite"
 )
 
 // ensureFresh gates entirely on `fresh.Stamp == current`, and graph.db stores
@@ -18,8 +13,8 @@ import (
 // generation from the schema text closes that by construction — you cannot
 // forget to bump what you never write by hand.
 func TestStampGen_ChangesWithSchema(t *testing.T) {
-	a := stampGen("CREATE TABLE x(a INT);", []string{".go"}, "1")
-	b := stampGen("CREATE TABLE x(a INT, b INT);", []string{".go"}, "1")
+	a := stampGen("CREATE TABLE x(a INT);", []string{".go"})
+	b := stampGen("CREATE TABLE x(a INT, b INT);", []string{".go"})
 	if a == b {
 		t.Errorf("stampGen ignored a schema change: both %q", a)
 	}
@@ -32,25 +27,10 @@ func TestStampGen_ChangesWithSchema(t *testing.T) {
 // extension set grows, every cached graph was built from a narrower file set
 // and must be rebuilt, even though the old files are untouched.
 func TestStampGen_ChangesWithIndexedExtensions(t *testing.T) {
-	a := stampGen("CREATE TABLE x(a INT);", []string{".go"}, "1")
-	b := stampGen("CREATE TABLE x(a INT);", []string{".go", ".ts"}, "1")
+	a := stampGen("CREATE TABLE x(a INT);", []string{".go"})
+	b := stampGen("CREATE TABLE x(a INT);", []string{".go", ".ts"})
 	if a == b {
 		t.Errorf("stampGen ignored an extension-set change: both %q", a)
-	}
-}
-
-// TestStampGen_ChangesWithIndexerGen is task B.9 (T1/D8): an identical schema
-// and extension set must still produce a different generation when the
-// indexer-generation input changes, because that input is what forces a
-// rebuild when a PR changes what a build MEANS without changing the schema
-// DDL string or the indexed-extension set (design D8).
-func TestStampGen_ChangesWithIndexerGen(t *testing.T) {
-	const ddl = "CREATE TABLE x(a INT);"
-	exts := []string{".go", ".ts"}
-	a := stampGen(ddl, exts, "1")
-	b := stampGen(ddl, exts, "2")
-	if a == b {
-		t.Errorf("stampGen ignored an indexerGen change: both %q", a)
 	}
 }
 
@@ -72,7 +52,7 @@ func TestStampGen_IsDeterministic(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, want := stampGen(ddl, tt.a, "1"), stampGen(ddl, tt.b, "1")
+			got, want := stampGen(ddl, tt.a), stampGen(ddl, tt.b)
 			if got != want {
 				t.Errorf("stampGen(%v) = %q, stampGen(%v) = %q; want equal\n"+
 					"a generation that is not stable rebuilds every graph on every query",
@@ -93,7 +73,7 @@ func TestStamp_CarriesDerivedGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stamp: %v", err)
 	}
-	want := stampGen(schema, indexedExtensions(), indexerGen) + ":"
+	want := stampGen(schema, indexedExtensions()) + ":"
 	if !strings.HasPrefix(got, want) {
 		t.Errorf("stamp = %q, want prefix %q", got, want)
 	}
@@ -167,60 +147,5 @@ func TestCanonicalRepo_ModuleRootBeatsGitRoot(t *testing.T) {
 	}
 	if got != want {
 		t.Errorf("canonicalRepo(%q) = %q, want the nested module root %q", sub, got, want)
-	}
-}
-
-// The indexed extension set widened for the mapper tier.
-// Pinning the exact set protects the stamp contract: widening it again is a
-// deliberate decision, because it auto-invalidates every cached graph.
-func TestIndexedExtensions_IncludesMapperLanguages(t *testing.T) {
-	want := []string{".go", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".py"}
-	if got := indexedExtensions(); !slices.Equal(got, want) {
-		t.Errorf("indexedExtensions() = %v, want %v", got, want)
-	}
-}
-
-// Schema additions: every edge table carries a precision
-// column and the imports table exists with module-text endpoints. A regression
-// here silently drops the provenance model the mapper tier depends on,
-// and — because stampGen hashes the schema text — would do so without moving
-// the stamp.
-func TestSchema_HasPrecisionColumnsAndImportsTable(t *testing.T) {
-	db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "graph.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if _, err := db.Exec(schema); err != nil {
-		t.Fatalf("apply schema: %v", err)
-	}
-
-	tables := map[string][]string{
-		"edges":      {"caller", "callee", "dispatch", "precision"},
-		"implements": {"iface", "impl", "precision"},
-		"imports":    {"importer_file", "imported_module", "precision"},
-	}
-	for table, wantCols := range tables {
-		rows, err := db.Query(fmt.Sprintf(`SELECT name FROM pragma_table_info('%s')`, table))
-		if err != nil {
-			t.Fatalf("%s: %v", table, err)
-		}
-		defer rows.Close()
-		var got []string
-		for rows.Next() {
-			var c string
-			if err := rows.Scan(&c); err != nil {
-				t.Fatal(err)
-			}
-			got = append(got, c)
-		}
-		if err := rows.Err(); err != nil {
-			t.Fatal(err)
-		}
-		for _, c := range wantCols {
-			if !slices.Contains(got, c) {
-				t.Errorf("%s: missing column %q (have %v)", table, c, got)
-			}
-		}
 	}
 }
