@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -24,10 +25,17 @@ func indexedExtensions() []string { return []string{".go"} }
 // move the stamp. Deriving the generation instead of writing it by hand means
 // it cannot be forgotten: change the schema or the walk, and every graph
 // rebuilds on the next query.
+//
+// The extension list is hashed in sorted order because it denotes a SET, not a
+// sequence: two builds covering the same extensions must agree on the
+// generation however the list was assembled. Sorting a copy also keeps the
+// result deterministic if the set is ever sourced from a map — otherwise
+// Go's randomised map order would change the generation on every call, no
+// stamp would ever match, and every query would rebuild every graph.
 func stampGen(schemaDDL string, exts []string) string {
 	h := sha256.New()
 	h.Write([]byte(schemaDDL))
-	for _, e := range exts {
+	for _, e := range slices.Sorted(slices.Values(exts)) {
 		h.Write([]byte{0})
 		h.Write([]byte(e))
 	}

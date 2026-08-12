@@ -34,6 +34,34 @@ func TestStampGen_ChangesWithIndexedExtensions(t *testing.T) {
 	}
 }
 
+// Determinism is the property the whole cache rests on, and it fails far more
+// expensively than a missed invalidation: a generation that varies between
+// calls never matches the stored stamp, so EVERY query rebuilds the graph, for
+// every repo, forever. Extension order is part of that — the indexed set is a
+// set, not a sequence, so sourcing it from a map some day must not silently
+// turn each query into a full rebuild.
+func TestStampGen_IsDeterministic(t *testing.T) {
+	const ddl = "CREATE TABLE x(a INT);"
+	tests := []struct {
+		name string
+		a, b []string
+	}{
+		{"identical input", []string{".go", ".ts"}, []string{".go", ".ts"}},
+		{"extension order", []string{".go", ".ts"}, []string{".ts", ".go"}},
+		{"empty set", nil, []string{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, want := stampGen(ddl, tt.a), stampGen(ddl, tt.b)
+			if got != want {
+				t.Errorf("stampGen(%v) = %q, stampGen(%v) = %q; want equal\n"+
+					"a generation that is not stable rebuilds every graph on every query",
+					tt.a, got, tt.b, want)
+			}
+		})
+	}
+}
+
 // The live stamp must carry the derived generation, not a hand-written
 // literal — a literal is what goes stale.
 func TestStamp_CarriesDerivedGeneration(t *testing.T) {
