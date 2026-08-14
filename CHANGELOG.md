@@ -8,6 +8,29 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **The code graph now indexes test callers, and keeps its own reachability
+  contract.** The graph documented that it "may report a caller that can't
+  fire, never misses one that can", but `packages.Config` never set `Tests`, so
+  no `_test.go` was loaded and **zero** indexed symbols came from a test file.
+  `store.Store.Save` reported 5 callers while 84 distinct test functions call
+  it — the blind spot largest exactly on exported API, which is what an agent
+  queries before changing a signature. Three changes make it hold:
+  - `Tests: true`, with package-variant deduplication. `packages.Load` returns
+    several variants per tested package and the in-package test variant shares
+    a `PkgPath` while re-parsing the same production files; without dedupe
+    every production symbol was emitted twice, and because `symbols.qname` is
+    not unique those duplicates inserted silently and made every symbol in a
+    tested package report as ambiguous.
+  - The staleness stamp's file census now includes `_test.go`, so editing a
+    test file moves the stamp. Previously a newly added test caller was never
+    indexed.
+  - Caller lists order production callers before test callers. Test indexing
+    roughly triples caller counts, and the previous ordering put a package's
+    own test callers ahead of production callers in other packages — at the
+    50-neighbour cap an agent could see zero production callers and wrongly
+    conclude a signature change was test-only. Same-package proximity is kept
+    as the secondary key. **Existing graphs rebuild once** on the first query
+    after upgrading, because the file census changed.
 - **The `phone` scrub detector no longer redacts numeric deltas** (issue #102).
   Its regex floor was two digits, so any signed number (`+370 bytes`, `+46%`,
   diff stats) matched the E.164 phone shape and was silently and irreversibly
