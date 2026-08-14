@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -367,9 +368,19 @@ func TestInit_IdempotentOnExistingDB(t *testing.T) {
 // strips IF NOT EXISTS and trailing semicolons from stored text; single
 // spaces inside string literals (e.g. the FTS tokenizer) are preserved by
 // Fields/Join.
+//
+// Collapsing runs is not enough on its own. ALTER TABLE ADD COLUMN splices the
+// new column in just before the closing paren without touching the surrounding
+// layout, so a migrated table reads "... NOT NULL , authored_at ...0)" while
+// the fresh DDL reads "... NOT NULL, authored_at ...0 )". That is a pure
+// layout difference, not a shape difference, so spacing before ',' and ')' is
+// normalized away too. No string literal in this schema contains " ," or " )",
+// so this cannot corrupt one.
 func normalizeSchemaSQL(s string) string {
-	return strings.Join(strings.Fields(s), " ")
+	return spaceBeforePunct.ReplaceAllString(strings.Join(strings.Fields(s), " "), "$1")
 }
+
+var spaceBeforePunct = regexp.MustCompile(` ([,)])`)
 
 // schemaSQLSnapshot keyed (type,name) → normalized stored sql for every user
 // schema object, excluding the FTS5 shadow tables (memories_fts_data/_idx/
@@ -415,13 +426,16 @@ func ftsTableSQL(t *testing.T, conn *sql.DB) string {
 }
 
 // TestInit_FreshMatchesMigratedShape proves SM-R6: every historical path
-// vN→current (N = 0..7) converges to a schema byte-identical to fresh for all
+// vN→current (N = 0..8) converges to a schema byte-identical to fresh for all
 // user objects, after whitespace normalization. It is also the ONLY guard
 // against gen_fixtures.sh's inline rung SQL drifting from the Go consts — if
 // the script's copy diverges, the checked-in fixture fails convergence here.
+//
+// v8 matters most in practice: it is the shipped version real installs sit at,
+// so v8→current is the upgrade path almost every user actually runs.
 func TestInit_FreshMatchesMigratedShape(t *testing.T) {
 	const porterTokenizer = "tokenize='porter unicode61 tokenchars ''_-'''"
-	for _, v := range []int{0, 1, 2, 3, 4, 5, 6, 7} {
+	for _, v := range []int{0, 1, 2, 3, 4, 5, 6, 7, 8} {
 		t.Run(fmt.Sprintf("v%d", v), func(t *testing.T) {
 			fresh := newTestDB(t)
 			migrated := loadFixture(t, fmt.Sprintf("schema_v%d.sql", v))
@@ -755,6 +769,53 @@ func TestMigrate_V6toV7RedefinesIndexes(t *testing.T) {
 	}
 	if !equalStringSlices(got, want) {
 		t.Errorf("migrated index definitions = %v, want %v", got, want)
+	}
+}
+
+// v8→v9 adds authored_at, backfilled to created_at so no pre-existing row
+// misreports its authoring date as the epoch.
+func TestMigrate_V8toV9AddsAuthoredAtBackfillsCreatedAt(t *testing.T) {
+	conn := loadFixture(t, "schema_v0.sql")
+	now := int64(1000000)
+	if _, err := conn.Exec(`
+		INSERT INTO memories (id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at)
+		VALUES ('mem_au', 'sess_au', 'crm', 'task_pattern', 't', 'w', 'l', '', 'fp_au', ?, ?)`,
+		now, now); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+	if err := db.Migrate(conn); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if !slices.Contains(tableColumns(t, conn, "memories"), "authored_at") {
+		t.Fatal("migrated DB missing memories.authored_at")
+	}
+	if !slices.Contains(tableColumns(t, conn, "archived_memories"), "authored_at") {
+		t.Fatal("migrated DB missing archived_memories.authored_at")
+	}
+	var authoredAt int64
+	if err := conn.QueryRow(`SELECT authored_at FROM memories WHERE id = 'mem_au'`).Scan(&authoredAt); err != nil {
+		t.Fatalf("read authored_at: %v", err)
+	}
+	if authoredAt != now {
+		t.Errorf("backfilled authored_at = %d, want created_at %d", authoredAt, now)
+	}
+	if got, want := userVersion(t, conn), db.CurrentSchemaVersion; got != want {
+		t.Errorf("post-migrate user_version = %d, want %d", got, want)
+	}
+}
+
+// A fresh DB carries authored_at from schema.go directly and reports the
+// current head version.
+func TestInit_FreshDBHasAuthoredAtAndVersion9(t *testing.T) {
+	conn := newTestDB(t)
+	if !slices.Contains(tableColumns(t, conn, "memories"), "authored_at") {
+		t.Error("fresh DB missing memories.authored_at")
+	}
+	if !slices.Contains(tableColumns(t, conn, "archived_memories"), "authored_at") {
+		t.Error("fresh DB missing archived_memories.authored_at")
+	}
+	if got, want := userVersion(t, conn), db.CurrentSchemaVersion; got != want {
+		t.Errorf("fresh DB user_version = %d, want %d", got, want)
 	}
 }
 

@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # gen_fixtures.sh — regenerates the golden per-version schema fixtures
-# (schema_v0.sql … schema_v7.sql) in this directory.
+# (schema_v0.sql … schema_v8.sql) in this directory.
 #
 # Each fixture is the sqlite_master dump of a database replayed through the
 # first N ladder rungs, plus a trailing `PRAGMA user_version = N;` stamp so a
 # test that loads it starts the ladder at exactly rung N. schema_v0.sql is the
-# pre-v1.0 shape itself; schema_v1.sql … schema_v7.sql are the successive
+# pre-v1.0 shape itself; schema_v1.sql … schema_v8.sql are the successive
 # rung-replay states. The v7 fixture is the pre-flip shipped shape: the FTS
 # tokenizer stays trigram because the porter flip lands only at rung 7→8.
+# schema_v8.sql is the post-flip shape (porter FTS, no authored_at) — the
+# version real installs actually sit at, and therefore the starting point of
+# the only upgrade path most users will ever run, rung 8→9.
 # (The 4-column recency indexes with id DESC land at rung 6→7, ADR-0033, so
 # schema_v7.sql carries trigram FTS + the 4-column indexes.)
 #
@@ -169,6 +172,48 @@ DROP INDEX IF EXISTS idx_memories_task_type;
 SQL
 }
 
+apply_rung78() {
+    sqlite3 "$db" <<'SQL'
+DROP TRIGGER IF EXISTS memories_ai;
+DROP TRIGGER IF EXISTS memories_ad;
+DROP TRIGGER IF EXISTS memories_au;
+DROP TABLE IF EXISTS memories_fts;
+
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+    title,
+    what,
+    learned,
+    tags,
+    content='memories',
+    content_rowid='rowid',
+    tokenize='porter unicode61 tokenchars ''_-'''
+);
+
+CREATE TRIGGER IF NOT EXISTS memories_ai
+AFTER INSERT ON memories BEGIN
+    INSERT INTO memories_fts(rowid, title, what, learned, tags)
+    VALUES (NEW.rowid, NEW.title, NEW.what, NEW.learned, NEW.tags);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memories_ad
+AFTER DELETE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, title, what, learned, tags)
+    VALUES ('delete', OLD.rowid, OLD.title, OLD.what, OLD.learned, OLD.tags);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memories_au
+AFTER UPDATE OF title, what, learned, tags ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, title, what, learned, tags)
+    VALUES ('delete', OLD.rowid, OLD.title, OLD.what, OLD.learned, OLD.tags);
+    INSERT INTO memories_fts(rowid, title, what, learned, tags)
+    VALUES (NEW.rowid, NEW.title, NEW.what, NEW.learned, NEW.tags);
+END;
+
+INSERT INTO memories_fts(rowid, title, what, learned, tags)
+SELECT rowid, title, what, learned, tags FROM memories;
+SQL
+}
+
 # dump_fixture writes the current sqlite_master as re-executable SQL plus the
 # user_version stamp. ORDER BY reproduces a loadable file: user objects first,
 # then indexes, then triggers. Excluded: the FTS5 shadow tables
@@ -199,3 +244,5 @@ apply_rung56
 dump_fixture schema_v6.sql 6
 apply_rung67
 dump_fixture schema_v7.sql 7
+apply_rung78
+dump_fixture schema_v8.sql 8
