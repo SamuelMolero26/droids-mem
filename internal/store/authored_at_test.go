@@ -212,3 +212,71 @@ func TestSave_NeverWritesReviewAfter(t *testing.T) {
 		}
 	})
 }
+
+// TestSave_ForcePreservesAuthoredAt: a force-save is a body correction, not a
+// re-authoring. Every real force caller (CLI `--force`, MCP force:true) leaves
+// AuthoredAt zero, so resolving it like a fresh insert would silently overwrite
+// an imported row's peer origin date with "now" — and on a local row would push
+// authored_at past created_at, which is the exact signal the TUI reads as
+// "this row came from the pool".
+func TestSave_ForcePreservesAuthoredAt(t *testing.T) {
+	t.Run("zero keeps the existing stamp", func(t *testing.T) {
+		s, conn := newStoreWithDB(t)
+		old := time.Now().Unix() - 300*day
+
+		req := validReq()
+		req.Title = "peer lesson a later force-save corrects"
+		req.AuthoredAt = old
+		resp, err := s.Save(context.Background(), req)
+		if err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+
+		// Same title/learned/task_type/kind = same fingerprint, so this lands on
+		// the layer-1 dupe path and force-updates the body in place.
+		fix := req
+		fix.What = "corrected body after the operator spotted a wrong detail"
+		fix.AuthoredAt = 0
+		fix.Force = true
+		fixResp, err := s.Save(context.Background(), fix)
+		if err != nil {
+			t.Fatalf("force Save: %v", err)
+		}
+		if fixResp.Status != "updated" {
+			t.Fatalf("status = %q, want \"updated\" — the force path was not exercised", fixResp.Status)
+		}
+
+		authored, created, _ := readStamps(t, conn, resp.ID)
+		if authored != old {
+			t.Errorf("authored_at = %d, want the original %d — a body correction must not re-author the row", authored, old)
+		}
+		if authored > created {
+			t.Errorf("authored_at %d > created_at %d — that divergence is the TUI's \"imported\" signal", authored, created)
+		}
+	})
+
+	t.Run("explicit stamp still wins", func(t *testing.T) {
+		s, conn := newStoreWithDB(t)
+		now := time.Now().Unix()
+
+		req := validReq()
+		req.Title = "lesson whose origin date is corrected explicitly"
+		resp, err := s.Save(context.Background(), req)
+		if err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+
+		want := now - 40*day
+		fix := req
+		fix.What = "corrected body carrying an explicit origin date"
+		fix.AuthoredAt = want
+		fix.Force = true
+		if _, err := s.Save(context.Background(), fix); err != nil {
+			t.Fatalf("force Save: %v", err)
+		}
+
+		if authored, _, _ := readStamps(t, conn, resp.ID); authored != want {
+			t.Errorf("authored_at = %d, want the supplied %d", authored, want)
+		}
+	})
+}

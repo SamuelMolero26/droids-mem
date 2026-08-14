@@ -519,14 +519,22 @@ func pruneAutoSummariesConn(ctx context.Context, conn *sql.Conn) error {
 }
 
 func forceUpdateConn(ctx context.Context, conn *sql.Conn, existingID, sessionID string, req SaveRequest, fp string, now int64, scrubCountsJSON sql.NullString) (*SaveResponse, error) {
-	// A force-update is a content rewrite (HITL correction), so authored_at
-	// resolves the same way a fresh insert's does: the caller's stamp if valid,
-	// else "authored now".
-	authoredAt := resolveAuthoredAt(req.AuthoredAt, now)
+	// A force-update is a body correction (HITL), not a re-authoring: the row
+	// keeps its authored_at unless the caller supplies one. Every real force
+	// caller leaves it zero, so resolving it like a fresh insert would erase an
+	// imported row's peer origin date, and on a local row would push authored_at
+	// past created_at — the exact divergence the TUI reads as "came from the
+	// pool". NULLIF(?, 0) is the "keep" sentinel; a supplied stamp is clamped
+	// like any other.
+	var authoredAt int64
+	if req.AuthoredAt > 0 {
+		authoredAt = resolveAuthoredAt(req.AuthoredAt, now)
+	}
 	_, err := conn.ExecContext(ctx, `
 		UPDATE memories
 		SET title=?, what=?, learned=?, tags=?, fingerprint=?, updated_at=?,
-		    scope=?, scrub_pattern_version=?, scrub_counts=?, authored_at=?
+		    scope=?, scrub_pattern_version=?, scrub_counts=?,
+		    authored_at=COALESCE(NULLIF(?, 0), authored_at)
 		WHERE id=?
 	`, req.Title, req.What, req.Learned, req.Tags, fp, now,
 		req.Scope, scrub.Version, scrubCountsJSON, authoredAt, existingID)
