@@ -213,6 +213,97 @@ func TestSave_NeverWritesReviewAfter(t *testing.T) {
 	})
 }
 
+// decodeShared reads an exported JSONL blob back into wire shapes.
+func decodeShared(t *testing.T, out string) []sharedLine {
+	t.Helper()
+	var got []sharedLine
+	dec := json.NewDecoder(strings.NewReader(out))
+	for dec.More() {
+		var l sharedLine
+		if err := dec.Decode(&l); err != nil {
+			t.Fatalf("decode export line: %v", err)
+		}
+		got = append(got, l)
+	}
+	return got
+}
+
+// TestExport_CoarsensAuthoredAtToUTCDay pins the pool's anonymity budget. A
+// locally-authored row's authored_at IS its created_at — the exact second the
+// user ran save. Shipping that second-resolution stamp into an anonymous pool
+// re-clusters one contributor's rows by timestamp adjacency (session-end
+// rollups land several summaries inside a single second, which is why the
+// retention tiebreak needs `id DESC` at all) and leaks working hours and
+// timezone — undoing exactly the attribution removal Scrub exists to enforce.
+// Export therefore truncates to the UTC day; the local row keeps full
+// resolution, since it never left the machine.
+func TestExport_CoarsensAuthoredAtToUTCDay(t *testing.T) {
+	s, conn := newStoreWithDB(t)
+	req := validReq()
+	req.Scope = "shared"
+	req.Title = "shared lesson that leaves this machine"
+	resp, err := s.Save(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	authored, _, _ := readStamps(t, conn, resp.ID)
+
+	var out strings.Builder
+	if err := s.ExportShared(context.Background(), &out); err != nil {
+		t.Fatalf("ExportShared: %v", err)
+	}
+	got := decodeShared(t, out.String())
+	if len(got) != 1 {
+		t.Fatalf("exported %d lines, want 1", len(got))
+	}
+
+	if want := authored - authored%day; got[0].AuthoredAt != want {
+		t.Errorf("exported authored_at = %d, want UTC-day floor %d (raw %d) — a second-resolution stamp deanonymizes the contributor",
+			got[0].AuthoredAt, want, authored)
+	}
+	if authored%day != 0 && got[0].AuthoredAt == authored {
+		t.Errorf("exported authored_at = %d, the exact save second — the pool must not carry it", authored)
+	}
+	if stillLocal, _, _ := readStamps(t, conn, resp.ID); stillLocal != authored {
+		t.Errorf("local authored_at = %d, want %d unchanged — coarsening is an export-time concern only", stillLocal, authored)
+	}
+}
+
+// TestExport_RoundTripIsByteStable is the other half of the coarsening
+// contract: truncation must be idempotent, or a pool would churn its git diff
+// every time a peer re-exported what it just imported.
+func TestExport_RoundTripIsByteStable(t *testing.T) {
+	a, _ := newStoreWithDB(t)
+	req := validReq()
+	req.Scope = "shared"
+	req.Title = "shared lesson that survives a pool round trip"
+	if _, err := a.Save(context.Background(), req); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	var first strings.Builder
+	if err := a.ExportShared(context.Background(), &first); err != nil {
+		t.Fatalf("ExportShared(a): %v", err)
+	}
+
+	b, _ := newStoreWithDB(t)
+	res, err := b.ImportShared(context.Background(), strings.NewReader(first.String()))
+	if err != nil {
+		t.Fatalf("ImportShared(b): %v", err)
+	}
+	if res.Imported != 1 {
+		t.Fatalf("imported = %d (failed=%d), want 1", res.Imported, res.Failed)
+	}
+
+	var second strings.Builder
+	if err := b.ExportShared(context.Background(), &second); err != nil {
+		t.Fatalf("ExportShared(b): %v", err)
+	}
+	if first.String() != second.String() {
+		t.Errorf("re-export differs after a round trip:\n first  = %q\n second = %q", first.String(), second.String())
+	}
+}
+
 // TestSave_ForcePreservesAuthoredAt: a force-save is a body correction, not a
 // re-authoring. Every real force caller (CLI `--force`, MCP force:true) leaves
 // AuthoredAt zero, so resolving it like a fresh insert would silently overwrite

@@ -24,9 +24,10 @@ type SharedMemory struct {
 	What     string `json:"what"`
 	Learned  string `json:"learned"`
 	Tags     string `json:"tags"`
-	// AuthoredAt is when the lesson was originally written. Content-stable, so
-	// it survives a re-export unchanged and a re-exported pool stays
-	// byte-identical across peers. Still no id, no author, no source.
+	// AuthoredAt is when the lesson was originally written, floored to the UTC
+	// day by ExportShared. Truncation is idempotent, so it survives a re-export
+	// unchanged and a re-exported pool stays byte-identical across peers. Still
+	// no id, no author, no source.
 	AuthoredAt int64 `json:"authored_at,omitempty"`
 }
 
@@ -55,6 +56,14 @@ func (s *Store) ExportShared(ctx context.Context, w io.Writer) error {
 		if err := rows.Scan(&m.Kind, &m.TaskType, &m.Title, &m.What, &m.Learned, &m.Tags, &m.AuthoredAt); err != nil {
 			return fmt.Errorf("scan shared memory: %w", err)
 		}
+		// Floor to the UTC day before the stamp leaves the machine. A
+		// locally-authored row's authored_at IS its created_at — the exact
+		// second of the save — and second-resolution stamps re-cluster one
+		// contributor's rows by timestamp adjacency (session rollups land
+		// several summaries inside one second), leaking working hours and
+		// undoing the attribution removal Scrub exists to enforce. Idempotent,
+		// so a re-exported pool stays byte-identical.
+		m.AuthoredAt -= m.AuthoredAt % 86400
 		if err := enc.Encode(&m); err != nil {
 			return fmt.Errorf("export write: %w", err)
 		}
