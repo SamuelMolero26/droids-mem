@@ -2,13 +2,18 @@ package graph
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 // copyFixture copies testdata/testmod into a fresh temp dir so a test can
@@ -723,6 +728,71 @@ func TestBuildAsync_ForeignStateWithSameStampIsIgnored(t *testing.T) {
 	m.buildsMu.Unlock()
 	if !still {
 		t.Error("a foreign build retired the live build state")
+	}
+}
+
+// TestCallEdges_MatchesCleanGoldenEdgeSet pins the edge set produced on a
+// fully clean tree BEFORE cg.DeleteSyntheticNodes() is removed (PR2, task
+// 3.6). It passes trivially here — DeleteSyntheticNodes is still called
+// unconditionally in this PR and the golden was captured from this exact
+// commit's behavior (post Tests:true + dedupe, see Boundary Verifications §1
+// in tasks.md). Its purpose is to characterize current behavior so that
+// re-running it unchanged after DeleteSyntheticNodes is removed genuinely
+// proves clean-tree edge-set parity, rather than being satisfied by
+// construction.
+func TestCallEdges_MatchesCleanGoldenEdgeSet(t *testing.T) {
+	repo, err := filepath.Abs("testdata/testmod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "graph.db")
+	st, err := stamp(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+		t.Fatalf("buildIndex: %v", err)
+	}
+	conn, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	rows, err := conn.Query(`SELECT s1.qname, s2.qname FROM edges e
+		JOIN symbols s1 ON s1.id = e.caller
+		JOIN symbols s2 ON s2.id = e.callee`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var a, b string
+		if err := rows.Scan(&a, &b); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, a+","+b)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(got)
+
+	goldenBytes, err := os.ReadFile("testdata/edges_clean.golden")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want []string
+	for _, line := range strings.Split(strings.TrimRight(string(goldenBytes), "\n"), "\n") {
+		if line != "" {
+			want = append(want, line)
+		}
+	}
+	sort.Strings(want)
+
+	if !slices.Equal(got, want) {
+		t.Errorf("edge set drifted from testdata/edges_clean.golden:\n got:  %v\n want: %v", got, want)
 	}
 }
 

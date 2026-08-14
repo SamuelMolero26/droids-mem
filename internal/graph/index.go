@@ -49,6 +49,7 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 		Context: ctx,
 		Dir:     repo,
 		Env:     goToolEnv(),
+		Tests:   true, // index _test.go declarations as symbols/callers (see dedupeVariants)
 		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
 			packages.NeedImports | packages.NeedDeps | packages.NeedTypes |
 			packages.NeedSyntax | packages.NeedTypesInfo | packages.NeedModule,
@@ -87,7 +88,7 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 
 	var symbols []*symRow
 	byPos := map[string]*symRow{} // "abs-file:line" → row, for SSA function matching
-	for _, p := range pkgs {
+	for _, p := range dedupeVariants(pkgs) {
 		shortPkg := shortPkgPath(p.PkgPath, module)
 		for _, f := range p.Syntax {
 			for _, decl := range f.Decls {
@@ -106,6 +107,45 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	impls := implementsEdges(pkgs, byPos)
 
 	return writeGraphDB(ctx, dbPath, repo, module, stampVal, symbols, edges, impls)
+}
+
+// dedupeVariants collapses packages.Load(Tests:true)'s multiple variants per
+// PkgPath into exactly one, for symbol-row emission only. Tests:true makes
+// packages.Load return up to four variants per tested package; the
+// in-package test variant (its p.ID contains " [") re-parses the SAME
+// production files as the plain variant under the SAME PkgPath. Emitting rows
+// for every variant would duplicate every production symbol — symbols.qname
+// has no UNIQUE constraint, so the duplicate insert succeeds silently and
+// findSymbol then reports every symbol in the package as ambiguous. The
+// in-package test variant is preferred when present because its p.Syntax
+// additionally covers the package's _test.go declarations; the synthesized
+// "<pkg>.test" main (external test binary) carries no symbols worth indexing
+// and is skipped outright. SSA is still built from the full, un-deduped pkgs
+// slice (see callEdges) — both variants' functions share identical
+// file:line positions, so their edges collapse onto the one retained row and
+// no edge is lost by deduping here.
+func dedupeVariants(pkgs []*packages.Package) []*packages.Package {
+	byPath := map[string]*packages.Package{}
+	var order []string
+	for _, p := range pkgs {
+		if strings.HasSuffix(p.PkgPath, ".test") {
+			continue // synthesized test-binary main, not repo source
+		}
+		existing, ok := byPath[p.PkgPath]
+		if !ok {
+			byPath[p.PkgPath] = p
+			order = append(order, p.PkgPath)
+			continue
+		}
+		if strings.Contains(p.ID, " [") && !strings.Contains(existing.ID, " [") {
+			byPath[p.PkgPath] = p // prefer the in-package test variant
+		}
+	}
+	out := make([]*packages.Package, 0, len(order))
+	for _, path := range order {
+		out = append(out, byPath[path])
+	}
+	return out
 }
 
 func shortPkgPath(pkgPath, module string) string {
