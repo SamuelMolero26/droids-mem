@@ -7,7 +7,7 @@ import (
 
 // CurrentSchemaVersion is the user_version that a fully-initialized
 // database reports. Bump when adding a new entry to the migrations ladder.
-const CurrentSchemaVersion = 8
+const CurrentSchemaVersion = 9
 
 // migration is one rung in the PRAGMA user_version ladder. Each rung runs
 // inside its own transaction; partial failure rolls back atomically.
@@ -42,6 +42,7 @@ var migrations = []migration{
 	{from: 5, to: 6, sql: migrationV5ToV6},
 	{from: 6, to: 7, sql: migrationV6ToV7},
 	{from: 7, to: 8, sql: migrationV7ToV8},
+	{from: 8, to: 9, sql: migrationV8ToV9},
 }
 
 // migrationV0ToV1 widens the row shape and adds the meta table.
@@ -347,7 +348,7 @@ CREATE INDEX idx_memories_origin_created ON memories(origin, created_at DESC, id
 DROP INDEX IF EXISTS idx_memories_task_type;
 `
 
-// migrationV7ToV8 adds authored_at (ADR-0033): pure provenance, distinct from
+// migrationV8ToV9 adds authored_at: pure provenance, distinct from
 // created_at, for a memory's original authoring date. The two agree for a
 // locally-authored row and diverge on import, where ImportShared re-stamps
 // created_at to the local import time but carries the peer's authored_at
@@ -363,7 +364,7 @@ DROP INDEX IF EXISTS idx_memories_task_type;
 // archived_memories gets the same column + backfill for column-parity with
 // memories (TestArchivedMemories_ColumnParityWithMemories); the UPDATE is a
 // no-op today since nothing writes to that table yet.
-const migrationV7ToV8 = `
+const migrationV8ToV9 = `
 ALTER TABLE memories ADD COLUMN authored_at INTEGER NOT NULL DEFAULT 0;
 UPDATE memories SET authored_at = created_at;
 

@@ -9,6 +9,19 @@ package db
 // FTS5 external-content sync (memories_fts) keys on this rowid. Do NOT use
 // INSERT OR REPLACE or REPLACE INTO on memories — those reassign rowid and
 // silently desync the FTS index. Use ON CONFLICT DO UPDATE for upserts.
+//
+// authored_at is when the lesson was WRITTEN; created_at is when it entered
+// THIS store. They are equal for a locally-authored row and diverge on
+// import, where ImportShared re-stamps created_at to the local import time
+// but carries the peer's authored_at forward. Pure provenance: it is never an
+// ORDER BY key and never drives review_after — an old peer lesson must not
+// jump the newest-first queue, and there is no decay clock in this change.
+//
+// Column comments live HERE, not inside the CREATE TABLE body: SQLite stores
+// the statement text verbatim in sqlite_master, but a column added later by
+// ALTER TABLE carries no comment. An inline comment therefore makes a fresh
+// DB permanently unequal to a migrated one and breaks
+// TestInit_FreshMatchesMigratedShape.
 const ddl = ddlTables + FTSSchema + ddlMeta
 
 const ddlTables = `
@@ -32,13 +45,6 @@ CREATE TABLE IF NOT EXISTS memories (
     origin                TEXT    NOT NULL DEFAULT 'manual' CHECK(origin IN ('manual','auto')),
     review_after          INTEGER,
     pinned                INTEGER NOT NULL DEFAULT 0,
-    -- authored_at is when the lesson was WRITTEN; created_at is when it entered
-    -- THIS store. They are equal for a locally-authored row and diverge on
-    -- import, where ImportShared re-stamps created_at to the local import time
-    -- but carries the peer's authored_at forward. Pure provenance: it is never
-    -- an ORDER BY key and never drives review_after -- an old peer lesson must
-    -- not jump the newest-first queue, and there is no decay clock in this
-    -- change ("time-semantics-ordering-and-authored-at").
     authored_at           INTEGER NOT NULL DEFAULT 0,
     CHECK(updated_at >= created_at)
 );
@@ -50,6 +56,10 @@ CREATE TABLE IF NOT EXISTS memories (
 -- archive time) is checked against memories via a PRAGMA table_info parity
 -- test so future ALTERs on memories fail loud here instead of silently
 -- dropping a column from the archive copy.
+--
+-- authored_at sits LAST here, after archived_at, because rung 8→9 adds it via
+-- ALTER TABLE and ALTER can only append. Fresh has to match the order a
+-- migrated DB ends up with, not the mirror order of memories.
 CREATE TABLE IF NOT EXISTS archived_memories (
     id                    TEXT    PRIMARY KEY,
     session_id            TEXT    NOT NULL,
@@ -70,8 +80,8 @@ CREATE TABLE IF NOT EXISTS archived_memories (
     origin                TEXT    NOT NULL DEFAULT 'manual',
     review_after          INTEGER,
     pinned                INTEGER NOT NULL DEFAULT 0,
-    authored_at           INTEGER NOT NULL DEFAULT 0,
-    archived_at           INTEGER NOT NULL
+    archived_at           INTEGER NOT NULL,
+    authored_at           INTEGER NOT NULL DEFAULT 0
 );
 
 -- meta holds singleton key/value markers (e.g. scrub_baseline_complete).
