@@ -8,6 +8,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **The `phone` scrub detector no longer redacts numeric deltas** (issue #102).
+  Its regex floor was two digits, so any signed number (`+370 bytes`, `+46%`,
+  diff stats) matched the E.164 phone shape and was silently and irreversibly
+  redacted before the row was stored — 6 of 7 matches were false positives.
+  The floor is now the E.164 real-world minimum of seven digits. A 7+ digit
+  numeric delta still matches; tightening further needs context rules and stays
+  documented as a deliberate residual.
 - **Code-graph cache now invalidates on a schema change.** `ensureFresh` gated
   only on the file-census stamp, and `graph.db` records no schema version, so
   editing the schema left every cached graph serving rows in the old shape
