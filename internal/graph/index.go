@@ -9,6 +9,7 @@ import (
 	"go/types"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -116,11 +117,24 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	// dbPath still holds the previous build's graph.db at this point —
 	// writeGraphDB below is what replaces it. Best-effort: carriedEdges
 	// itself collapses any failure to zero edges, never an error here.
+	//
+	// carriedUnits is recorded unconditionally for every broken package, not
+	// just the ones carriedEdges actually recovered an edge for — its
+	// semantics are "this unit's edges are not freshly analyzed" (design.md),
+	// which holds even when carry-forward finds nothing to carry (e.g. the
+	// first-ever build on a broken tree).
+	var carriedUnits []string
 	if len(set.broken) > 0 {
 		brokenPkgNames := make(map[string]bool, len(set.broken))
 		for _, p := range set.broken {
 			brokenPkgNames[shortPkgPath(p.PkgPath, module)] = true
 		}
+		carriedUnits = make([]string, 0, len(brokenPkgNames))
+		for name := range brokenPkgNames {
+			carriedUnits = append(carriedUnits, name)
+		}
+		sort.Strings(carriedUnits)
+
 		byQName := make(map[string]int64, len(symbols))
 		for _, s := range symbols {
 			byQName[s.qname] = s.id
@@ -134,7 +148,7 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 
 	impls := implementsEdges(pkgs, byPos)
 
-	return writeGraphDB(ctx, dbPath, repo, module, stampVal, symbols, edges, impls)
+	return writeGraphDB(ctx, dbPath, repo, module, stampVal, symbols, edges, impls, carriedUnits)
 }
 
 // pkgSet is the result of partitioning packages.Load's output. kept is the
@@ -541,10 +555,13 @@ func implementsEdges(pkgs []*packages.Package, byPos map[string]*symRow) map[[2]
 
 // writeGraphDB builds the new db at dbPath+".tmp" and renames it into place,
 // so readers never observe a half-built graph. edges carries a dispatch
-// label per pair (callEdges/carriedEdges compute it), but the schema has no
-// dispatch column until PR3 — only the (caller, callee) key is persisted
-// here; the label is unused for now.
-func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool) error {
+// label per pair (callEdges/carriedEdges compute it), persisted per-edge in
+// the edges.dispatch column. carriedUnits lists the short package names
+// whose edges are not freshly analyzed this build (broken packages, carried
+// forward from the previous graph.db where possible) — stored wholesale as
+// meta.carried_units, newline-joined (package names never contain a
+// newline, so no escaping is needed).
+func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string) error {
 	if err := ctx.Err(); err != nil {
 		return err // cancelled before work started
 	}
@@ -586,13 +603,13 @@ func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, sy
 				return fmt.Errorf("insert symbol %s: %w", s.qname, err)
 			}
 		}
-		edgeIns, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO edges (caller, callee) VALUES (?,?)`)
+		edgeIns, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO edges (caller, callee, dispatch) VALUES (?,?,?)`)
 		if err != nil {
 			return err
 		}
 		defer edgeIns.Close()
-		for e := range edges {
-			if _, err := edgeIns.ExecContext(ctx, e[0], e[1]); err != nil {
+		for e, dispatch := range edges {
+			if _, err := edgeIns.ExecContext(ctx, e[0], e[1], dispatch); err != nil {
 				return err
 			}
 		}
@@ -613,6 +630,7 @@ func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, sy
 		}
 		for k, v := range map[string]string{
 			"stamp": stampVal, "repo": repo, "module": module, "indexed_at": nowUTC(),
+			"carried_units": strings.Join(carriedUnits, "\n"),
 		} {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO meta (key, value) VALUES (?,?)`, k, v); err != nil {
 				return err

@@ -259,6 +259,97 @@ func Broken() {
 	}
 }
 
+// TestBuildIndex_PersistsDispatchLabel pins task 5.1/5.2 (spec "Dispatch is
+// labelled per edge and split at response level"): the edges.dispatch column
+// must exist and carry the real per-edge label callEdges already computes —
+// "static" for a direct call (Announce -> pick) and "interface" for a CHA
+// interface dispatch (Announce -> English.Greet, via the Greeter interface).
+func TestBuildIndex_PersistsDispatchLabel(t *testing.T) {
+	repo, err := filepath.Abs("testdata/testmod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "graph.db")
+	st, err := stamp(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+		t.Fatalf("buildIndex: %v", err)
+	}
+	conn, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	dispatchOf := func(caller, callee string) string {
+		t.Helper()
+		var d string
+		err := conn.QueryRow(`SELECT e.dispatch FROM edges e
+			JOIN symbols s1 ON s1.id = e.caller
+			JOIN symbols s2 ON s2.id = e.callee
+			WHERE s1.qname = ? AND s2.qname = ?`, caller, callee).Scan(&d)
+		if err != nil {
+			t.Fatalf("edge %s -> %s: %v", caller, callee, err)
+		}
+		return d
+	}
+	if got := dispatchOf("testmod.Announce", "testmod.pick"); got != "static" {
+		t.Errorf("Announce -> pick dispatch = %q, want static", got)
+	}
+	if got := dispatchOf("testmod.Announce", "testmod.English.Greet"); got != "interface" {
+		t.Errorf("Announce -> English.Greet dispatch = %q, want interface (CHA-resolved via Greeter)", got)
+	}
+}
+
+// TestBuildIndex_PersistsCarriedUnits pins task 5.2 (design.md's meta.carried_units):
+// a partial build (1-of-2 packages broken, not majority) must record the
+// broken package's short name in meta.carried_units — "this unit's edges are
+// not freshly analyzed" — even though carry-forward itself only recovers a
+// SUBSET of that unit's edges.
+func TestBuildIndex_PersistsCarriedUnits(t *testing.T) {
+	repo := copyFixture(t)
+	dbPath := filepath.Join(t.TempDir(), "graph.db")
+
+	st1, err := stamp(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := buildIndex(context.Background(), repo, dbPath, st1); err != nil {
+		t.Fatalf("first (clean) buildIndex: %v", err)
+	}
+
+	writeFile(t, filepath.Join(repo, "zz"), "zz_broken.go", `package zz
+
+func Broken() {
+	var x int = "this does not type-check"
+	_ = x
+}
+`)
+	st2, err := stamp(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := buildIndex(context.Background(), repo, dbPath, st2); err != nil {
+		t.Fatalf("second (partial) buildIndex: %v", err)
+	}
+
+	conn, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	var v string
+	if err := conn.QueryRow(`SELECT value FROM meta WHERE key = 'carried_units'`).Scan(&v); err != nil {
+		t.Fatalf("meta.carried_units: %v", err)
+	}
+	if v != "zz" {
+		t.Errorf("meta.carried_units = %q, want %q", v, "zz")
+	}
+}
+
 // TestBuildIndex_CarryForwardRecoversBrokenPackageInternalEdge is the
 // end-to-end proof of task 4.3: buildIndex called twice against the SAME
 // dbPath (exactly the production shape — a rebuild reads the still-in-place

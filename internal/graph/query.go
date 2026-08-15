@@ -18,12 +18,16 @@ const (
 	// re-query with, never a specific invocation ("graph_symbol" vs
 	// "droids-mem graph symbol"). The agent already holds the surface it just
 	// called; the qname is the only missing payload and it is in the rows.
-	expandHint      = "neighbors are signatures only; re-query a neighbor's exact qname to see its body"
-	ambiguousHint   = "multiple symbols share that name; re-query with one of the qnames in matches"
-	searchHint      = "no exact symbol match; these are the closest by relevance — re-query with one qname from matches for its full body, callers, and callees"
-	maxSeeds        = 10  // search-fallback menu size
-	blastCap        = 500 // transitive-caller count sentinel (compute + number guard)
-	staleGraphHint  = "graph is stale: the repo changed but no longer type-checks, serving the last good index"
+	expandHint    = "neighbors are signatures only; re-query a neighbor's exact qname to see its body"
+	ambiguousHint = "multiple symbols share that name; re-query with one of the qnames in matches"
+	searchHint    = "no exact symbol match; these are the closest by relevance — re-query with one qname from matches for its full body, callers, and callees"
+	maxSeeds      = 10  // search-fallback menu size
+	blastCap      = 500 // transitive-caller count sentinel (compute + number guard)
+	// staleGraphHint no longer claims the repo "no longer type-checks" — Stale
+	// also covers a benign in-flight rebuild with no failure at all (a partial
+	// build that itself succeeds is never stale; see graph.go's Freshness doc).
+	// freshness.index_error, when present, carries the real failure reason.
+	staleGraphHint  = "graph is stale: serving the last good index while it updates (see freshness.index_error if the last build failed)"
 	pkgSymbolsLimit = "exported symbols only; re-query an unexported symbol by its name"
 	// blast radius rides entirely on call edges, and only func/method symbols are
 	// edge endpoints (byPos maps FuncDecls only). So transitive_callers is a
@@ -45,7 +49,20 @@ const (
 	// (depth=1 only). Redirect: narrow with direction+depth=1 or graph_package.
 	truncatedHint  = "neighbor list is a partial slice at the cap (see *_total), not the closest — narrow with a single direction at depth=1, or graph_package"
 	rebuildingHint = "graph is being rebuilt asynchronously — use graph_build_wait to block until ready, or retry"
+	// dispatchDominanceHint fires when interface-dispatch callers dominate the
+	// depth=1 caller list (issue #48/decision 2 amended): CHA over-approximates
+	// interface dispatch, so a symbol with a high callers_via_interface share
+	// may be a CHA fan-out rather than a real hub.
+	dispatchDominanceHint = "most callers are interface-dispatch (CHA over-approximation, not confirmed direct calls) — see callers_via_interface"
+	// staleUnitsHint points at the cap on Freshness.StaleUnits — no tool
+	// retrieves the full list; stale_units_total is the honest count.
+	staleUnitsHint = "stale_units is a partial list at the cap (see stale_units_total); those packages are riding on carried-forward edges from the previous build"
 )
+
+// dispatchHintRatio is the interface-dispatch share of a symbol's depth=1
+// callers past which dispatchDominanceHint fires. A named constant, not a
+// magic number: "> 50% of the caller total", per design.
+const dispatchHintRatio = 0.5
 
 // maxNeighbors caps neighbors per direction across all depths. A var, not a
 // const, purely so tests can shrink the cap and exercise truncation against a
@@ -100,6 +117,21 @@ type SymbolResponse struct {
 	// and 0 (omitted) unambiguously means "not truncated".
 	CallersTotal int `json:"callers_total,omitempty"`
 	CalleesTotal int `json:"callees_total,omitempty"`
+	// CallersInTests/CallerTestFiles/CallersViaInterface are response-level
+	// splits over the symbol's DIRECT (depth=1) callers, computed in SQL,
+	// independent of maxNeighbors and of the request's own Depth (issue #48,
+	// #49, decision 7a/2 amended). CallerTestFiles is the distinct _test.go
+	// file count, a separate number from CallersInTests (many callers can
+	// share one file). No per-row test/dispatch field exists on Neighbor —
+	// only these response-level scalars.
+	CallersInTests      int `json:"callers_in_tests,omitempty"`
+	CallerTestFiles     int `json:"caller_test_files,omitempty"`
+	CallersViaInterface int `json:"callers_via_interface,omitempty"`
+	// Carried reports whether the queried symbol's package rode on
+	// carried-forward edges in the most recent build (its package is in the
+	// build's carried_units set) — a partial-index honesty signal distinct
+	// from Freshness.Stale (which a successful partial build does not set).
+	Carried bool `json:"carried,omitempty"`
 	// TransitiveCallers is the blast size: distinct symbols that transitively
 	// call this one (up-closure, capped). A pointer so 0 ("safe to change,
 	// nothing calls it") is distinct from absent (a search-menu response, no
@@ -166,6 +198,7 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 		return nil, err
 	}
 	resp.Symbol = &info
+	resp.Carried = fresh.carriedUnits[info.Package]
 
 	var blastHint string // see blastTypeHint/blastRefHint above for the why
 	switch info.Kind {
@@ -257,6 +290,16 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 		if err != nil {
 			return nil, err
 		}
+		total, inTests, testFiles, viaInterface, err := callerSplit(ctx, conn, id)
+		if err != nil {
+			return nil, err
+		}
+		resp.CallersInTests = inTests
+		resp.CallerTestFiles = testFiles
+		resp.CallersViaInterface = viaInterface
+		if total > 0 && float64(viaInterface)/float64(total) > dispatchHintRatio {
+			resp.Hint += "; " + dispatchDominanceHint
+		}
 	}
 	if dir == "down" || dir == "both" {
 		resp.Callees, downTrunc, err = bfsNeighbors(ctx, conn, id, "down", depth, info.Package)
@@ -293,6 +336,25 @@ func edgeCount(ctx context.Context, conn *sql.DB, dir string, id int64) (int, er
 	var n int
 	err := conn.QueryRowContext(ctx, q, id).Scan(&n)
 	return n, err
+}
+
+// callerSplit computes response-level caller-fidelity splits over id's
+// DIRECT (depth=1) callers in one pass over the edges table — total distinct
+// callers, how many are in _test.go files, how many distinct _test.go files
+// those span, and how many are reached only via interface dispatch. All four
+// are independent of maxNeighbors (issue #49) and of the request's own
+// Depth (design.md: "all depth=1 only, computed in SQL"). The escaped LIKE
+// avoids misclassifying a literal underscore (e.g. "helpertest.go") as a
+// wildcard match (issue #48/decision 7a).
+func callerSplit(ctx context.Context, conn *sql.DB, id int64) (total, inTests, testFiles, viaInterface int, err error) {
+	err = conn.QueryRowContext(ctx, `SELECT
+			COUNT(DISTINCT e.caller),
+			COUNT(DISTINCT CASE WHEN s.file LIKE '%\_test.go' ESCAPE '\' THEN e.caller END),
+			COUNT(DISTINCT CASE WHEN s.file LIKE '%\_test.go' ESCAPE '\' THEN s.file END),
+			COUNT(DISTINCT CASE WHEN e.dispatch = 'interface' THEN e.caller END)
+		FROM edges e JOIN symbols s ON s.id = e.caller
+		WHERE e.callee = ?`, id).Scan(&total, &inTests, &testFiles, &viaInterface)
+	return total, inTests, testFiles, viaInterface, err
 }
 
 // findSymbol resolves a name to symbol stubs: exact qname first, then short

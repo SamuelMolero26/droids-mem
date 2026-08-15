@@ -33,14 +33,15 @@ func openPrevGraph(dbPath string) (*sql.DB, error) {
 // Strictly best-effort: ANY error opening, querying, or scanning dbPath
 // yields (nil, nil), and the build proceeds with zero carried edges. This is
 // load-bearing, not defensive — dbPath commonly does not exist yet (first
-// build on a broken tree) or predates a schema this code will eventually
-// expect (PR3's dispatch column; see 5.6/5.7).
+// build on a broken tree) or predates the edges.dispatch schema column
+// (a graph.db written by a PR1/PR2-era build): reading e.dispatch against
+// that shape fails with "no such column: dispatch", which this contract
+// swallows into zero carried edges rather than a buildIndex error (task 5.6).
 //
-// Every carried edge defaults to "static" dispatch: the edges.dispatch
-// schema column does not exist until PR3, so this SELECT only reads
-// (caller, callee) — reading a dispatch column here would make the
-// "no such column" failure branch fire on every carry-forward attempt during
-// this PR's entire lifetime, silently reducing carry-forward to a no-op.
+// Each carried edge preserves the REAL dispatch label read from the
+// previous graph.db (task 5.7) — the previous build's callEdges/carriedEdges
+// already computed it correctly; carrying it forward is strictly more
+// faithful than re-defaulting every carried edge to "static".
 func carriedEdges(dbPath string, brokenPkgs map[string]bool, byQName map[string]int64) (edgeSet, error) {
 	if len(brokenPkgs) == 0 {
 		return nil, nil
@@ -58,19 +59,19 @@ func carriedEdges(dbPath string, brokenPkgs map[string]bool, byQName map[string]
 	}
 	defer db.Close()
 
-	rows, err := db.Query(`SELECT s1.qname, s1.package, s2.qname
+	rows, err := db.Query(`SELECT s1.qname, s1.package, s2.qname, e.dispatch
 		FROM edges e
 		JOIN symbols s1 ON s1.id = e.caller
 		JOIN symbols s2 ON s2.id = e.callee`)
 	if err != nil {
-		return nil, nil // e.g. a schema this code doesn't expect
+		return nil, nil // e.g. a pre-dispatch-column schema (task 5.6)
 	}
 	defer rows.Close()
 
 	edges := edgeSet{}
 	for rows.Next() {
-		var callerQName, callerPkg, calleeQName string
-		if err := rows.Scan(&callerQName, &callerPkg, &calleeQName); err != nil {
+		var callerQName, callerPkg, calleeQName, dispatch string
+		if err := rows.Scan(&callerQName, &callerPkg, &calleeQName, &dispatch); err != nil {
 			return nil, nil
 		}
 		if !brokenPkgs[callerPkg] {
@@ -84,7 +85,7 @@ func carriedEdges(dbPath string, brokenPkgs map[string]bool, byQName map[string]
 		if !ok {
 			continue // callee symbol no longer exists in the fresh build
 		}
-		edges[[2]int64{callerID, calleeID}] = "static"
+		edges[[2]int64{callerID, calleeID}] = dispatch
 	}
 	if err := rows.Err(); err != nil {
 		return nil, nil

@@ -7,6 +7,28 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Code-graph answers now say how much to trust them.** Three signals, all
+  response-level rather than repeated per row:
+  - `callers_in_tests` and `caller_test_files` split the caller count, so
+    "89 callers" reads as "5 production, 84 in tests across 19 files" — the
+    difference between a semantic change and a mechanical one, which a bare
+    total hides.
+  - `callers_via_interface` counts callers reached through interface dispatch,
+    with a hint when they exceed half the list. CHA over-approximates on
+    purpose, so a method whose name is shared across many types (`Error`,
+    `String`, `Close`) can report every function in the repo that calls
+    *anything* of that name. That answer is now labelled instead of looking
+    like a genuine hub.
+  - `carried` on a symbol, and `stale_units` on freshness, name the packages
+    whose edges came from the previous build rather than this one.
+    `stale_units` is capped with a total and a hint, like every other list on
+    this surface.
+- `freshness.stale` correspondingly narrows to mean a genuine build failure —
+  a whole-graph fallback — instead of doubling as "some package didn't
+  type-check". The MCP tool descriptions were updated to match; they had
+  described the old behaviour.
+
 ### Fixed
 - **A repo that stops type-checking no longer blanks the whole code graph.**
   Previously the first package with a type error aborted the entire build and
