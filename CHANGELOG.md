@@ -8,6 +8,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **A repo that stops type-checking no longer blanks the whole code graph.**
+  Previously the first package with a type error aborted the entire build and
+  every query fell back to the last good graph, marked stale — so one typo in
+  one function body cost fresh answers for the whole tree. Now a broken package
+  degrades alone: symbols are still extracted from source for every package
+  (that needs no type information), fresh call edges are still computed for
+  every package that compiles, and edges *out of* a broken package — the only
+  ones that genuinely need a body we cannot type-check — are carried forward
+  from the previous build and remapped by qualified name. Edges into a broken
+  package survive natively. Carry-forward is best-effort: if the previous graph
+  cannot be read the build still succeeds with nothing carried. If more than
+  half the packages are broken the previous whole graph is served instead,
+  since a mostly-carried answer is not worth the confusion.
 - **The code graph now indexes test callers, and keeps its own reachability
   contract.** The graph documented that it "may report a caller that can't
   fire, never misses one that can", but `packages.Config` never set `Tests`, so
