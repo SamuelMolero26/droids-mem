@@ -170,3 +170,46 @@ func Broken() {
 		t.Errorf("Announce is in the cleanly-built package testmod, want Carried:false, got %+v", resp)
 	}
 }
+
+// TestSymbol_CarriedHint pins the hint that makes Carried actionable. A bare
+// boolean states a fact without naming which part of the answer it degrades,
+// and the honest reading is narrow: the symbol, its signature and its callers
+// are all freshly analyzed, only its callees ride on the previous build. An
+// agent given the bare flag has to guess, and the safe guess (distrust the
+// whole response) discards the fresh caller list — the exact payload a
+// blast-radius query asked for.
+func TestSymbol_CarriedHint(t *testing.T) {
+	repo := copyFixture(t)
+	m := managerFor(t)
+	ctx := context.Background()
+
+	if _, err := m.Index(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(repo, "zz"), "zz_broken.go", `package zz
+
+func Broken() {
+	var x int = "this does not type-check"
+	_ = x
+}
+`)
+	if _, err := m.Index(ctx, repo); err != nil {
+		t.Fatalf("partial build (1-of-2 broken) must succeed, got: %v", err)
+	}
+
+	resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "zz.Hub"})
+	if err != nil {
+		t.Fatalf("Symbol zz.Hub: %v", err)
+	}
+	if !strings.Contains(resp.Hint, carriedHint) {
+		t.Errorf("carried symbol zz.Hub must carry carriedHint, got hint %q", resp.Hint)
+	}
+
+	resp, err = m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"})
+	if err != nil {
+		t.Fatalf("Symbol Announce: %v", err)
+	}
+	if strings.Contains(resp.Hint, carriedHint) {
+		t.Errorf("cleanly-built Announce must not carry carriedHint, got hint %q", resp.Hint)
+	}
+}

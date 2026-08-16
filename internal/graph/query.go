@@ -57,6 +57,14 @@ const (
 	// staleUnitsHint points at the cap on Freshness.StaleUnits — no tool
 	// retrieves the full list; stale_units_total is the honest count.
 	staleUnitsHint = "stale_units is a partial list at the cap (see stale_units_total); those packages are riding on carried-forward edges from the previous build"
+	// carriedHint names WHICH half of a carried answer is degraded. Carried
+	// alone is a bare fact, and the safe reading of a bare fact is to distrust
+	// the whole response — which discards a freshly-analyzed caller list, the
+	// exact payload a blast-radius query asked for. Only callees ride on the
+	// previous build: a broken package's functions have no SSA body, so its
+	// OUT-edges cannot be rediscovered, while its symbols come from the AST
+	// and its in-edges resolve through the types-only stub.
+	carriedHint = "this symbol's package did not type-check, so its callees are carried forward from the previous build and may be out of date; the symbol, its signature, and its callers are freshly analyzed"
 )
 
 // dispatchHintRatio is the interface-dispatch share of a symbol's depth=1
@@ -248,6 +256,15 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 		resp.Hint = blastHint
 		if fresh.Stale {
 			resp.Hint = staleGraphHint + "; " + blastHint
+		}
+	}
+	// Append, never replace: blastHint above assigns, so a carried symbol must
+	// keep its blast-radius redirect as well as the carried caveat.
+	if resp.Carried {
+		if resp.Hint != "" {
+			resp.Hint += "; " + carriedHint
+		} else {
+			resp.Hint = carriedHint
 		}
 	}
 	// Append rebuilding hint when async rebuild is in progress.

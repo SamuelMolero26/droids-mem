@@ -23,7 +23,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `carried` on a symbol, and `stale_units` on freshness, name the packages
     whose edges came from the previous build rather than this one.
     `stale_units` is capped with a total and a hint, like every other list on
-    this surface.
+    this surface. `carried` carries a hint too, because the flag is narrower
+    than it looks: the symbol, its signature and its callers are all freshly
+    analyzed, and only its callees ride on the previous build. Without that,
+    the safe reading is to distrust the whole answer and throw away the fresh
+    caller list a blast-radius query was asking for.
 - `freshness.stale` correspondingly narrows to mean a genuine build failure —
   a whole-graph fallback — instead of doubling as "some package didn't
   type-check". The MCP tool descriptions were updated to match; they had
