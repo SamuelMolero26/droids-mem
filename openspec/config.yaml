@@ -1,0 +1,66 @@
+schema: spec-driven
+
+context: |
+  droids-mem: Go 1.26, single binary (cmd/droids-mem), pure-Go SQLite (modernc.org/sqlite, no CGO).
+  Layers: cmd -> internal/mcpserver -> internal/store (business logic) -> internal/db (schema).
+  Also: internal/scrub, internal/state, internal/graph, internal/share, internal/tui.
+  Persistent memory + native Go code-graph MCP server. docs/adr/ is gitignored, local-only.
+  Engineering constraint: startup mentality — keep changes small, handle only the important cases.
+
+persistence:
+  mode: hybrid
+  engram_topic_prefix: "sdd"
+  mirror_to_droids_mem: true
+  mirror_rule: >
+    Every Engram save for this project must be mirrored to droids-mem via mem_save
+    (kind: task_pattern or session_summary, task_type: "droids-mem"). If droids-mem
+    MCP tools are unavailable, report it explicitly under risks instead of failing silently.
+
+strict_tdd: true
+
+testing:
+  test_command: "go test ./..."
+  test_command_no_cache: "go test -count=1 ./..."
+  vet_command: "go vet ./..."
+  lint_command: "golangci-lint run --timeout 5m"
+  build_command: "go build ./cmd/droids-mem"
+  coverage_command: "go test -race -shuffle=on -coverprofile=coverage.out ./..."
+  coverage_target: "80% (codecov.yml project target, 2% threshold; patch target 80%, 1% threshold)"
+  type_checker: "go build / go vet (Go compiler is the type checker)"
+  formatter: "gofmt (enforced via golangci-lint's gofmt linter)"
+  ci: ".github/workflows/ci.yml — matrix Go {1.25, 1.26, stable}: test (race+shuffle+coverage), lint (golangci-lint), security (govulncheck, gosec)"
+  test_layers:
+    unit: "go test ./internal/... — table-driven, colocated *_test.go"
+    integration: "cmd/droids-mem/serve_e2e_test.go — drives `droids-mem serve` over JSON-RPC on ephemeral port"
+    e2e: "cmd/droids-mem/e2e_test.go — CLI end-to-end via built binary"
+  test_isolation: "Both e2e suites isolate DROIDS_MEM_DB and DROIDS_MEM_HOME per test"
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes
+    - Respect the startup engineering constraint: only small or absolutely necessary changes
+  specs:
+    - Use Given/When/Then for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+  design:
+    - Reference the relevant ADR(s) under docs/adr/ before changing a design assumption
+    - Document architecture decisions with rationale; do not silently contradict an Accepted ADR
+  tasks:
+    - Group by phase, use hierarchical numbering
+    - Keep tasks completable in one session
+    - Forecast 400-line PR review budget risk (Low/Medium/High) and recommend chained PRs if High
+  apply:
+    guidelines:
+      - Follow existing layered architecture (cmd -> mcpserver -> store -> db); do not bypass layers
+      - Follow existing code patterns
+      - Strict TDD is active — write the failing test first (RED), then implement (GREEN), then refactor
+    tdd: true
+    test_command: "go test -count=1 ./..."
+  verify:
+    test_command: "go test -count=1 ./..."
+    build_command: "go build ./cmd/droids-mem"
+    lint_command: "golangci-lint run --timeout 5m"
+    coverage_threshold: 80
+  archive:
+    - Warn before merging destructive deltas
+    - docs/adr/ is gitignored and local-only; archived specs live under openspec/, not docs/

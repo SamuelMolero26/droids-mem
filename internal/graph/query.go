@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -66,11 +67,6 @@ const (
 	// and its in-edges resolve through the types-only stub.
 	carriedHint = "this symbol's package did not type-check, so its callees are carried forward from the previous build and may be out of date; the symbol, its signature, and its callers are freshly analyzed"
 )
-
-// dispatchHintRatio is the interface-dispatch share of a symbol's depth=1
-// callers past which dispatchDominanceHint fires. A named constant, not a
-// magic number: "> 50% of the caller total", per design.
-const dispatchHintRatio = 0.5
 
 // maxNeighbors caps neighbors per direction across all depths. A var, not a
 // const, purely so tests can shrink the cap and exercise truncation against a
@@ -159,6 +155,14 @@ type SymbolResponse struct {
 	Hint      string     `json:"hint,omitempty"`
 }
 
+// addHint appends extra to the "; "-joined hint chain h, empty-safe.
+func addHint(h, extra string) string {
+	if h == "" {
+		return extra
+	}
+	return h + "; " + extra
+}
+
 // Symbol resolves and answers a symbol-anchored query against repo's graph.
 func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolResponse, error) {
 	conn, release, fresh, err := m.ensureFresh(ctx, req.Repo)
@@ -206,7 +210,7 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 		return nil, err
 	}
 	resp.Symbol = &info
-	resp.Carried = fresh.carriedUnits[info.Package]
+	resp.Carried = slices.Contains(fresh.carriedUnits, info.Package)
 
 	var blastHint string // see blastTypeHint/blastRefHint above for the why
 	switch info.Kind {
@@ -261,19 +265,10 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	// Append, never replace: blastHint above assigns, so a carried symbol must
 	// keep its blast-radius redirect as well as the carried caveat.
 	if resp.Carried {
-		if resp.Hint != "" {
-			resp.Hint += "; " + carriedHint
-		} else {
-			resp.Hint = carriedHint
-		}
+		resp.Hint = addHint(resp.Hint, carriedHint)
 	}
-	// Append rebuilding hint when async rebuild is in progress.
 	if fresh.Rebuilding {
-		if resp.Hint != "" {
-			resp.Hint += "; " + rebuildingHint
-		} else {
-			resp.Hint = rebuildingHint
-		}
+		resp.Hint = addHint(resp.Hint, rebuildingHint)
 	}
 
 	depth := min(max(req.Depth, 1), maxDepth)
@@ -314,8 +309,8 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 		resp.CallersInTests = inTests
 		resp.CallerTestFiles = testFiles
 		resp.CallersViaInterface = viaInterface
-		if total > 0 && float64(viaInterface)/float64(total) > dispatchHintRatio {
-			resp.Hint += "; " + dispatchDominanceHint
+		if viaInterface*2 > total { // more than half the callers, per design
+			resp.Hint = addHint(resp.Hint, dispatchDominanceHint)
 		}
 	}
 	if dir == "down" || dir == "both" {
@@ -338,7 +333,7 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	}
 	if upTrunc || downTrunc {
 		resp.Truncated = true
-		resp.Hint += "; " + truncatedHint
+		resp.Hint = addHint(resp.Hint, truncatedHint)
 	}
 	return resp, nil
 }

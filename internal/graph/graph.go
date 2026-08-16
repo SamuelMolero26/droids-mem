@@ -97,10 +97,10 @@ type Freshness struct {
 	// true count even when the list is capped.
 	StaleUnits      []string `json:"stale_units,omitempty"`
 	StaleUnitsTotal int      `json:"stale_units_total,omitempty"`
-	// carriedUnits is the FULL set (unexported, never serialized) backing the
+	// carriedUnits is the FULL list (unexported, never serialized) backing the
 	// per-symbol Carried flag (query.go) — membership can fall outside the
 	// capped StaleUnits list above.
-	carriedUnits map[string]bool
+	carriedUnits []string
 }
 
 // stampTTL controls how long a stamp() result is cached per repo. The stamp
@@ -784,15 +784,9 @@ func (m *Manager) open(path string) (*sql.DB, func(), Freshness, error) {
 		case "carried_units":
 			if v != "" {
 				units := strings.Split(v, "\n")
+				fresh.carriedUnits = units
 				fresh.StaleUnitsTotal = len(units)
-				fresh.StaleUnits = units
-				if len(units) > staleUnitsCap {
-					fresh.StaleUnits = units[:staleUnitsCap]
-				}
-				fresh.carriedUnits = make(map[string]bool, len(units))
-				for _, u := range units {
-					fresh.carriedUnits[u] = true
-				}
+				fresh.StaleUnits = units[:min(len(units), staleUnitsCap)]
 			}
 		}
 	}

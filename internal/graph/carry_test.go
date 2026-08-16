@@ -64,10 +64,7 @@ func TestCarriedEdges_CallerInBrokenPackageIsCarriedAndRemapped(t *testing.T) {
 	broken := map[string]bool{"zz": true}
 	byQName := map[string]int64{"zz.Near": 501, "zz.Hub": 502} // fresh ids, deliberately different from the seeded 1/2
 
-	got, err := carriedEdges(dbPath, broken, byQName)
-	if err != nil {
-		t.Fatalf("carriedEdges: %v", err)
-	}
+	got := carriedEdges(dbPath, broken, byQName)
 	if len(got) != 1 {
 		t.Fatalf("got %d edges, want 1: %v", len(got), got)
 	}
@@ -97,10 +94,7 @@ func TestCarriedEdges_CallerQNameMissDropsEdge(t *testing.T) {
 	broken := map[string]bool{"zz": true}
 	byQName := map[string]int64{"zz.Hub": 502} // zz.Deleted no longer exists in the fresh symbol set
 
-	got, err := carriedEdges(dbPath, broken, byQName)
-	if err != nil {
-		t.Fatalf("carriedEdges: %v", err)
-	}
+	got := carriedEdges(dbPath, broken, byQName)
 	if len(got) != 0 {
 		t.Errorf("want 0 edges when the caller qname has no fresh match, got %v", got)
 	}
@@ -122,10 +116,7 @@ func TestCarriedEdges_CrossUnitEdgeNeverCarried(t *testing.T) {
 	broken := map[string]bool{"zz": true} // testmod is clean, zz is broken
 	byQName := map[string]int64{"testmod.main": 601, "zz.Hub": 602}
 
-	got, err := carriedEdges(dbPath, broken, byQName)
-	if err != nil {
-		t.Fatalf("carriedEdges: %v", err)
-	}
+	got := carriedEdges(dbPath, broken, byQName)
 	if len(got) != 0 {
 		t.Errorf("a clean-caller-into-broken-callee edge must never be carried, got %v", got)
 	}
@@ -200,10 +191,7 @@ func TestCarriedEdges_OldSchemaPrevGraphYieldsZeroCarried(t *testing.T) {
 	broken := map[string]bool{"zz": true}
 	byQName := map[string]int64{"zz.Near": 501, "zz.Hub": 502}
 
-	got, err := carriedEdges(dbPath, broken, byQName)
-	if err != nil {
-		t.Fatalf("carriedEdges must be best-effort even against an old-schema db, got error: %v", err)
-	}
+	got := carriedEdges(dbPath, broken, byQName)
 	if len(got) != 0 {
 		t.Errorf("want 0 carried edges reading dispatch from a pre-dispatch-column graph.db, got %v", got)
 	}
@@ -242,10 +230,7 @@ func TestCarriedEdges_PreservesRealDispatchLabel(t *testing.T) {
 	broken := map[string]bool{"zz": true}
 	byQName := map[string]int64{"zz.Near": 501, "zz.Hub": 502}
 
-	got, err := carriedEdges(dbPath, broken, byQName)
-	if err != nil {
-		t.Fatalf("carriedEdges: %v", err)
-	}
+	got := carriedEdges(dbPath, broken, byQName)
 	dispatch, ok := got[[2]int64{501, 502}]
 	if !ok {
 		t.Fatalf("edge not carried: %v", got)
@@ -264,10 +249,7 @@ func TestCarriedEdges_NoPreviousGraphYieldsZeroCarried(t *testing.T) {
 	broken := map[string]bool{"zz": true}
 	byQName := map[string]int64{"zz.Hub": 1}
 
-	got, err := carriedEdges(dbPath, broken, byQName)
-	if err != nil {
-		t.Fatalf("carriedEdges must be best-effort, got error: %v", err)
-	}
+	got := carriedEdges(dbPath, broken, byQName)
 	if len(got) != 0 {
 		t.Errorf("want 0 carried edges with no previous graph, got %v", got)
 	}
