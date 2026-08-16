@@ -49,6 +49,45 @@ func TestHubC(t *testing.T) { Hub() }
 	}
 }
 
+// TestCallerSplit_ProductionTestAndDistinctFiles pins task 6.3/6.4 (spec
+// "Caller counts are split production vs. test" + "Distinct test-file count
+// is a dedicated field"): zz.Hub gets 2 production callers (zz.Near,
+// testmod.main) and 3 test callers spread across 2 distinct _test.go files —
+// CallersInTests must count the callers, CallerTestFiles the distinct files,
+// and the two must be independent numbers (3 callers, 2 files).
+func TestCallerSplit_ProductionTestAndDistinctFiles(t *testing.T) {
+	repo := copyFixture(t)
+	writeFile(t, filepath.Join(repo, "zz"), "hub_test.go", `package zz
+
+import "testing"
+
+func TestHubA(t *testing.T) { Hub() }
+func TestHubB(t *testing.T) { Hub() }
+`)
+	writeFile(t, filepath.Join(repo, "zz"), "hub2_test.go", `package zz
+
+import "testing"
+
+func TestHubC(t *testing.T) { Hub() }
+`)
+
+	m := NewManager(filepath.Join(t.TempDir(), "graphs"))
+	t.Cleanup(m.Close)
+	resp, err := m.Symbol(context.Background(), SymbolRequest{Repo: repo, Symbol: "zz.Hub", Direction: "up"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Callers) != 5 {
+		t.Fatalf("want 5 total callers (2 production + 3 test), got %+v", resp.Callers)
+	}
+	if resp.CallersInTests != 3 {
+		t.Errorf("CallersInTests = %d, want 3", resp.CallersInTests)
+	}
+	if resp.CallerTestFiles != 2 {
+		t.Errorf("CallerTestFiles = %d, want 2 (distinct _test.go files, independent of the 3-caller count)", resp.CallerTestFiles)
+	}
+}
+
 // TestNeighborOrdering_ProximityPreservedWithinTestGroup checks the second
 // half of the ordering contract: same-package proximity still applies WITHIN
 // the test-caller group, not just the production one. zz.Hub's test callers
