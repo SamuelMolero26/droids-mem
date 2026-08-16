@@ -997,35 +997,23 @@ func dedupeTokens(body string) ([]string, map[string]struct{}) {
 }
 
 // searchTerms extracts unique lowercase words (len > 2) for BM25 queries.
+//
+// It kept its own normalization sweep until it was folded into dedupeTokens,
+// which also fixed a real divergence: this stripped punctuation to "" while
+// dedupeTokens and tokenSet replace it with " ". So "mem_save.Error" became
+// one token "mem_saveerror" here and two tokens there — and FTS5's unicode61
+// tokenizer, which the query has to match, splits it. dupeQuery documents
+// itself as building "the same query the save-time near-duplicate check
+// uses"; before the fold it demonstrably did not.
 func searchTerms(s string) []string {
-	s = strings.ToLower(s)
-	s = rePunct.ReplaceAllString(s, "")
-	s = reWhitespace.ReplaceAllString(s, " ")
-	words := strings.Fields(strings.TrimSpace(s))
-	seen := make(map[string]bool, len(words))
-	result := make([]string, 0, len(words))
-	for _, w := range words {
-		if len(w) > 2 && !seen[w] {
-			seen[w] = true
-			result = append(result, w)
-		}
-	}
-	return result
+	terms, _ := dedupeTokens(s)
+	return terms
 }
 
 // tokenSet builds the deduplicated set of meaningful tokens used for
 // Jaccard similarity. Excludes 1-2 char tokens (noise).
 func tokenSet(s string) map[string]struct{} {
-	s = strings.ToLower(s)
-	s = rePunct.ReplaceAllString(s, " ")
-	s = reWhitespace.ReplaceAllString(s, " ")
-	words := strings.Fields(strings.TrimSpace(s))
-	set := make(map[string]struct{}, len(words))
-	for _, w := range words {
-		if len(w) > 2 {
-			set[w] = struct{}{}
-		}
-	}
+	_, set := dedupeTokens(s)
 	return set
 }
 
