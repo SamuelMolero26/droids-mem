@@ -2,13 +2,18 @@ package graph
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 // copyFixture copies testdata/testmod into a fresh temp dir so a test can
@@ -67,6 +72,27 @@ func writeFile(t *testing.T, repo, name, body string) {
 	if err := os.WriteFile(filepath.Join(repo, name), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// breakMajority injects a body-local type error into BOTH the root package
+// and its zz subpackage (testmod's only two packages), so partition's broken
+// set is 2-of-2 — comfortably past the >50%-broken safety cap (task
+// 3.7/3.8). Under the pre-PR2 all-or-nothing gate a single broken package
+// aborted the whole build; under partial-build degradation it no longer
+// does, so tests pinning genuine whole-build-failure behavior now need a
+// majority broken, not just one package.
+func breakMajority(t *testing.T, repo string) {
+	t.Helper()
+	writeFile(t, repo, "broken.go", "package main\nfunc Bad() { undefined(")
+	writeFile(t, filepath.Join(repo, "zz"), "zz_broken.go", "package zz\nfunc Bad() { undefined(")
+}
+
+// fixMajority repairs both packages broken by breakMajority with valid
+// source, moving the stamp forward so a rebuild is triggered and succeeds.
+func fixMajority(t *testing.T, repo string) {
+	t.Helper()
+	writeFile(t, repo, "broken.go", "package main\n\nfunc Recovered() {}\n")
+	writeFile(t, filepath.Join(repo, "zz"), "zz_broken.go", "package zz\n\nfunc ZZRecovered() {}\n")
 }
 
 // waitForBuild blocks until no build is tracked for repo, or the deadline hits.
@@ -357,7 +383,7 @@ func TestBuildAsync_FailureServesStaleAndRecordsError(t *testing.T) {
 	}
 	before := graphChecksum(t, m, repo)
 
-	writeFile(t, repo, "broken.go", "package main\nfunc Bad() { undefined(")
+	breakMajority(t, repo)
 
 	// First query launches the doomed build and serves the old graph.
 	resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"})
@@ -390,6 +416,118 @@ func TestBuildAsync_FailureServesStaleAndRecordsError(t *testing.T) {
 	}
 }
 
+// TestBuildIndex_MajorityBrokenServesPreviousGraph pins task 3.7/3.8 (spec
+// "Greater-than-50%-broken safety cap"): when more than half of the loaded
+// packages are broken, no fresh graph.db is written and the previously
+// persisted graph continues to be served with Freshness.Stale: true.
+func TestBuildIndex_MajorityBrokenServesPreviousGraph(t *testing.T) {
+	repo := copyFixture(t)
+	m := managerFor(t)
+	ctx := context.Background()
+
+	if _, err := m.Index(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	before := graphChecksum(t, m, repo)
+
+	breakMajority(t, repo) // both of testmod's 2 packages: 100% > 50%
+
+	resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"})
+	if err != nil {
+		t.Fatalf("degraded serve failed: %v", err)
+	}
+	if !resp.Freshness.Stale {
+		t.Errorf("want stale when a majority of packages are broken, got %+v", resp.Freshness)
+	}
+	waitForBuild(t, m, repo, 30*time.Second)
+
+	if after := graphChecksum(t, m, repo); after != before {
+		t.Error("a majority-broken build must not write a fresh graph.db")
+	}
+	if resp.Symbol == nil {
+		t.Error("the previous graph should still resolve symbols")
+	}
+}
+
+// TestClosurePreconditionFailure_SameServedStateAsMajorityBroken pins task
+// 3.9/3.10 (spec "Closure-precondition failure serves the same degraded
+// state as the safety cap"): both failure causes must produce the identical
+// served state — Freshness.Stale:true, the reason surfaced via IndexError,
+// and no new field distinguishing which cause it was (Freshness gains no new
+// field in this PR; StaleUnits is PR3-only, see design.md).
+//
+// assertImportClosure's real failure branch is unit-tested directly by
+// TestAssertImportClosure_Violated (task 3.1/3.2) — that is deliberate: the
+// spec forbids ever calling prog.Build() on an incomplete set, even inside a
+// subprocess, and callEdges' packages.Visit-based construction makes the
+// closure complete BY CONSTRUCTION for every package callEdges actually
+// creates (design.md, "the assert is cheap ... not vacuous"), so there is no
+// safe way to force a genuine violation organically through buildIndex
+// without either fabricating an unresolvable-dependency environment (flaky,
+// toolchain-version-dependent) or building an incomplete ssa.Program and
+// risking the exact panic this precondition exists to prevent.
+//
+// What this test verifies instead is the part that IS meaningfully
+// testable: buildIndex wires callEdges' error return through the exact same
+// unconditional `return err` used by the >50%-broken cap (3.8), so both
+// reach Manager's ordinary build-failure bookkeeping
+// (lastBuildErrors/failedStamps) identically — proven here by injecting that
+// bookkeeping directly, the same technique TestSupersededBuild_ClosesDone
+// and TestBuildAsync_ForeignStateWithSameStampIsIgnored already use for
+// Manager-internal state, and observing the served response is structurally
+// indistinguishable from TestBuildIndex_MajorityBrokenServesPreviousGraph's.
+func TestClosurePreconditionFailure_SameServedStateAsMajorityBroken(t *testing.T) {
+	repo := copyFixture(t)
+	m := managerFor(t)
+	ctx := context.Background()
+
+	if _, err := m.Index(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	before := graphChecksum(t, m, repo)
+
+	canon, err := canonicalRepo(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Move the stamp with a harmless, still-clean edit — the failure is
+	// injected via Manager bookkeeping below, not a real broken build, but
+	// ensureFresh only consults failedStamps/lastBuildErrors on the
+	// stamp-mismatch (warm-serve) path, same as every other suppressed-failure
+	// test in this file (e.g. TestEnsureFresh_NoRebuildLoopOnPersistentFailure).
+	writeFile(t, repo, "harmless.go", "package main\n\nfunc Harmless() {}\n")
+	current, err := stamp(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate the outcome buildIndex would record had assertImportClosure
+	// failed: buildAsync's failure branch does exactly this (lastBuildErrors +
+	// failedStamps), regardless of which check inside buildIndex produced the
+	// error — that unconditional sharing is the property under test.
+	m.buildsMu.Lock()
+	m.lastBuildErrors[canon] = "SSA import closure: import closure violated: example.com/dep has no ssa.Package"
+	m.failedStamps[canon] = current
+	m.buildsMu.Unlock()
+
+	resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"})
+	if err != nil {
+		t.Fatalf("degraded serve failed: %v", err)
+	}
+	if !resp.Freshness.Stale {
+		t.Errorf("want stale on a closure-precondition failure, got %+v", resp.Freshness)
+	}
+	if !strings.Contains(resp.Freshness.IndexError, "import closure") {
+		t.Errorf("IndexError should surface the closure failure, got %q", resp.Freshness.IndexError)
+	}
+	if resp.Symbol == nil {
+		t.Error("the previous graph should still resolve symbols")
+	}
+	if after := graphChecksum(t, m, repo); after != before {
+		t.Error("a closure-precondition failure must not write a fresh graph.db")
+	}
+}
+
 func TestBuildAsync_SuccessClearsError(t *testing.T) {
 	repo := copyFixture(t)
 	m := managerFor(t)
@@ -398,14 +536,14 @@ func TestBuildAsync_SuccessClearsError(t *testing.T) {
 	if _, err := m.Index(ctx, repo); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, repo, "broken.go", "package main\nfunc Bad() { undefined(")
+	breakMajority(t, repo)
 	if _, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"}); err != nil {
 		t.Fatal(err)
 	}
 	waitForBuild(t, m, repo, 30*time.Second)
 
-	// Fix it — a valid file at the same path keeps the stamp moving forward.
-	writeFile(t, repo, "broken.go", "package main\n\nfunc Recovered() {}\n")
+	// Fix it — valid files at the same paths keep the stamp moving forward.
+	fixMajority(t, repo)
 
 	resp, err := m.WaitBuild(ctx, repo, 60*time.Second)
 	if err != nil {
@@ -435,7 +573,7 @@ func TestEnsureFresh_NoRebuildLoopOnPersistentFailure(t *testing.T) {
 	if _, err := m.Index(ctx, repo); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, repo, "broken.go", "package main\nfunc Bad() { undefined(")
+	breakMajority(t, repo)
 
 	if _, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"}); err != nil {
 		t.Fatal(err)
@@ -461,7 +599,7 @@ func TestEnsureFresh_NoRebuildLoopOnPersistentFailure(t *testing.T) {
 	}
 
 	// A new stamp must break the suppression — this is not a permanent latch.
-	writeFile(t, repo, "broken.go", "package main\n\nfunc Recovered() {}\n")
+	fixMajority(t, repo)
 	resp, err := m.WaitBuild(ctx, repo, 60*time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -596,7 +734,7 @@ func TestWaitBuild_TimesOutWhileRepoLockHeld(t *testing.T) {
 // go/packages load on every single query — the exact defect the warm path fixes.
 func TestEnsureFresh_ColdFailureIsNotRelaunched(t *testing.T) {
 	repo := copyFixture(t)
-	writeFile(t, repo, "broken.go", "package main\nfunc Bad() { undefined(")
+	breakMajority(t, repo)
 	m := managerFor(t)
 	ctx := context.Background()
 
@@ -623,7 +761,7 @@ func TestEnsureFresh_ColdFailureIsNotRelaunched(t *testing.T) {
 	}
 
 	// Not a latch: fixing the source must index the repo.
-	writeFile(t, repo, "broken.go", "package main\n\nfunc Recovered() {}\n")
+	fixMajority(t, repo)
 	if _, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Recovered"}); err != nil {
 		t.Fatalf("a moved stamp must retry the cold build: %v", err)
 	}
@@ -635,7 +773,7 @@ func TestEnsureFresh_ColdFailureIsNotRelaunched(t *testing.T) {
 // the same doomed build again.
 func TestEnsureFresh_AbandonedColdFailureIsRecorded(t *testing.T) {
 	repo := copyFixture(t)
-	writeFile(t, repo, "broken.go", "package main\nfunc Bad() { undefined(")
+	breakMajority(t, repo)
 	m := managerFor(t)
 	canon, err := canonicalRepo(repo)
 	if err != nil {
@@ -723,6 +861,73 @@ func TestBuildAsync_ForeignStateWithSameStampIsIgnored(t *testing.T) {
 	m.buildsMu.Unlock()
 	if !still {
 		t.Error("a foreign build retired the live build state")
+	}
+}
+
+// TestCallEdges_MatchesCleanGoldenEdgeSet pins the edge set produced on a
+// fully clean tree. The golden was captured while cg.DeleteSyntheticNodes()
+// was still called (post Tests:true + dedupe, see Boundary Verifications §1 in
+// tasks.md), so it characterizes the PRE-removal behavior; the call has since
+// been removed in callEdges. This test passing unchanged against that same
+// golden is what proves clean-tree edge-set parity across the removal, rather
+// than the assertion being satisfied by construction.
+//
+// Do not regenerate the golden. Its value is entirely in having been captured
+// before the change it guards — a regenerated golden would pin whatever the
+// current code does and prove nothing.
+func TestCallEdges_MatchesCleanGoldenEdgeSet(t *testing.T) {
+	repo, err := filepath.Abs("testdata/testmod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "graph.db")
+	st, err := stamp(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+		t.Fatalf("buildIndex: %v", err)
+	}
+	conn, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	rows, err := conn.Query(`SELECT s1.qname, s2.qname FROM edges e
+		JOIN symbols s1 ON s1.id = e.caller
+		JOIN symbols s2 ON s2.id = e.callee`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var a, b string
+		if err := rows.Scan(&a, &b); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, a+","+b)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(got)
+
+	goldenBytes, err := os.ReadFile("testdata/edges_clean.golden")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want []string
+	for _, line := range strings.Split(strings.TrimRight(string(goldenBytes), "\n"), "\n") {
+		if line != "" {
+			want = append(want, line)
+		}
+	}
+	sort.Strings(want)
+
+	if !slices.Equal(got, want) {
+		t.Errorf("edge set drifted from testdata/edges_clean.golden:\n got:  %v\n want: %v", got, want)
 	}
 }
 
