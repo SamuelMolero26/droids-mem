@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/samuelmolero26/droids-mem/internal/store"
@@ -52,5 +53,33 @@ func TestView_ShareDialogAndToast(t *testing.T) {
 	m, _ = upd(t, m, sharedMsg{n: 3})
 	if !strings.Contains(m.View(), "pushed 3 memories") {
 		t.Error("footer status missing after sharedMsg")
+	}
+}
+
+// TestRenderDetail_ShowsAuthoredAtWhenItDiffersFromCreatedAt pins the
+// provenance display requirement: an imported memory's authored_at (the
+// peer's original writing date) must render on its own line in the detail
+// pane, distinct from created_at (the local import date).
+func TestRenderDetail_ShowsAuthoredAtWhenItDiffersFromCreatedAt(t *testing.T) {
+	created := time.Date(2026, 8, 5, 0, 0, 0, 0, time.UTC).Unix()
+	authored := time.Date(2023, 3, 1, 0, 0, 0, 0, time.UTC).Unix()
+
+	imported := &store.Memory{
+		ID: "mem_imported", Title: "peer lesson", Kind: "error_resolution", TaskType: "droids-mem",
+		What: "what body", Learned: "learned body",
+		CreatedAt: created, AuthoredAt: authored,
+	}
+	out := renderDetail(imported, nil, 80)
+	if !strings.Contains(out, "2023-03-01") {
+		t.Errorf("detail pane missing authored date 2023-03-01:\n%s", out)
+	}
+
+	local := &store.Memory{
+		ID: "mem_local", Title: "local lesson", Kind: "error_resolution", TaskType: "droids-mem",
+		What: "what body", Learned: "learned body",
+		CreatedAt: created, AuthoredAt: created,
+	}
+	if out := renderDetail(local, nil, 80); strings.Contains(out, "authored") {
+		t.Errorf("detail pane should not show an authorship line when authored_at == created_at:\n%s", out)
 	}
 }

@@ -44,6 +44,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     conclude a signature change was test-only. Same-package proximity is kept
     as the secondary key. **Existing graphs rebuild once** on the first query
     after upgrading, because the file census changed.
+- **`prune --suggest-dupes` now tokenizes like the save-time duplicate check it
+  claims to mirror.** `dupeQuery` documents itself as building "the same capped,
+  phrase-quoted OR query the save-time near-duplicate check uses", but the two
+  had silently diverged: save-time runs on `dedupeTokens`, which replaces
+  punctuation with a space, while `searchTerms` stripped it to nothing. So
+  `store.Save` became the single token `storesave` in the prune query while
+  FTS5's `unicode61` tokenizer had indexed it as `store` and `save` — a
+  phrase-quoted term that could never match. `searchTerms` and `tokenSet` are
+  now thin projections of the one `dedupeTokens` sweep, which is what the
+  original fold intended.
 - **The `phone` scrub detector no longer redacts numeric deltas** (issue #102).
   Its regex floor was two digits, so any signed number (`+370 bytes`, `+46%`,
   diff stats) matched the E.164 phone shape and was silently and irreversibly
