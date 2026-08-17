@@ -477,12 +477,18 @@ func bfsNeighbors(ctx context.Context, conn *sql.DB, start int64, dir string, de
 func neighborLevel(ctx context.Context, conn *sql.DB, from, to string, frontier []int64, seen map[int64]bool,
 	out *[]Neighbor, depth int, startPkg string) (next []int64, truncated bool, err error) {
 
-	// ORDER BY (s.package != ?) puts same-package neighbors first (0 < 1), so the
-	// cap keeps the closest, then qname. The startPkg arg trails the frontier IN
-	// placeholders — positional order must match (issue #49).
+	// ORDER BY is_test first: a same-package _test.go caller must NOT outrank a
+	// cross-package production caller, or the cap can show zero production
+	// callers and an agent wrongly concludes a signature change is test-only.
+	// (s.package != ?) then puts same-package neighbors first within each
+	// is_test group (0 < 1), so the cap keeps the closest, then qname. The
+	// escaped LIKE avoids misclassifying a literal underscore (e.g.
+	// "helpertest.go") as a wildcard match. The startPkg arg trails the
+	// frontier IN placeholders — positional order must match (issue #49).
 	rows, err := conn.QueryContext(ctx, fmt.Sprintf(`SELECT DISTINCT s.id, s.qname, s.signature, s.file, s.line
 		FROM edges e JOIN symbols s ON s.id = e.%s
-		WHERE e.%s IN (%s) ORDER BY (s.package != ?), s.qname`, to, from, placeholders(len(frontier))),
+		WHERE e.%s IN (%s)
+		ORDER BY (s.file LIKE '%%\_test.go' ESCAPE '\'), (s.package != ?), s.qname`, to, from, placeholders(len(frontier))),
 		append(idArgs(frontier), startPkg)...)
 	if err != nil {
 		return nil, false, err

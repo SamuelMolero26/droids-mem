@@ -62,15 +62,17 @@ func skipDir(name string) bool {
 }
 
 // stamp fingerprints the repo's Go source state: count, total size, and max
-// mtime of every non-test .go file plus module files (go.mod/go.sum/go.work),
-// since dependency changes alter go/packages analysis and call edges. Any edit,
-// add, or delete moves it. Deliberately not git-aware — uncommitted edits must
-// invalidate the graph too, and the same path covers non-git repos.
+// mtime of every .go file (including _test.go) plus module files
+// (go.mod/go.sum/go.work), since dependency changes alter go/packages
+// analysis and call edges. Any edit, add, or delete moves it. Deliberately
+// not git-aware — uncommitted edits must invalidate the graph too, and the
+// same path covers non-git repos.
 //
-// _test.go files are excluded: buildIndex loads packages with cfg.Tests unset,
-// so test files are never indexed (verified: 0 test symbols). Rebuilding on a
-// test edit would burn a full ~2.5s type-check for a graph that can't change.
-// If test indexing is ever enabled, drop the _test.go filter here in lockstep.
+// _test.go files are included in the census: buildIndex loads packages with
+// cfg.Tests set, so _test.go declarations ARE indexed as symbols and
+// participate as callers. Excluding them here (as an earlier revision did)
+// would mean editing a test file never moves the stamp, so a new test caller
+// is silently never picked up.
 //
 // Known blind spot (accepted): the count+size+maxMtime triple cannot see a
 // content swap between two files that preserves the aggregate — file A takes
@@ -94,7 +96,7 @@ func stamp(repo string) (string, error) {
 			return nil
 		}
 		name := d.Name()
-		if !isModuleFile(name) && (!strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go")) {
+		if !isModuleFile(name) && !strings.HasSuffix(name, ".go") {
 			return nil
 		}
 		info, err := d.Info()
