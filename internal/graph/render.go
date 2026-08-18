@@ -47,9 +47,6 @@ func RenderSymbol(r *SymbolResponse) string {
 	if r.CallersInTests > 0 {
 		fmt.Fprintf(&b, "callers_in_tests: %d\n", r.CallersInTests)
 	}
-	if r.CallerTestFiles > 0 {
-		fmt.Fprintf(&b, "caller_test_files: %d\n", r.CallerTestFiles)
-	}
 	if r.CallersViaInterface > 0 {
 		fmt.Fprintf(&b, "callers_via_interface: %d\n", r.CallersViaInterface)
 	}
@@ -122,8 +119,10 @@ func writeFreshness(b *strings.Builder, f Freshness) {
 		msgs = append(msgs, "REBUILDING (async rebuild in progress)")
 	}
 	if len(f.StaleUnits) > 0 {
-		msgs = append(msgs, fmt.Sprintf("stale_units[%d of %d]: %s (%s)",
-			len(f.StaleUnits), f.StaleUnitsTotal, strings.Join(f.StaleUnits, ", "), staleUnitsHint))
+		// "[N of M]" already says the list is capped and how much it hides;
+		// those packages ride on carried-forward edges from the previous build.
+		msgs = append(msgs, fmt.Sprintf("stale_units[%d of %d]: %s",
+			len(f.StaleUnits), f.StaleUnitsTotal, strings.Join(f.StaleUnits, ", ")))
 	}
 	if len(msgs) == 0 {
 		return

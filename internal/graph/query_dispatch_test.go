@@ -8,13 +8,12 @@ import (
 	"testing"
 )
 
-// TestCallersViaInterface_SplitAndDominanceHint pins tasks 6.4/6.5/6.6 (spec
-// "Dispatch is labelled per edge and split at response level" +
-// "Dispatch-dominance hint"): Dominant.Do has 3 interface callers + 1 static
-// (75%, over the 50% dispatchHintRatio — hint must fire); Minor.Do shares the
-// same 3 interface call sites but has 6 static callers too (33%, under the
-// ratio — hint must not fire).
-func TestCallersViaInterface_SplitAndDominanceHint(t *testing.T) {
+// TestCallersViaInterface_Split pins tasks 6.4/6.5 (spec "Dispatch is
+// labelled per edge and split at response level"): Dominant.Do has 3
+// interface callers + 1 static; Minor.Do shares the same 3 interface call
+// sites but has 4 static callers too. The interface count is the same 3 in
+// both cases — it is a count of edges, not a share of the caller list.
+func TestCallersViaInterface_Split(t *testing.T) {
 	m, repo := testManagerAt(t, "testdata/dispatch")
 	ctx := context.Background()
 
@@ -28,22 +27,16 @@ func TestCallersViaInterface_SplitAndDominanceHint(t *testing.T) {
 	if resp.CallersViaInterface != 3 {
 		t.Errorf("Dominant.Do CallersViaInterface = %d, want 3", resp.CallersViaInterface)
 	}
-	if !strings.Contains(resp.Hint, dispatchDominanceHint) {
-		t.Errorf("Dominant.Do (75%% interface) hint missing dominance warning, got %q", resp.Hint)
-	}
 
 	resp, err = m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "dispatch.Minor.Do", Direction: "up"})
 	if err != nil {
 		t.Fatalf("Symbol Minor.Do: %v", err)
 	}
-	if len(resp.Callers) != 9 {
-		t.Fatalf("Minor.Do callers = %d, want 9 (3 interface + 6 static): %+v", len(resp.Callers), resp.Callers)
+	if len(resp.Callers) != 7 {
+		t.Fatalf("Minor.Do callers = %d, want 7 (3 interface + 4 static): %+v", len(resp.Callers), resp.Callers)
 	}
 	if resp.CallersViaInterface != 3 {
 		t.Errorf("Minor.Do CallersViaInterface = %d, want 3", resp.CallersViaInterface)
-	}
-	if strings.Contains(resp.Hint, dispatchDominanceHint) {
-		t.Errorf("Minor.Do (33%% interface) must not fire the dominance hint, got %q", resp.Hint)
 	}
 }
 
@@ -52,9 +45,8 @@ func TestCallersViaInterface_SplitAndDominanceHint(t *testing.T) {
 // shrinking maxNeighbors must change only the LENGTH of the returned
 // Callers slice — ordering already covered elsewhere, and here: Truncated,
 // CallersTotal, and every caller-fidelity split (CallersInTests,
-// CallerTestFiles, CallersViaInterface) must be identical regardless of the
-// cap value, computed straight from the edges table, never from the capped
-// slice.
+// CallersViaInterface) must be identical regardless of the cap value,
+// computed straight from the edges table, never from the capped slice.
 func TestCapInvariance_SplitsAndTotalsIndependentOfCap(t *testing.T) {
 	m, repo := testManagerAt(t, "testdata/dispatch")
 	ctx := context.Background()
@@ -70,27 +62,26 @@ func TestCapInvariance_SplitsAndTotalsIndependentOfCap(t *testing.T) {
 		return resp
 	}
 
-	small := query(2) // Minor.Do has 9 callers total; 2 forces truncation
-	large := query(9) // exactly the total: no truncation
+	small := query(2) // Minor.Do has 7 callers total; 2 forces truncation
+	large := query(7) // exactly the total: no truncation
 
 	if len(small.Callers) != 2 {
 		t.Fatalf("small-cap Callers = %d, want 2 (only the shown slice length depends on the cap)", len(small.Callers))
 	}
-	if len(large.Callers) != 9 {
-		t.Fatalf("large-cap Callers = %d, want 9", len(large.Callers))
+	if len(large.Callers) != 7 {
+		t.Fatalf("large-cap Callers = %d, want 7", len(large.Callers))
 	}
 	if !small.Truncated || large.Truncated {
 		t.Errorf("Truncated: small=%v (want true), large=%v (want false)", small.Truncated, large.Truncated)
 	}
-	if small.CallersTotal != 9 {
-		t.Errorf("small-cap CallersTotal = %d, want the true total 9, independent of the cap", small.CallersTotal)
+	if small.CallersTotal != 7 {
+		t.Errorf("small-cap CallersTotal = %d, want the true total 7, independent of the cap", small.CallersTotal)
 	}
 	if small.CallersInTests != large.CallersInTests ||
-		small.CallerTestFiles != large.CallerTestFiles ||
 		small.CallersViaInterface != large.CallersViaInterface {
-		t.Errorf("split counts diverged with the cap: small={in_tests:%d files:%d via_iface:%d} large={in_tests:%d files:%d via_iface:%d}",
-			small.CallersInTests, small.CallerTestFiles, small.CallersViaInterface,
-			large.CallersInTests, large.CallerTestFiles, large.CallersViaInterface)
+		t.Errorf("split counts diverged with the cap: small={in_tests:%d via_iface:%d} large={in_tests:%d via_iface:%d}",
+			small.CallersInTests, small.CallersViaInterface,
+			large.CallersInTests, large.CallersViaInterface)
 	}
 }
 
@@ -98,7 +89,7 @@ func TestCapInvariance_SplitsAndTotalsIndependentOfCap(t *testing.T) {
 // dispatch field on the wire" / "No per-row test/production column on the
 // wire"): the Neighbor JSON shape must carry no per-row test-ness or dispatch
 // field — those exist only as response-level scalars (CallersInTests,
-// CallerTestFiles, CallersViaInterface). loc (File/Line) is the only per-row
+// CallersViaInterface). loc (File/Line) is the only per-row
 // signal a caller of this API can derive test-ness from.
 func TestNeighbor_NoPerRowTestOrDispatchField(t *testing.T) {
 	typ := reflect.TypeOf(Neighbor{})

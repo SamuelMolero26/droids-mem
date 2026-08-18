@@ -10,20 +10,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 - **Code-graph answers now say how much to trust them.** Three signals, all
   response-level rather than repeated per row:
-  - `callers_in_tests` and `caller_test_files` split the caller count, so
-    "89 callers" reads as "5 production, 84 in tests across 19 files" — the
-    difference between a semantic change and a mechanical one, which a bare
-    total hides.
-  - `callers_via_interface` counts callers reached through interface dispatch,
-    with a hint when they exceed half the list. CHA over-approximates on
-    purpose, so a method whose name is shared across many types (`Error`,
-    `String`, `Close`) can report every function in the repo that calls
-    *anything* of that name. That answer is now labelled instead of looking
-    like a genuine hub.
+  - `callers_in_tests` splits the caller count, so "89 callers" reads as
+    "5 production, 84 in tests" — the difference between a semantic change and
+    a mechanical one, which a bare total hides.
+  - `callers_via_interface` counts callers reached through interface dispatch.
+    CHA over-approximates on purpose, so a method whose name is shared across
+    many types (`Error`, `String`, `Close`) can report every function in the
+    repo that calls *anything* of that name. That answer is now labelled
+    instead of looking like a genuine hub.
   - `carried` on a symbol, and `stale_units` on freshness, name the packages
     whose edges came from the previous build rather than this one.
-    `stale_units` is capped with a total and a hint, like every other list on
-    this surface. `carried` carries a hint too, because the flag is narrower
+    `stale_units` is capped and rendered as `[N of M]`, like every other list
+    on this surface. `carried` carries a hint, because the flag is narrower
     than it looks: the symbol, its signature and its callers are all freshly
     analyzed, and only its callees ride on the previous build. Without that,
     the safe reading is to distrust the whole answer and throw away the fresh

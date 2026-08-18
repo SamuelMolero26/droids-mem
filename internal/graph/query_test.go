@@ -49,13 +49,11 @@ func TestHubC(t *testing.T) { Hub() }
 	}
 }
 
-// TestCallerSplit_ProductionTestAndDistinctFiles pins task 6.3/6.4 (spec
-// "Caller counts are split production vs. test" + "Distinct test-file count
-// is a dedicated field"): zz.Hub gets 2 production callers (zz.Near,
+// TestCallerSplit_ProductionVsTest pins task 6.3 (spec "Caller counts are
+// split production vs. test"): zz.Hub gets 2 production callers (zz.Near,
 // testmod.main) and 3 test callers spread across 2 distinct _test.go files —
-// CallersInTests must count the callers, CallerTestFiles the distinct files,
-// and the two must be independent numbers (3 callers, 2 files).
-func TestCallerSplit_ProductionTestAndDistinctFiles(t *testing.T) {
+// CallersInTests counts the CALLERS (3), never the files.
+func TestCallerSplit_ProductionVsTest(t *testing.T) {
 	repo := copyFixture(t)
 	writeFile(t, filepath.Join(repo, "zz"), "hub_test.go", `package zz
 
@@ -81,10 +79,7 @@ func TestHubC(t *testing.T) { Hub() }
 		t.Fatalf("want 5 total callers (2 production + 3 test), got %+v", resp.Callers)
 	}
 	if resp.CallersInTests != 3 {
-		t.Errorf("CallersInTests = %d, want 3", resp.CallersInTests)
-	}
-	if resp.CallerTestFiles != 2 {
-		t.Errorf("CallerTestFiles = %d, want 2 (distinct _test.go files, independent of the 3-caller count)", resp.CallerTestFiles)
+		t.Errorf("CallersInTests = %d, want 3 (callers, not the 2 files they span)", resp.CallersInTests)
 	}
 }
 

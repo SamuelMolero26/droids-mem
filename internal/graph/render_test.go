@@ -70,16 +70,12 @@ func TestRenderSymbol_CallerSplitsAndCarried(t *testing.T) {
 		},
 		Callers:             []Neighbor{{QName: "a.b", Signature: "func()", File: "a.go", Line: 1, Depth: 1}},
 		CallersInTests:      86,
-		CallerTestFiles:     19,
 		CallersViaInterface: 36,
 		Carried:             true,
 	}
 	out := RenderSymbol(r)
 	if !strings.Contains(out, "callers_in_tests: 86") {
 		t.Errorf("missing callers_in_tests:\n%s", out)
-	}
-	if !strings.Contains(out, "caller_test_files: 19") {
-		t.Errorf("missing caller_test_files:\n%s", out)
 	}
 	if !strings.Contains(out, "callers_via_interface: 36") {
 		t.Errorf("missing callers_via_interface:\n%s", out)
@@ -91,8 +87,8 @@ func TestRenderSymbol_CallerSplitsAndCarried(t *testing.T) {
 
 // TestRenderSymbol_StaleUnitsCappedWithHint pins task 6.8 (spec "Freshness
 // reports carried units, capped"): the rendered freshness line must show
-// "stale_units[N of M]" (not inline all M) plus the capped names and a hint,
-// when the build's carried-unit list overflowed the cap.
+// "stale_units[N of M]" (not inline all M) plus the capped names, when the
+// build's carried-unit list overflowed the cap.
 func TestRenderSymbol_StaleUnitsCappedWithHint(t *testing.T) {
 	r := &SymbolResponse{
 		Repo: "/repo",
@@ -111,9 +107,6 @@ func TestRenderSymbol_StaleUnitsCappedWithHint(t *testing.T) {
 	}
 	if strings.Contains(out, "pkg005") {
 		t.Errorf("inlined a unit past the cap:\n%s", out)
-	}
-	if !strings.Contains(out, staleUnitsHint) {
-		t.Errorf("missing the full-list hint:\n%s", out)
 	}
 }
 
