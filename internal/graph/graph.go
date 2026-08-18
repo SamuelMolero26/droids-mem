@@ -46,9 +46,10 @@ CREATE INDEX idx_symbols_qname   ON symbols(qname);
 CREATE INDEX idx_symbols_name    ON symbols(name);
 CREATE INDEX idx_symbols_package ON symbols(package);
 CREATE TABLE edges (
-  caller   INTEGER NOT NULL,
-  callee   INTEGER NOT NULL,
-  dispatch TEXT NOT NULL DEFAULT 'static',
+  caller    INTEGER NOT NULL,
+  callee    INTEGER NOT NULL,
+  dispatch  TEXT NOT NULL DEFAULT 'static',
+  precision TEXT NOT NULL DEFAULT 'resolved',
   PRIMARY KEY (caller, callee)
 ) WITHOUT ROWID;
 CREATE INDEX idx_edges_callee ON edges(callee);
@@ -57,11 +58,23 @@ CREATE INDEX idx_edges_callee ON edges(callee);
 -- symbols.id, mirroring edges. Reverse index serves the "what does X satisfy"
 -- direction (satisfies) the same way idx_edges_callee serves callers.
 CREATE TABLE implements (
-  iface INTEGER NOT NULL,
-  impl  INTEGER NOT NULL,
+  iface     INTEGER NOT NULL,
+  impl      INTEGER NOT NULL,
+  precision TEXT NOT NULL DEFAULT 'resolved',
   PRIMARY KEY (iface, impl)
 ) WITHOUT ROWID;
 CREATE INDEX idx_implements_impl ON implements(impl);
+-- Import edges: endpoints are module-text, not symbol
+-- ids, because an imported module usually has no symbol row at all (import
+-- axios from "axios" — the imported module is not in the repo). Populated by
+-- the mapper tier; nothing writes it yet. No FTS index —
+-- imports are looked up by importer_file/imported_module, never searched.
+CREATE TABLE imports (
+  importer_file   TEXT NOT NULL,
+  imported_module TEXT NOT NULL,
+  precision       TEXT NOT NULL,
+  PRIMARY KEY (importer_file, imported_module)
+) WITHOUT ROWID;
 -- Ranks symbols by relevance to a free-text task phrase (the graph_symbol
 -- search fallback). rowid == symbols.id, so a MATCH joins straight back.
 -- Populated wholesale in writeGraphDB — the graph never updates in place, so

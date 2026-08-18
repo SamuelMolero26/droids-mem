@@ -13,7 +13,9 @@ import (
 // indexedExtensions is the source-file set the index is built from. It is an
 // input to the stamp generation, so widening it invalidates every cached
 // graph — a graph built before the set grew was built from fewer files.
-func indexedExtensions() []string { return []string{".go"} }
+func indexedExtensions() []string {
+	return []string{".go", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".py"}
+}
 
 // stampGen derives the stamp's generation prefix from the things that change
 // what a cached graph MEANS: the schema its rows were written under, and the
