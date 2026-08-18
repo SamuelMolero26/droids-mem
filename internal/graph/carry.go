@@ -7,16 +7,6 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// openPrevGraph opens dbPath read-only, bypassing Manager's refcounted
-// connEntry cache entirely — the same pattern buildlock.go's stampOnDisk
-// already uses. buildIndex has no *Manager, and threading one in here would
-// couple a read that finishes before writeGraphDB even starts to the
-// rebuild/retire lifecycle that cache exists for; the rename that publishes
-// the fresh graph happens well after this handle is closed.
-func openPrevGraph(dbPath string) (*sql.DB, error) {
-	return sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
-}
-
 // carriedEdges reads dbPath (the previous graph.db, still in place at the
 // time buildIndex calls this — writeGraphDB has not renamed the fresh one
 // over it yet) once, read-only, and returns edges whose CALLER symbol
@@ -30,48 +20,50 @@ func openPrevGraph(dbPath string) (*sql.DB, error) {
 // recovering — an in-edge from a clean caller was already freshly
 // rediscovered by callEdges (or genuinely no longer exists).
 //
-// Strictly best-effort: ANY error opening, querying, or scanning dbPath
-// yields (nil, nil), and the build proceeds with zero carried edges. This is
-// load-bearing, not defensive — dbPath commonly does not exist yet (first
-// build on a broken tree) or predates a schema this code will eventually
-// expect (PR3's dispatch column; see 5.6/5.7).
+// The read opens dbPath directly, bypassing Manager's refcounted connEntry
+// cache — the same pattern buildlock.go's stampOnDisk already uses.
+// buildIndex has no *Manager, and threading one in here would couple a read
+// that finishes before writeGraphDB even starts to the rebuild/retire
+// lifecycle that cache exists for.
 //
-// Every carried edge defaults to "static" dispatch: the edges.dispatch
-// schema column does not exist until PR3, so this SELECT only reads
-// (caller, callee) — reading a dispatch column here would make the
-// "no such column" failure branch fire on every carry-forward attempt during
-// this PR's entire lifetime, silently reducing carry-forward to a no-op.
-func carriedEdges(dbPath string, brokenPkgs map[string]bool, byQName map[string]int64) (edgeSet, error) {
-	if len(brokenPkgs) == 0 {
-		return nil, nil
-	}
-	// Every branch below returns the literal (nil, nil) on failure, never the
-	// captured err — carry-forward is best-effort by contract, so a failure
-	// here is reported as "zero carried edges", not as a buildIndex error.
+// Strictly best-effort, so it returns no error at all: ANY failure opening,
+// querying, or scanning dbPath yields nil, and the build proceeds with zero
+// carried edges. This is load-bearing, not defensive — dbPath commonly does
+// not exist yet (first build on a broken tree) or predates the
+// edges.dispatch schema column (a graph.db written by a PR1/PR2-era build):
+// reading e.dispatch against that shape fails with "no such column:
+// dispatch", which this contract swallows into zero carried edges rather
+// than a buildIndex error (task 5.6).
+//
+// Each carried edge preserves the REAL dispatch label read from the
+// previous graph.db (task 5.7) — the previous build's callEdges/carriedEdges
+// already computed it correctly; carrying it forward is strictly more
+// faithful than re-defaulting every carried edge to "static".
+func carriedEdges(dbPath string, brokenPkgs map[string]bool, byQName map[string]int64) edgeSet {
 	if _, err := os.Stat(dbPath); err != nil {
-		return nil, nil // no previous graph.db (first-ever build on a broken tree)
+		return nil // no previous graph.db (first-ever build on a broken tree)
 	}
 
-	db, err := openPrevGraph(dbPath)
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
 	if err != nil {
-		return nil, nil // open failure: unreadable or corrupt previous graph.db
+		return nil // open failure: unreadable or corrupt previous graph.db
 	}
 	defer db.Close()
 
-	rows, err := db.Query(`SELECT s1.qname, s1.package, s2.qname
+	rows, err := db.Query(`SELECT s1.qname, s1.package, s2.qname, e.dispatch
 		FROM edges e
 		JOIN symbols s1 ON s1.id = e.caller
 		JOIN symbols s2 ON s2.id = e.callee`)
 	if err != nil {
-		return nil, nil // e.g. a schema this code doesn't expect
+		return nil // e.g. a pre-dispatch-column schema (task 5.6)
 	}
 	defer rows.Close()
 
 	edges := edgeSet{}
 	for rows.Next() {
-		var callerQName, callerPkg, calleeQName string
-		if err := rows.Scan(&callerQName, &callerPkg, &calleeQName); err != nil {
-			return nil, nil
+		var callerQName, callerPkg, calleeQName, dispatch string
+		if err := rows.Scan(&callerQName, &callerPkg, &calleeQName, &dispatch); err != nil {
+			return nil
 		}
 		if !brokenPkgs[callerPkg] {
 			continue // caller in a clean package: already freshly rediscovered (or genuinely gone)
@@ -84,10 +76,10 @@ func carriedEdges(dbPath string, brokenPkgs map[string]bool, byQName map[string]
 		if !ok {
 			continue // callee symbol no longer exists in the fresh build
 		}
-		edges[[2]int64{callerID, calleeID}] = "static"
+		edges[[2]int64{callerID, calleeID}] = dispatch
 	}
 	if err := rows.Err(); err != nil {
-		return nil, nil
+		return nil
 	}
-	return edges, nil
+	return edges
 }

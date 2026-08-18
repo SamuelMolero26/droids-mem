@@ -7,8 +7,10 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -60,16 +62,25 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	if len(pkgs) == 0 {
 		return fmt.Errorf("no Go packages found under %s", repo)
 	}
-	set := partition(pkgs)
+	// broken is the raw (not deduped) subset with type errors, kept un-deduped
+	// because callEdges' SSA walk needs to know per-variant (plain vs.
+	// in-package test) whether a package failed to type-check. dedupeVariants
+	// below is what symbol rows are emitted for — broken or clean, because
+	// symbols are AST-derived and a body-local type error never invalidates
+	// the AST.
+	var broken []*packages.Package
+	for _, p := range pkgs {
+		if len(p.Errors) > 0 {
+			broken = append(broken, p)
+		}
+	}
 	// Greater-than-50%-broken safety cap: past this point the fresh symbols
 	// and edges would be built mostly from stubs, so the previous whole graph
 	// is a better answer than a fresh one that is mostly carried-forward
 	// guesswork. Checked before any symbol/SSA work — no point paying for it
-	// on a doomed build. A failed closure precondition (assertImportClosure,
-	// below) returns via the same `return err` path, so the two causes are
-	// indistinguishable to the caller — one degraded state, not two.
-	if len(pkgs) > 0 && len(set.broken)*2 > len(pkgs) {
-		return fmt.Errorf("repo does not type-check: %d of %d packages broken (majority), serving previous graph", len(set.broken), len(pkgs))
+	// on a doomed build.
+	if len(broken)*2 > len(pkgs) {
+		return fmt.Errorf("repo does not type-check: %d of %d packages broken (majority), serving previous graph", len(broken), len(pkgs))
 	}
 
 	module := ""
@@ -93,7 +104,7 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 
 	var symbols []*symRow
 	byPos := map[string]*symRow{} // "abs-file:line" → row, for SSA function matching
-	for _, p := range set.kept {
+	for _, p := range dedupeVariants(pkgs) {
 		shortPkg := shortPkgPath(p.PkgPath, module)
 		for _, f := range p.Syntax {
 			for _, decl := range f.Decls {
@@ -105,7 +116,7 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 		s.id = int64(i + 1)
 	}
 
-	edges, err := callEdges(pkgs, set.broken, byPos)
+	edges, err := callEdges(pkgs, broken, byPos)
 	if err != nil {
 		return err
 	}
@@ -116,51 +127,30 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	// dbPath still holds the previous build's graph.db at this point —
 	// writeGraphDB below is what replaces it. Best-effort: carriedEdges
 	// itself collapses any failure to zero edges, never an error here.
-	if len(set.broken) > 0 {
-		brokenPkgNames := make(map[string]bool, len(set.broken))
-		for _, p := range set.broken {
+	//
+	// carriedUnits is recorded unconditionally for every broken package, not
+	// just the ones carriedEdges actually recovered an edge for — its
+	// semantics are "this unit's edges are not freshly analyzed" (design.md),
+	// which holds even when carry-forward finds nothing to carry (e.g. the
+	// first-ever build on a broken tree).
+	var carriedUnits []string
+	if len(broken) > 0 {
+		brokenPkgNames := make(map[string]bool, len(broken))
+		for _, p := range broken {
 			brokenPkgNames[shortPkgPath(p.PkgPath, module)] = true
 		}
+		carriedUnits = slices.Sorted(maps.Keys(brokenPkgNames))
+
 		byQName := make(map[string]int64, len(symbols))
 		for _, s := range symbols {
 			byQName[s.qname] = s.id
 		}
-		if carried, _ := carriedEdges(dbPath, brokenPkgNames, byQName); len(carried) > 0 {
-			for k, v := range carried {
-				edges[k] = v
-			}
-		}
+		maps.Copy(edges, carriedEdges(dbPath, brokenPkgNames, byQName))
 	}
 
 	impls := implementsEdges(pkgs, byPos)
 
-	return writeGraphDB(ctx, dbPath, repo, module, stampVal, symbols, edges, impls)
-}
-
-// pkgSet is the result of partitioning packages.Load's output. kept is the
-// deduped variant list (dedupeVariants output) — every package in it gets
-// symbol rows, broken or clean, because symbols are AST-derived and a
-// body-local type error never invalidates the AST. broken is the raw (not
-// deduped) subset with len(p.Errors) > 0, kept un-deduped because callEdges'
-// SSA walk needs to know per-variant (plain vs. in-package test) whether a
-// package failed to type-check.
-type pkgSet struct {
-	kept   []*packages.Package
-	broken []*packages.Package
-}
-
-// partition replaces the prior all-or-nothing gate: instead of aborting the
-// whole build on the first package error, it splits packages.Load's results
-// into the deduped set every symbol is emitted for and the raw broken subset
-// downstream stages (callEdges, the >50%-broken cap, carry-forward) need.
-func partition(pkgs []*packages.Package) pkgSet {
-	var broken []*packages.Package
-	for _, p := range pkgs {
-		if len(p.Errors) > 0 {
-			broken = append(broken, p)
-		}
-	}
-	return pkgSet{kept: dedupeVariants(pkgs), broken: broken}
+	return writeGraphDB(ctx, dbPath, repo, module, stampVal, symbols, edges, impls, carriedUnits)
 }
 
 // dedupeVariants collapses packages.Load(Tests:true)'s multiple variants per
@@ -200,40 +190,6 @@ func dedupeVariants(pkgs []*packages.Package) []*packages.Package {
 		out = append(out, byPath[path])
 	}
 	return out
-}
-
-// assertImportClosure verifies, BEFORE prog.Build() is ever called, that
-// every package transitively imported by a created package itself has a
-// corresponding ssa.Package in prog. prog.Build() panics from goroutines it
-// spawns itself when this precondition does not hold ("unsatisfied import:
-// Program.CreatePackage(...) was not called"), and a defer/recover in the
-// calling frame cannot catch that panic — under stdio it kills the whole MCP
-// server on a mid-edit tree. This function turns that failure into a normal
-// error return, checked as a precondition, never discovered by a panic.
-func assertImportClosure(prog *ssa.Program, created []*packages.Package) error {
-	seen := map[*types.Package]bool{}
-	var walk func(p *packages.Package) error
-	walk = func(p *packages.Package) error {
-		if p.Types == nil || seen[p.Types] {
-			return nil // unresolved dep: also skipped at ssa-creation time, not a closure gap
-		}
-		seen[p.Types] = true
-		if prog.Package(p.Types) == nil {
-			return fmt.Errorf("import closure violated: %s has no ssa.Package", p.PkgPath)
-		}
-		for _, imp := range p.Imports {
-			if err := walk(imp); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	for _, p := range created {
-		if err := walk(p); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func shortPkgPath(pkgPath, module string) string {
@@ -379,10 +335,6 @@ type edgeSet map[[2]int64]string
 // types.Package is complete and walkable even though it has no function
 // bodies, so callers of its exported symbols still resolve.
 //
-// assertImportClosure runs BEFORE prog.Build() as a precondition: Build()
-// panics from goroutines it spawns itself when a reachable import has no
-// ssa.Package, and that panic cannot be caught by a recover() in this frame.
-//
 // cg.DeleteSyntheticNodes() is deliberately NOT called: it deletes every
 // node with fn.Syntax() == nil, which includes every function in a broken
 // package's stub — splicing in→out through a deleted node drops every
@@ -396,7 +348,6 @@ func callEdges(pkgs []*packages.Package, broken []*packages.Package, byPos map[s
 	}
 
 	prog := ssa.NewProgram(pkgs[0].Fset, ssa.InstantiateGenerics)
-	var created []*packages.Package
 	packages.Visit(pkgs, nil, func(p *packages.Package) {
 		if p.Types == nil {
 			return // unresolved dependency: nothing to build an ssa.Package from
@@ -406,12 +357,7 @@ func callEdges(pkgs []*packages.Package, broken []*packages.Package, byPos map[s
 		} else {
 			prog.CreatePackage(p.Types, p.Syntax, p.TypesInfo, true)
 		}
-		created = append(created, p)
 	})
-
-	if err := assertImportClosure(prog, created); err != nil {
-		return nil, fmt.Errorf("SSA import closure: %w", err)
-	}
 
 	prog.Build()
 	cg := cha.CallGraph(prog)
@@ -541,10 +487,13 @@ func implementsEdges(pkgs []*packages.Package, byPos map[string]*symRow) map[[2]
 
 // writeGraphDB builds the new db at dbPath+".tmp" and renames it into place,
 // so readers never observe a half-built graph. edges carries a dispatch
-// label per pair (callEdges/carriedEdges compute it), but the schema has no
-// dispatch column until PR3 — only the (caller, callee) key is persisted
-// here; the label is unused for now.
-func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool) error {
+// label per pair (callEdges/carriedEdges compute it), persisted per-edge in
+// the edges.dispatch column. carriedUnits lists the short package names
+// whose edges are not freshly analyzed this build (broken packages, carried
+// forward from the previous graph.db where possible) — stored wholesale as
+// meta.carried_units, newline-joined (package names never contain a
+// newline, so no escaping is needed).
+func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string) error {
 	if err := ctx.Err(); err != nil {
 		return err // cancelled before work started
 	}
@@ -586,13 +535,13 @@ func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, sy
 				return fmt.Errorf("insert symbol %s: %w", s.qname, err)
 			}
 		}
-		edgeIns, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO edges (caller, callee) VALUES (?,?)`)
+		edgeIns, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO edges (caller, callee, dispatch) VALUES (?,?,?)`)
 		if err != nil {
 			return err
 		}
 		defer edgeIns.Close()
-		for e := range edges {
-			if _, err := edgeIns.ExecContext(ctx, e[0], e[1]); err != nil {
+		for e, dispatch := range edges {
+			if _, err := edgeIns.ExecContext(ctx, e[0], e[1], dispatch); err != nil {
 				return err
 			}
 		}
@@ -613,6 +562,7 @@ func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, sy
 		}
 		for k, v := range map[string]string{
 			"stamp": stampVal, "repo": repo, "module": module, "indexed_at": nowUTC(),
+			"carried_units": strings.Join(carriedUnits, "\n"),
 		} {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO meta (key, value) VALUES (?,?)`, k, v); err != nil {
 				return err

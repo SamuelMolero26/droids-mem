@@ -59,6 +59,73 @@ func TestRenderSymbol_TableAndFence(t *testing.T) {
 	}
 }
 
+// TestRenderSymbol_CallerSplitsAndCarried pins task 6.8 (render half of
+// 6.4/6.10): the caller-fidelity splits and the carried flag must appear in
+// the rendered output.
+func TestRenderSymbol_CallerSplitsAndCarried(t *testing.T) {
+	r := &SymbolResponse{
+		Repo: "/repo",
+		Symbol: &SymbolInfo{
+			QName: "internal/store.Store.Save", Kind: "method", File: "save.go", Line: 1, Signature: "func()",
+		},
+		Callers:             []Neighbor{{QName: "a.b", Signature: "func()", File: "a.go", Line: 1, Depth: 1}},
+		CallersInTests:      86,
+		CallersViaInterface: 36,
+		Carried:             true,
+	}
+	out := RenderSymbol(r)
+	if !strings.Contains(out, "callers_in_tests: 86") {
+		t.Errorf("missing callers_in_tests:\n%s", out)
+	}
+	if !strings.Contains(out, "callers_via_interface: 36") {
+		t.Errorf("missing callers_via_interface:\n%s", out)
+	}
+	if !strings.Contains(out, "carried: true") {
+		t.Errorf("missing carried flag:\n%s", out)
+	}
+}
+
+// TestRenderSymbol_StaleUnitsCappedWithHint pins task 6.8 (spec "Freshness
+// reports carried units, capped"): the rendered freshness line must show
+// "stale_units[N of M]" (not inline all M) plus the capped names, when the
+// build's carried-unit list overflowed the cap.
+func TestRenderSymbol_StaleUnitsCappedWithHint(t *testing.T) {
+	r := &SymbolResponse{
+		Repo: "/repo",
+		Freshness: Freshness{
+			Stamp:           "v1",
+			StaleUnits:      []string{"pkg000", "pkg001", "pkg002", "pkg003", "pkg004"},
+			StaleUnitsTotal: 213,
+		},
+	}
+	out := RenderSymbol(r)
+	if !strings.Contains(out, "stale_units[5 of 213]") {
+		t.Errorf("missing capped stale_units header:\n%s", out)
+	}
+	if !strings.Contains(out, "pkg000") || !strings.Contains(out, "pkg004") {
+		t.Errorf("missing the 5 shown unit names:\n%s", out)
+	}
+	if strings.Contains(out, "pkg005") {
+		t.Errorf("inlined a unit past the cap:\n%s", out)
+	}
+}
+
+// TestRenderSymbol_StaleWordingNotClaimedWithoutFailure pins task 6.8's
+// reword: a Stale freshness with NO IndexError (a benign in-flight rebuild,
+// which is what a successful partial build looks like mid-async-rebuild)
+// must not claim "no longer type-checks" — that phrase is reserved for a
+// genuine recorded build failure (IndexError present).
+func TestRenderSymbol_StaleWordingNotClaimedWithoutFailure(t *testing.T) {
+	r := &SymbolResponse{Repo: "/repo", Freshness: Freshness{Stamp: "v1", Stale: true, Rebuilding: true}}
+	out := RenderSymbol(r)
+	if strings.Contains(out, "no longer type-checks") {
+		t.Errorf("claimed a type-check failure with no IndexError present:\n%s", out)
+	}
+	if !strings.Contains(out, "STALE") {
+		t.Errorf("dropped the STALE signal entirely:\n%s", out)
+	}
+}
+
 func TestRenderPackage_EmptyAndStale(t *testing.T) {
 	r := &PackageResponse{
 		Repo:      "/repo",

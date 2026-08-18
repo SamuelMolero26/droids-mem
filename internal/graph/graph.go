@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,8 +46,9 @@ CREATE INDEX idx_symbols_qname   ON symbols(qname);
 CREATE INDEX idx_symbols_name    ON symbols(name);
 CREATE INDEX idx_symbols_package ON symbols(package);
 CREATE TABLE edges (
-  caller INTEGER NOT NULL,
-  callee INTEGER NOT NULL,
+  caller   INTEGER NOT NULL,
+  callee   INTEGER NOT NULL,
+  dispatch TEXT NOT NULL DEFAULT 'static',
   PRIMARY KEY (caller, callee)
 ) WITHOUT ROWID;
 CREATE INDEX idx_edges_callee ON edges(callee);
@@ -72,15 +74,33 @@ CREATE VIRTUAL TABLE symbols_fts USING fts5(
 // ErrNotFound reports a symbol or package with no match in the graph.
 var ErrNotFound = errors.New("not found")
 
+// staleUnitsCap bounds how many carried-unit names Freshness inlines. An
+// unbounded list is the one measured unbounded field in the design (a
+// zod-sized TS repo would inject ~12 KB into every response, larger than a
+// whole 5 KB response) — StaleUnitsTotal always carries the true count.
+const staleUnitsCap = 5
+
 // Freshness is attached to every response so the agent can tell a fresh graph
 // from a stale one (ADR-0020: go/packages needs compiling code, so a mid-edit
-// repo serves the last good graph, marked stale).
+// repo serves the last good graph, marked stale). Stale is reserved for
+// genuine build failures (I/O errors, corrupt cache, or a graph currently
+// being rebuilt) — a partial build that itself succeeded is not stale, even
+// though some of its units carry forward edges (StaleUnits/StaleUnitsTotal).
 type Freshness struct {
 	Stamp      string `json:"stamp"`
 	IndexedAt  string `json:"indexed_at"`
 	Stale      bool   `json:"stale,omitempty"`
 	Rebuilding bool   `json:"rebuilding,omitempty"`
 	IndexError string `json:"index_error,omitempty"`
+	// StaleUnits lists the first staleUnitsCap package names riding on
+	// carried-forward edges from a previous build; StaleUnitsTotal is the
+	// true count even when the list is capped.
+	StaleUnits      []string `json:"stale_units,omitempty"`
+	StaleUnitsTotal int      `json:"stale_units_total,omitempty"`
+	// carriedUnits is the FULL list (unexported, never serialized) backing the
+	// per-symbol Carried flag (query.go) — membership can fall outside the
+	// capped StaleUnits list above.
+	carriedUnits []string
 }
 
 // stampTTL controls how long a stamp() result is cached per repo. The stamp
@@ -744,7 +764,7 @@ func (m *Manager) open(path string) (*sql.DB, func(), Freshness, error) {
 	// through freshnessNow and its callers for a two-row read off an
 	// already-cached local handle. The cancellation that matters is on the
 	// walks and the build, both of which are context-bound.
-	rows, err := entry.db.Query(`SELECT key, value FROM meta WHERE key IN ('stamp','indexed_at')`) //nolint:noctx // see above
+	rows, err := entry.db.Query(`SELECT key, value FROM meta WHERE key IN ('stamp','indexed_at','carried_units')`) //nolint:noctx // see above
 	if err != nil {
 		release()
 		return nil, noopRelease, Freshness{}, fmt.Errorf("read graph meta: %w", err)
@@ -761,6 +781,13 @@ func (m *Manager) open(path string) (*sql.DB, func(), Freshness, error) {
 			fresh.Stamp = v
 		case "indexed_at":
 			fresh.IndexedAt = v
+		case "carried_units":
+			if v != "" {
+				units := strings.Split(v, "\n")
+				fresh.carriedUnits = units
+				fresh.StaleUnitsTotal = len(units)
+				fresh.StaleUnits = units[:min(len(units), staleUnitsCap)]
+			}
 		}
 	}
 	if err := rows.Err(); err != nil {

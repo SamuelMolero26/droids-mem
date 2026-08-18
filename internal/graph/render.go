@@ -42,6 +42,18 @@ func RenderSymbol(r *SymbolResponse) string {
 	writeNeighbors(&b, "implementers", r.Implementers)
 	writeNeighbors(&b, "satisfies", r.Satisfies)
 
+	// Caller-fidelity splits (issue #48/#49, decision 7a/2 amended): response-
+	// level only — no per-row test/dispatch field exists on Neighbor.
+	if r.CallersInTests > 0 {
+		fmt.Fprintf(&b, "callers_in_tests: %d\n", r.CallersInTests)
+	}
+	if r.CallersViaInterface > 0 {
+		fmt.Fprintf(&b, "callers_via_interface: %d\n", r.CallersViaInterface)
+	}
+	if r.Carried {
+		b.WriteString("carried: true\n")
+	}
+
 	if r.TransitiveCallers != nil {
 		fmt.Fprintf(&b, "transitive_callers: %d\n", *r.TransitiveCallers)
 	}
@@ -86,19 +98,31 @@ func RenderPackage(r *PackageResponse) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// writeFreshness emits a freshness line only when the graph is stale or being
-// rebuilt — absence means fresh, so the common path costs zero tokens.
+// writeFreshness emits a freshness line only when the graph is stale, being
+// rebuilt, or carrying forward units — absence means fully fresh, so the
+// common path costs zero tokens.
+//
+// The STALE message only claims a type-check failure when IndexError is
+// actually present — a partial build that itself succeeds is never Stale
+// (graph.go's Freshness doc), and Stale can also mean "serving the previous
+// graph while a benign async rebuild is in flight", which is not a failure
+// at all. Claiming "no longer type-checks" in that case would be false.
 func writeFreshness(b *strings.Builder, f Freshness) {
 	var msgs []string
-	if f.Stale {
-		if f.IndexError != "" {
-			msgs = append(msgs, "STALE (repo no longer type-checks; serving last good index: "+f.IndexError+")")
-		} else {
-			msgs = append(msgs, "STALE (repo no longer type-checks; serving last good index)")
-		}
+	switch {
+	case f.Stale && f.IndexError != "":
+		msgs = append(msgs, "STALE (repo no longer type-checks; serving last good index: "+f.IndexError+")")
+	case f.Stale:
+		msgs = append(msgs, "STALE (serving the previous graph while an update is pending)")
 	}
 	if f.Rebuilding {
 		msgs = append(msgs, "REBUILDING (async rebuild in progress)")
+	}
+	if len(f.StaleUnits) > 0 {
+		// "[N of M]" already says the list is capped and how much it hides;
+		// those packages ride on carried-forward edges from the previous build.
+		msgs = append(msgs, fmt.Sprintf("stale_units[%d of %d]: %s",
+			len(f.StaleUnits), f.StaleUnitsTotal, strings.Join(f.StaleUnits, ", ")))
 	}
 	if len(msgs) == 0 {
 		return
