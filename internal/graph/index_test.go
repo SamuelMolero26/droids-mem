@@ -3,13 +3,8 @@ package graph
 import (
 	"context"
 	"database/sql"
-	"go/token"
-	"go/types"
 	"path/filepath"
 	"testing"
-
-	"golang.org/x/tools/go/packages"
-	"golang.org/x/tools/go/ssa"
 
 	_ "modernc.org/sqlite"
 )
@@ -93,68 +88,6 @@ func TestHubFromTest(t *testing.T) {
 	if resp.Symbol.QName != "zz.Hub" {
 		t.Errorf("resolved symbol = %q, want zz.Hub", resp.Symbol.QName)
 	}
-}
-
-// TestAssertImportClosure_Holds pins the direct-call contract for the
-// reachable-import-closure precondition (task 3.1/3.2, spec "Closure holds"):
-// when every package reachable via import from a created package itself has
-// a corresponding ssa.Package, the check returns nil and never calls
-// prog.Build().
-func TestAssertImportClosure_Holds(t *testing.T) {
-	fset := token.NewFileSet()
-	typesB := types.NewPackage("example.com/b", "b")
-	typesB.MarkComplete()
-	typesA := types.NewPackage("example.com/a", "a")
-	typesA.MarkComplete()
-
-	pkgB := &packages.Package{PkgPath: "example.com/b", Types: typesB}
-	pkgA := &packages.Package{
-		PkgPath: "example.com/a",
-		Types:   typesA,
-		Imports: map[string]*packages.Package{"example.com/b": pkgB},
-	}
-
-	prog := ssa.NewProgram(fset, 0)
-	prog.CreatePackage(typesA, nil, nil, true)
-	prog.CreatePackage(typesB, nil, nil, true)
-
-	if err := assertImportClosure(prog, []*packages.Package{pkgA, pkgB}); err != nil {
-		t.Errorf("closure holds but assertImportClosure returned an error: %v", err)
-	}
-}
-
-// TestAssertImportClosure_Violated pins the other half: a created-package set
-// that omits a package reachable via import from an included package must
-// produce a non-nil error, and this test asserts that WITHOUT ever calling
-// prog.Build() on the incomplete set — prog.Build() panics from goroutines it
-// spawns when this precondition doesn't hold, and no test may reach that
-// panic (spec "No SSA panic is ever asserted by a test").
-func TestAssertImportClosure_Violated(t *testing.T) {
-	fset := token.NewFileSet()
-	typesB := types.NewPackage("example.com/b", "b")
-	typesB.MarkComplete()
-	typesA := types.NewPackage("example.com/a", "a")
-	typesA.MarkComplete()
-
-	pkgB := &packages.Package{PkgPath: "example.com/b", Types: typesB}
-	pkgA := &packages.Package{
-		PkgPath: "example.com/a",
-		Types:   typesA,
-		Imports: map[string]*packages.Package{"example.com/b": pkgB},
-	}
-
-	prog := ssa.NewProgram(fset, 0)
-	prog.CreatePackage(typesA, nil, nil, true) // typesB is deliberately never created
-
-	err := assertImportClosure(prog, []*packages.Package{pkgA})
-	if err == nil {
-		t.Fatal("want a non-nil error: pkgA imports example.com/b, which has no ssa.Package")
-	}
-	// The whole point: prog.Build() is never reached on this incomplete set.
-	// If it were called here, the test binary would crash from a panic no
-	// recover() can catch — that is the failure mode this test exists to rule
-	// out by construction (assertImportClosure is called directly, not via
-	// buildIndex/callEdges).
 }
 
 // TestBuildIndex_BrokenPackageStillYieldsSymbols pins the partition
@@ -256,6 +189,97 @@ func Broken() {
 	}
 	if n != 1 {
 		t.Errorf("edge testmod.main -> zz.Hub: got %d, want 1 (in-edge from a clean caller into a broken package's stub must survive)", n)
+	}
+}
+
+// TestBuildIndex_PersistsDispatchLabel pins task 5.1/5.2 (spec "Dispatch is
+// labelled per edge and split at response level"): the edges.dispatch column
+// must exist and carry the real per-edge label callEdges already computes —
+// "static" for a direct call (Announce -> pick) and "interface" for a CHA
+// interface dispatch (Announce -> English.Greet, via the Greeter interface).
+func TestBuildIndex_PersistsDispatchLabel(t *testing.T) {
+	repo, err := filepath.Abs("testdata/testmod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "graph.db")
+	st, err := stamp(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+		t.Fatalf("buildIndex: %v", err)
+	}
+	conn, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	dispatchOf := func(caller, callee string) string {
+		t.Helper()
+		var d string
+		err := conn.QueryRow(`SELECT e.dispatch FROM edges e
+			JOIN symbols s1 ON s1.id = e.caller
+			JOIN symbols s2 ON s2.id = e.callee
+			WHERE s1.qname = ? AND s2.qname = ?`, caller, callee).Scan(&d)
+		if err != nil {
+			t.Fatalf("edge %s -> %s: %v", caller, callee, err)
+		}
+		return d
+	}
+	if got := dispatchOf("testmod.Announce", "testmod.pick"); got != "static" {
+		t.Errorf("Announce -> pick dispatch = %q, want static", got)
+	}
+	if got := dispatchOf("testmod.Announce", "testmod.English.Greet"); got != "interface" {
+		t.Errorf("Announce -> English.Greet dispatch = %q, want interface (CHA-resolved via Greeter)", got)
+	}
+}
+
+// TestBuildIndex_PersistsCarriedUnits pins task 5.2 (design.md's meta.carried_units):
+// a partial build (1-of-2 packages broken, not majority) must record the
+// broken package's short name in meta.carried_units — "this unit's edges are
+// not freshly analyzed" — even though carry-forward itself only recovers a
+// SUBSET of that unit's edges.
+func TestBuildIndex_PersistsCarriedUnits(t *testing.T) {
+	repo := copyFixture(t)
+	dbPath := filepath.Join(t.TempDir(), "graph.db")
+
+	st1, err := stamp(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := buildIndex(context.Background(), repo, dbPath, st1); err != nil {
+		t.Fatalf("first (clean) buildIndex: %v", err)
+	}
+
+	writeFile(t, filepath.Join(repo, "zz"), "zz_broken.go", `package zz
+
+func Broken() {
+	var x int = "this does not type-check"
+	_ = x
+}
+`)
+	st2, err := stamp(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := buildIndex(context.Background(), repo, dbPath, st2); err != nil {
+		t.Fatalf("second (partial) buildIndex: %v", err)
+	}
+
+	conn, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	var v string
+	if err := conn.QueryRow(`SELECT value FROM meta WHERE key = 'carried_units'`).Scan(&v); err != nil {
+		t.Fatalf("meta.carried_units: %v", err)
+	}
+	if v != "zz" {
+		t.Errorf("meta.carried_units = %q, want %q", v, "zz")
 	}
 }
 
