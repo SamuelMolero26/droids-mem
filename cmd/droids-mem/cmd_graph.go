@@ -98,7 +98,11 @@ automatically when the repo changes. See docs/adr/0020-native-code-graph.md.`,
 			state.RecordGraphUse("graph_index")
 			resp, err := gm.Index(cmd.Context(), resolveRepo())
 			if err != nil {
-				writeError("graph_index_failed", err.Error(), true)
+				// A build/type-check failure is retryable only after the repo is
+				// fixed — retrying the identical command burns a full go/packages
+				// load for a guaranteed-identical failure. Deliberate, matching
+				// the query paths' graph_query_failed (issue #72).
+				writeError("graph_index_failed", err.Error(), false)
 				exitWith(ExitError)
 			}
 			writeJSON(resp)
