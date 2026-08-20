@@ -535,23 +535,23 @@ func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, sy
 				return fmt.Errorf("insert symbol %s: %w", s.qname, err)
 			}
 		}
-		edgeIns, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO edges (caller, callee, dispatch) VALUES (?,?,?)`)
+		edgeIns, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO edges (caller, callee, dispatch, precision) VALUES (?,?,?,?)`)
 		if err != nil {
 			return err
 		}
 		defer edgeIns.Close()
 		for e, dispatch := range edges {
-			if _, err := edgeIns.ExecContext(ctx, e[0], e[1], dispatch); err != nil {
+			if _, err := edgeIns.ExecContext(ctx, e[0], e[1], dispatch, "resolved"); err != nil {
 				return err
 			}
 		}
-		implIns, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO implements (iface, impl) VALUES (?,?)`)
+		implIns, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO implements (iface, impl, precision) VALUES (?,?,?)`)
 		if err != nil {
 			return err
 		}
 		defer implIns.Close()
 		for e := range impls {
-			if _, err := implIns.ExecContext(ctx, e[0], e[1]); err != nil {
+			if _, err := implIns.ExecContext(ctx, e[0], e[1], "resolved"); err != nil {
 				return err
 			}
 		}
