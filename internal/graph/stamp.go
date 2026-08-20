@@ -29,7 +29,15 @@ func indexedExtensions() []string {
 // extension set are unchanged). A schema edit or an extension-set widening
 // already moves the generation on its own — this constant exists for the
 // case neither does.
-const indexerGen = "4"
+//
+// PR-G1 deliberately did NOT bump it: TS/JS import rows are additive and
+// nothing reads the imports table, so a pre-G1 graph answered no query
+// differently. PR-G2 bumps it because ladder rung 2a changes which EDGES a
+// build writes — a graph indexed before it holds edges resolved without
+// import scoping, which is not merely less complete but differently
+// attributed. That is the line: bump when a stored graph becomes wrong, not
+// when it merely lacks data no one reads.
+const indexerGen = "5"
 
 // stampGen derives the stamp's generation prefix from the things that change
 // what a cached graph MEANS: the schema its rows were written under, the file

@@ -1,13 +1,15 @@
 // Mapper-tier call collection, containment attribution, and the resolution
 // ladder: FactCalls -> which symbol the call happens inside -> which
 // symbol(s) it could target -> a syntactic edgeSet entry. Ported from
-// spike/mapper/cmd/qname/main.go's resolve() (design D4), rung 2a (receiver
-// names a class imported into THIS FILE) deferred to PR-G2 — every other
-// rung lands here.
+// spike/mapper/cmd/qname/main.go's resolve() (design D4), plus rung 2a
+// (receiver names something imported into THIS FILE), which the spike never
+// had — it needs binding names and specifier resolution, both of which live
+// in this file alongside the rung that consumes them.
 package graph
 
 import (
 	"os"
+	"path"
 	"sort"
 	"strings"
 
@@ -164,6 +166,76 @@ func callerChain(ms mapperSym) string {
 	return ms.container + "." + ms.row.name
 }
 
+// specifierExtensions is the probe order for a relative module specifier
+// written without one. Direct-file order matches the JS resolution order
+// TypeScript and bundlers use; ".mjs" is included because mapper discovery
+// indexes it, so omitting it would leave a real file unreachable.
+var specifierExtensions = []string{".ts", ".tsx", ".js", ".jsx", ".mjs"}
+
+// resolveSpecifier maps a module specifier as written in importer (itself a
+// repo-relative, slash-separated path) to the repo-relative mapper file it
+// names, or "" when it names none.
+//
+// Only RELATIVE specifiers resolve. A bare one ("axios", "@scope/pkg") names
+// a dependency, not repo source, and nothing here tries to walk node_modules
+// for it. The empty result is not an error path: rung 2a expresses a miss
+// exactly this way, and a missed rung falls through un-narrowed.
+//
+// known is the set of repo-relative mapper files this build discovered, so
+// resolution never touches the filesystem — a specifier can only resolve to
+// a file the graph actually indexed, which is also what keeps a "../.."
+// escape from the repo root from resolving to anything.
+func resolveSpecifier(importer, spec string, known map[string]bool) string {
+	if !strings.HasPrefix(spec, "./") && !strings.HasPrefix(spec, "../") {
+		return ""
+	}
+	base := path.Join(path.Dir(importer), spec)
+	if known[base] {
+		return base // the specifier carried its own extension
+	}
+	for _, ext := range specifierExtensions {
+		if known[base+ext] {
+			return base + ext
+		}
+	}
+	for _, ext := range specifierExtensions {
+		if idx := base + "/index" + ext; known[idx] {
+			return idx
+		}
+	}
+	return ""
+}
+
+// resolveBindings turns mapperImports' raw binding -> SPECIFIER map into
+// rung 2a's binding -> repo FILE map, against the set of files this build
+// actually discovered. A binding whose specifier names no indexed file is
+// dropped here rather than carried as an unresolvable entry: the ladder's
+// only question is "which file", and no entry and an unresolvable entry mean
+// the same thing to it — a rung-2a miss.
+func resolveBindings(files []mapperFile, bindings mapperImportBindings) map[string]map[string]string {
+	if len(bindings) == 0 {
+		return nil
+	}
+	known := make(map[string]bool, len(files))
+	for _, f := range files {
+		known[f.rel] = true
+	}
+	out := make(map[string]map[string]string, len(bindings))
+	for importer, byName := range bindings {
+		for name, spec := range byName {
+			target := resolveSpecifier(importer, spec, known)
+			if target == "" {
+				continue
+			}
+			if out[importer] == nil {
+				out[importer] = map[string]string{}
+			}
+			out[importer][name] = target
+		}
+	}
+	return out
+}
+
 // mapperLadderIndex is the repo-wide lookup the resolution ladder searches:
 // every mapper symbol from this build, grouped by bare name, plus the set of
 // names seen as class-like definitions (design D4).
@@ -171,13 +243,20 @@ type mapperLadderIndex struct {
 	syms    []mapperSym
 	byName  map[string][]int
 	classes map[string]bool
+	// imports is rung 2a's input: importer file -> local binding name ->
+	// the repo-relative file that binding's specifier RESOLVED to. Already
+	// resolved by the time it lands here (mapperEdges does that), so the
+	// ladder never touches specifiers or the filesystem. Nil is a legitimate
+	// value — every rung-2a lookup then misses and the ladder behaves
+	// exactly as it did before this rung existed.
+	imports map[string]map[string]string
 }
 
 // buildMapperLadderIndex indexes syms for the ladder. classes mirrors the
 // spike's ix.classes: any symbol whose kind is class-like makes its NAME
-// resolvable as a receiver at rung 2b (and rung 2a in PR-G2).
-func buildMapperLadderIndex(syms []mapperSym) *mapperLadderIndex {
-	idx := &mapperLadderIndex{syms: syms, byName: map[string][]int{}, classes: map[string]bool{}}
+// resolvable as a receiver at rung 2b. importsByFile feeds rung 2a.
+func buildMapperLadderIndex(syms []mapperSym, importsByFile map[string]map[string]string) *mapperLadderIndex {
+	idx := &mapperLadderIndex{syms: syms, byName: map[string][]int{}, classes: map[string]bool{}, imports: importsByFile}
 	for i, s := range syms {
 		idx.byName[s.row.name] = append(idx.byName[s.row.name], i)
 		if isMapperClassLike(s.row.kind) {
@@ -227,9 +306,7 @@ func topContainer(chain string) string {
 // rung ran — this is what makes a zero-candidate outcome structurally
 // impossible. Rung 0 is the one rung that ASSIGNS (cands = hit) rather than
 // returning, so a hit there narrows the set the REST of the ladder searches;
-// every other rung returns immediately on a hit. Rung 2a (receiver names a
-// class imported into the caller's own file) is deferred to PR-G2 — it slots
-// in above rung 2b without changing anything here.
+// every other rung returns immediately on a hit.
 func (ix *mapperLadderIndex) resolve(c mapperCallsite) (hits []int, total int) {
 	cands := ix.byName[c.name]
 	if len(cands) == 0 {
@@ -259,7 +336,23 @@ func (ix *mapperLadderIndex) resolve(c mapperCallsite) (hits []int, total int) {
 			}
 		}
 	}
-	// 2b. receiver names a known class, repo-wide (2a — import-scoped — is PR-G2)
+	// 2a. receiver names something imported into THIS file: narrow to the
+	// members of classes defined in the file that import resolved to. Sits
+	// above 2b rather than replacing it because 2b's repo-wide class match
+	// is still the right answer when nothing was imported — and because a
+	// receiver name can legitimately collide with an unrelated class
+	// elsewhere in the repo, which is exactly the case 2a gets right and 2b
+	// gets wrong. A miss falls through with cands untouched.
+	if c.receiver != "" {
+		if target := ix.imports[c.file][c.receiver]; target != "" {
+			if hit := ix.filter(cands, func(s mapperSym) bool {
+				return s.row.file == target && ix.classes[topContainer(s.container)]
+			}); len(hit) > 0 {
+				return hit, len(hit)
+			}
+		}
+	}
+	// 2b. receiver names a known class, repo-wide (2a, above, is import-scoped)
 	if c.receiver != "" && ix.classes[c.receiver] {
 		if hit := ix.filter(cands, func(s mapperSym) bool {
 			return s.container == c.receiver || strings.HasPrefix(s.container, c.receiver+".")
@@ -292,10 +385,10 @@ func (ix *mapperLadderIndex) resolve(c mapperCallsite) (hits []int, total int) {
 // (index.go). fanoutCapped counts CALLSITES (not edges) whose rung-5
 // candidate set exceeded fanoutCap — a build-level partiality fact, feeding
 // meta.fanout_capped, not a per-edge one.
-func mapperEdges(files []mapperFile, mapperSyms []mapperSym) (edgeSet, int) {
+func mapperEdges(files []mapperFile, mapperSyms []mapperSym, bindings mapperImportBindings) (edgeSet, int) {
 	fileCalls, _ := collectMapperCalls(files)
 	callsites := attributeMapperCalls(mapperSyms, fileCalls)
-	idx := buildMapperLadderIndex(mapperSyms)
+	idx := buildMapperLadderIndex(mapperSyms, resolveBindings(files, bindings))
 
 	edges := edgeSet{}
 	fanoutCapped := 0

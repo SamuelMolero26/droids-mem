@@ -108,7 +108,7 @@ func TestLadder_Rung0_FiltersByReceiverArityButContinuesWalk(t *testing.T) {
 		{row: free, container: ""},         // free function: no container
 		{row: member, container: "Client"}, // member: has a container
 	}
-	idx := buildMapperLadderIndex(syms)
+	idx := buildMapperLadderIndex(syms, nil)
 
 	c := mapperCallsite{name: "get", receiver: "", file: "a.ts", pkg: "a", lang: "typescript"}
 	hits, total := idx.resolve(c)
@@ -129,7 +129,7 @@ func TestLadder_Rung1_ThisResolvesToEnclosingClassMember(t *testing.T) {
 		{row: widgetMember, container: "Widget"},
 		{row: unrelated, container: "Other"},
 	}
-	idx := buildMapperLadderIndex(syms)
+	idx := buildMapperLadderIndex(syms, nil)
 
 	c := mapperCallsite{name: "helper", receiver: "this", container: "Widget.render", file: "a.ts", pkg: "a", lang: "typescript"}
 	hits, total := idx.resolve(c)
@@ -153,7 +153,7 @@ func TestLadder_Rung2b_ReceiverNamesKnownClassRepoWide(t *testing.T) {
 		{row: method, container: "Client"},
 		{row: other, container: "Other"},
 	}
-	idx := buildMapperLadderIndex(syms)
+	idx := buildMapperLadderIndex(syms, nil)
 
 	c := mapperCallsite{name: "get", receiver: "Client", file: "z.ts", pkg: "z", lang: "typescript"}
 	hits, total := idx.resolve(c)
@@ -171,7 +171,7 @@ func TestLadder_Rung3_SameFileWinsWhenNoReceiverMatch(t *testing.T) {
 	sameFile := &symRow{id: 1, name: "helper", file: "a.ts", pkg: "a"}
 	otherFile := &symRow{id: 2, name: "helper", file: "b.ts", pkg: "a"}
 	syms := []mapperSym{{row: sameFile}, {row: otherFile}}
-	idx := buildMapperLadderIndex(syms)
+	idx := buildMapperLadderIndex(syms, nil)
 
 	c := mapperCallsite{name: "helper", receiver: "", file: "a.ts", pkg: "a", lang: "typescript"}
 	hits, total := idx.resolve(c)
@@ -189,7 +189,7 @@ func TestLadder_Rung4_SamePackageWinsWhenNoFileMatch(t *testing.T) {
 	samePkg := &symRow{id: 1, name: "helper", file: "sub/a.ts", pkg: "pkg"}
 	otherPkg := &symRow{id: 2, name: "helper", file: "other/b.ts", pkg: "otherpkg"}
 	syms := []mapperSym{{row: samePkg}, {row: otherPkg}}
-	idx := buildMapperLadderIndex(syms)
+	idx := buildMapperLadderIndex(syms, nil)
 
 	c := mapperCallsite{name: "helper", receiver: "", file: "sub/caller.ts", pkg: "pkg", lang: "typescript"}
 	hits, total := idx.resolve(c)
@@ -208,7 +208,7 @@ func TestLadder_Rung5_RepoWideFallbackWhenNothingElseMatches(t *testing.T) {
 	a := &symRow{id: 1, name: "helper", file: "a.ts", pkg: "p1"}
 	b := &symRow{id: 2, name: "helper", file: "b.ts", pkg: "p2"}
 	syms := []mapperSym{{row: a}, {row: b}}
-	idx := buildMapperLadderIndex(syms)
+	idx := buildMapperLadderIndex(syms, nil)
 
 	c := mapperCallsite{name: "helper", receiver: "", file: "z.ts", pkg: "z", lang: "typescript"}
 	hits, total := idx.resolve(c)
@@ -225,7 +225,7 @@ func TestLadder_RungMatchingNothingNeverZeroesCandidates(t *testing.T) {
 	a := &symRow{id: 1, name: "helper", file: "a.ts", pkg: "pkg"}
 	b := &symRow{id: 2, name: "helper", file: "b.ts", pkg: "pkg"}
 	syms := []mapperSym{{row: a}, {row: b}}
-	idx := buildMapperLadderIndex(syms)
+	idx := buildMapperLadderIndex(syms, nil)
 
 	// Caller is in neither a.ts nor b.ts, so rung 3 (same file) matches zero.
 	c := mapperCallsite{name: "helper", receiver: "", file: "caller.ts", pkg: "pkg", lang: "typescript"}
@@ -247,7 +247,7 @@ func TestLadder_Rung5_FanoutCappedLabelsTruncationWithoutSilentSlice(t *testing.
 			id: int64(i + 1), name: "get", file: fmt.Sprintf("f%d.ts", i), pkg: fmt.Sprintf("p%d", i),
 		}})
 	}
-	idx := buildMapperLadderIndex(syms)
+	idx := buildMapperLadderIndex(syms, nil)
 
 	c := mapperCallsite{name: "get", receiver: "", file: "z.ts", pkg: "z", lang: "typescript"}
 	hits, total := idx.resolve(c)
@@ -269,7 +269,7 @@ func TestLadder_Rung5_AtOrUnderCapCarriesNoTruncation(t *testing.T) {
 			id: int64(i + 1), name: "get", file: fmt.Sprintf("f%d.ts", i), pkg: fmt.Sprintf("p%d", i),
 		}})
 	}
-	idx := buildMapperLadderIndex(syms)
+	idx := buildMapperLadderIndex(syms, nil)
 
 	c := mapperCallsite{name: "get", receiver: "", file: "z.ts", pkg: "z", lang: "typescript"}
 	hits, total := idx.resolve(c)
@@ -434,5 +434,256 @@ func TestManager_IndexerGenBump_RebuildsPriorGraphWithCallEdges(t *testing.T) {
 	}
 	if len(symResp.Callers) == 0 {
 		t.Fatal("Symbol helper: no callers in response — the rebuild did not produce mapper call edges")
+	}
+}
+
+// ---------- G2.4 / G2.5: module-specifier -> repo-file resolution ----------
+
+// TestResolveSpecifier_RelativeFormsAndBareMiss covers G2.4 and G2.5 in one
+// table: a relative specifier resolves against the importer's own directory
+// via extension probing and index-file fallback, and anything that names no
+// repo file — a bare package specifier above all — resolves to "" WITHOUT an
+// error. That empty result is not a failure path: it is exactly how a rung
+// 2a miss is expressed, and the ladder treats a miss as "fall through
+// un-narrowed", never as "no candidates".
+func TestResolveSpecifier_RelativeFormsAndBareMiss(t *testing.T) {
+	known := map[string]bool{
+		"src/bar.ts":         true,
+		"src/widget.tsx":     true,
+		"src/legacy.js":      true,
+		"src/util/index.ts":  true,
+		"src/esm.mjs":        true,
+		"other/bar.ts":       true,
+		"src/explicit.js":    true,
+		"node_modules/ax.ts": true,
+	}
+	cases := []struct {
+		name     string
+		importer string
+		spec     string
+		want     string
+	}{
+		{"relative ts", "src/a.ts", "./bar", "src/bar.ts"},
+		{"relative tsx", "src/a.ts", "./widget", "src/widget.tsx"},
+		{"relative js", "src/a.ts", "./legacy", "src/legacy.js"},
+		{"relative mjs", "src/a.ts", "./esm", "src/esm.mjs"},
+		{"index file", "src/a.ts", "./util", "src/util/index.ts"},
+		{"parent dir", "src/deep/a.ts", "../bar", "src/bar.ts"},
+		{"dot-dot escapes to sibling tree", "src/a.ts", "../other/bar", "other/bar.ts"},
+		{"specifier already carries its extension", "src/a.ts", "./explicit.js", "src/explicit.js"},
+		{"bare specifier resolves to nothing", "src/a.ts", "axios", ""},
+		{"scoped bare specifier resolves to nothing", "src/a.ts", "@scope/pkg", ""},
+		{"relative miss resolves to nothing", "src/a.ts", "./nope", ""},
+		{"escaping the repo root resolves to nothing", "a.ts", "../../outside", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveSpecifier(tc.importer, tc.spec, known); got != tc.want {
+				t.Errorf("resolveSpecifier(%q, %q) = %q, want %q", tc.importer, tc.spec, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestResolveSpecifier_PrefersDirectFileOverIndexFile pins the probe order:
+// when both `./util.ts` and `./util/index.ts` exist, the direct file wins.
+// Getting this backwards would point rung 2a at the wrong file whenever a
+// module has both forms — a real layout in TS repos, not a contrived one.
+func TestResolveSpecifier_PrefersDirectFileOverIndexFile(t *testing.T) {
+	known := map[string]bool{"src/util.ts": true, "src/util/index.ts": true}
+	if got := resolveSpecifier("src/a.ts", "./util", known); got != "src/util.ts" {
+		t.Errorf("resolveSpecifier = %q, want the direct file %q", got, "src/util.ts")
+	}
+}
+
+// ---------- G2.7: ladder rung 2a (import-scoped receiver) ----------
+
+// rung2aFixture builds the one shared shape both rung-2a tests need: two
+// candidates named "get", one in the file an import points at (under class
+// Client) and one under a repo-wide class literally named "Bar". Rung 2b
+// keys on the receiver NAME, so with a receiver of "Bar" it necessarily
+// picks the second — which makes the two rungs give provably different
+// answers on identical input, the only way a test can tell which one fired.
+func rung2aFixture() (syms []mapperSym, importedGet, repoWideGet *symRow) {
+	clientClass := &symRow{id: 1, name: "Client", kind: "class", file: "x.ts", pkg: "x"}
+	importedGet = &symRow{id: 2, name: "get", file: "x.ts", pkg: "x"}
+	barClass := &symRow{id: 3, name: "Bar", kind: "class", file: "z.ts", pkg: "z"}
+	repoWideGet = &symRow{id: 4, name: "get", file: "z.ts", pkg: "z"}
+	return []mapperSym{
+		{row: clientClass, container: ""},
+		{row: importedGet, container: "Client"},
+		{row: barClass, container: ""},
+		{row: repoWideGet, container: "Bar"},
+	}, importedGet, repoWideGet
+}
+
+// TestLadder_Rung2a_ImportScopedReceiverStopsWalkBeforeRung2b is the first
+// half of G2.7. `Bar` is bound in a.ts to a module resolving to x.ts, so the
+// call Bar.get() must resolve to x.ts's member — NOT to the repo-wide class
+// also named Bar in z.ts, which is what rung 2b would return. Getting z.ts
+// back means rung 2a did not fire, or did not stop the walk.
+func TestLadder_Rung2a_ImportScopedReceiverStopsWalkBeforeRung2b(t *testing.T) {
+	syms, importedGet, repoWideGet := rung2aFixture()
+	idx := buildMapperLadderIndex(syms, map[string]map[string]string{
+		"a.ts": {"Bar": "x.ts"},
+	})
+
+	c := mapperCallsite{name: "get", receiver: "Bar", file: "a.ts", pkg: "a", lang: "typescript"}
+	hits, total := idx.resolve(c)
+	if len(hits) != 1 || total != 1 {
+		t.Fatalf("resolve() hits=%d total=%d, want exactly 1", len(hits), total)
+	}
+	got := idx.syms[hits[0]].row.id
+	if got == repoWideGet.id {
+		t.Fatalf("resolved to the repo-wide class's member (id %d): rung 2b answered, so rung 2a either did not fire or did not stop the walk", got)
+	}
+	if got != importedGet.id {
+		t.Errorf("resolved id = %d, want the imported file's member %d", got, importedGet.id)
+	}
+}
+
+// TestLadder_Rung2aMiss_FallsThroughUnNarrowed is the second half of G2.7 and
+// the load-bearing one. A rung whose filter matches nothing must be
+// DISCARDED, leaving the walk to continue against the candidate set from
+// BEFORE it ran — a rung that narrowed destructively on a miss could zero the
+// set and lose a caller that can fire. Two miss shapes are covered: a binding
+// pointing at a file with no matching candidate, and no binding at all (the
+// bare-specifier case from G2.5, where resolveSpecifier returned ""). Both
+// must land on exactly what the ladder returns with rung 2a's input absent
+// entirely — the nil-imports index is the control.
+func TestLadder_Rung2aMiss_FallsThroughUnNarrowed(t *testing.T) {
+	syms, _, repoWideGet := rung2aFixture()
+	c := mapperCallsite{name: "get", receiver: "Bar", file: "a.ts", pkg: "a", lang: "typescript"}
+
+	control, controlTotal := buildMapperLadderIndex(syms, nil).resolve(c)
+	if len(control) != 1 || idxRowID(buildMapperLadderIndex(syms, nil), control[0]) != repoWideGet.id {
+		t.Fatalf("control (no imports at all) did not land on rung 2b's answer; fixture is wrong, not the code")
+	}
+
+	cases := map[string]map[string]map[string]string{
+		"binding resolves to a file holding no candidate": {"a.ts": {"Bar": "unrelated.ts"}},
+		"specifier resolved to nothing, so no binding":    {"a.ts": {}},
+		"the importing file imported nothing":             {},
+	}
+	for name, imports := range cases {
+		t.Run(name, func(t *testing.T) {
+			idx := buildMapperLadderIndex(syms, imports)
+			hits, total := idx.resolve(c)
+			if len(hits) != len(control) || total != controlTotal {
+				t.Fatalf("hits=%d total=%d, want the control's %d/%d — a rung-2a miss must leave the candidate set exactly as it was", len(hits), total, len(control), controlTotal)
+			}
+			if idx.syms[hits[0]].row.id != repoWideGet.id {
+				t.Errorf("resolved id = %d, want rung 2b's answer %d", idx.syms[hits[0]].row.id, repoWideGet.id)
+			}
+		})
+	}
+}
+
+func idxRowID(ix *mapperLadderIndex, i int) int64 { return ix.syms[i].row.id }
+
+// TestBuildIndex_Rung2a_ResolvesThroughRealImport is the end-to-end pin for
+// G2.8's wiring, and it exists for the same reason PR-E's E.6 did: rung 2a's
+// input arrives from a DIFFERENT function (mapperImports' bindings, routed
+// through resolveBindings), so a test that only exercises the ladder with a
+// hand-built map passes identically against a build where that map never
+// arrives. This one runs the real buildIndex.
+//
+// The fixture is the collision that makes the two rungs distinguishable:
+// a.ts imports Client under the local alias `Bar`, and an UNRELATED class
+// literally named Bar exists in z.ts. Rung 2b matches on the receiver name,
+// so it would answer z.ts; only rung 2a, reading a.ts's own import, answers
+// client.ts.
+func TestBuildIndex_Rung2a_ResolvesThroughRealImport(t *testing.T) {
+	repo := t.TempDir()
+	writeFile(t, repo, "client.ts", "export class Client {\n  static get(): void {}\n}\n")
+	writeFile(t, repo, "z.ts", "export class Bar {\n  static get(): void {}\n}\n")
+	writeFile(t, repo, "a.ts", "import { Client as Bar } from \"./client\";\n\nexport function run(): void { Bar.get(); }\n")
+
+	dbPath := filepath.Join(t.TempDir(), "graph.db")
+	st, err := stamp(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+		t.Fatalf("buildIndex: %v", err)
+	}
+
+	conn, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	rows, err := conn.Query(`SELECT s2.file FROM edges e
+		JOIN symbols s1 ON s1.id = e.caller
+		JOIN symbols s2 ON s2.id = e.callee
+		WHERE s1.name = 'run' AND s2.name = 'get'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var files []string
+	for rows.Next() {
+		var f string
+		if err := rows.Scan(&f); err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, f)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(files) != 1 {
+		t.Fatalf("edges run()->get() land in %v, want exactly one (client.ts) — more than one means rung 2a did not narrow", files)
+	}
+	if files[0] != "client.ts" {
+		t.Errorf("run()->get() resolved into %q, want %q: rung 2a's import scoping did not reach the real build", files[0], "client.ts")
+	}
+}
+
+// ---------- G2.9 (T1/D8): indexerGen bump ----------
+
+// TestManager_IndexerGenBump_RebuildsPriorGraphWithImportScopedLadder
+// extends D.9/E.8's pattern one generation further. A graph seeded exactly
+// as a PR-G1-era build would have left it (indexerGen "4") must be treated
+// as stale, because rung 2a changes which EDGES a build writes: a pre-G2
+// graph holds edges resolved without import scoping, differently attributed
+// rather than merely less complete.
+func TestManager_IndexerGenBump_RebuildsPriorGraphWithImportScopedLadder(t *testing.T) {
+	repo := t.TempDir()
+	writeFile(t, repo, "app.ts", "export function hello(): string { return 'hi'; }\n")
+
+	m := managerFor(t)
+	ctx := context.Background()
+
+	canon, err := canonicalRepo(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := m.dbPath(canon)
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := stamp(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, rest, ok := strings.Cut(st, ":")
+	if !ok {
+		t.Fatalf("stamp() = %q, want a %q-separated generation prefix", st, ":")
+	}
+	// Same census as the CURRENT tree, so a mismatch can only be attributed
+	// to indexerGen, not an unrelated census difference.
+	oldStamp := stampGen(schema, indexedExtensions(), "4") + ":" + rest
+	seedRawGraphMeta(t, dbPath, oldStamp, nil)
+
+	resp, err := m.WaitBuild(ctx, repo, 60*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Completed || !resp.Rebuilt {
+		t.Fatalf("want completed+rebuilt (indexerGen bump must force a rebuild of a PR-G1-era graph), got %+v", resp)
 	}
 }

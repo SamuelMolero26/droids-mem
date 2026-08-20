@@ -157,7 +157,7 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	// independent of both mapper symbols and carry-forward, so it
 	// runs unconditionally off the same discovered file list. Best-effort, same
 	// policy as the symbols/calls passes: a failure here never fails the build.
-	mapperImportRows, _ := mapperImports(mapperFileList)
+	mapperImportRows, mapperBindings, _ := mapperImports(mapperFileList)
 
 	// C.10: a repo with neither a usable Go package nor a single mapper-tier
 	// symbol has nothing to build from at all.
@@ -261,7 +261,7 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	// can never collide. fanoutCapped counts CALLSITES whose rung-5 candidate
 	// set exceeded fanoutCap (design D5/D6) — a build-level partiality fact,
 	// not a per-edge one, persisted below as meta.fanout_capped.
-	mapperEdgeSet, fanoutCapped := mapperEdges(mapperFileList, mapperSyms)
+	mapperEdgeSet, fanoutCapped := mapperEdges(mapperFileList, mapperSyms, mapperBindings)
 	for k, m := range mapperEdgeSet {
 		edges.add(k, m)
 	}
