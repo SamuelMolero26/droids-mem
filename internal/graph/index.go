@@ -145,7 +145,9 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 		for _, s := range symbols {
 			byQName[s.qname] = s.id
 		}
-		maps.Copy(edges, carriedEdges(dbPath, brokenPkgNames, byQName))
+		for k, m := range carriedEdges(dbPath, brokenPkgNames, byQName) {
+			edges.add(k, m)
+		}
 	}
 
 	impls := implementsEdges(pkgs, byPos)
@@ -315,10 +317,36 @@ func appendDeclSymbols(out []*symRow, byPos map[string]*symRow, fset *token.File
 	return out
 }
 
-// edgeSet maps a (caller id, callee id) pair to its dispatch label,
-// "static" or "interface". A static edge wins a static/interface collision
-// on the same pair — it is the stronger reachability claim.
-type edgeSet map[[2]int64]string
+// edgeMeta carries the two independent facts stored per edge: dispatch
+// ("static"/"interface", Go-only — "" for a mapper-tier edge, which has no
+// dispatch concept) and precision ("resolved"/"syntactic").
+type edgeMeta struct{ dispatch, precision string }
+
+// edgeSet maps a (caller id, callee id) pair to its edgeMeta. Both fields
+// merge independently via add: "static" wins a dispatch collision and
+// "resolved" wins a precision collision — each is the stronger reachability
+// claim for its axis. An empty incoming field never overwrites an
+// already-set field, so a weaker/unset observation can never erase a
+// stronger one already recorded for the same pair.
+type edgeSet map[[2]int64]edgeMeta
+
+// add merges m into the entry for k, field by field. A field wins over its
+// counterpart per the edgeSet doc comment; an empty incoming field is a
+// no-op for that field, never a clobber.
+func (es edgeSet) add(k [2]int64, m edgeMeta) {
+	existing, ok := es[k]
+	if !ok {
+		es[k] = m
+		return
+	}
+	if existing.dispatch != "static" && m.dispatch != "" {
+		existing.dispatch = m.dispatch
+	}
+	if existing.precision != "resolved" && m.precision != "" {
+		existing.precision = m.precision
+	}
+	es[k] = existing
+}
 
 // callEdges builds SSA and a CHA call graph, then maps functions back to
 // symbol rows by declaration position. CHA over-approximates interface
@@ -405,9 +433,7 @@ func callEdges(pkgs []*packages.Package, broken []*packages.Package, byPos map[s
 			dispatch = "interface"
 		}
 		key := [2]int64{caller.id, callee.id}
-		if existing, ok := edges[key]; !ok || existing != "static" {
-			edges[key] = dispatch
-		}
+		edges.add(key, edgeMeta{dispatch: dispatch, precision: "resolved"})
 		return nil
 	})
 	if err != nil {
@@ -486,13 +512,14 @@ func implementsEdges(pkgs []*packages.Package, byPos map[string]*symRow) map[[2]
 }
 
 // writeGraphDB builds the new db at dbPath+".tmp" and renames it into place,
-// so readers never observe a half-built graph. edges carries a dispatch
-// label per pair (callEdges/carriedEdges compute it), persisted per-edge in
-// the edges.dispatch column. carriedUnits lists the short package names
-// whose edges are not freshly analyzed this build (broken packages, carried
-// forward from the previous graph.db where possible) — stored wholesale as
-// meta.carried_units, newline-joined (package names never contain a
-// newline, so no escaping is needed).
+// so readers never observe a half-built graph. edges carries an edgeMeta
+// (dispatch + precision) per pair (callEdges/carriedEdges compute it),
+// persisted per-edge in the edges.dispatch and edges.precision columns.
+// carriedUnits lists the short package names whose edges are not freshly
+// analyzed this build (broken packages, carried forward from the previous
+// graph.db where possible) — stored wholesale as meta.carried_units,
+// newline-joined (package names never contain a newline, so no escaping is
+// needed).
 func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string) error {
 	if err := ctx.Err(); err != nil {
 		return err // cancelled before work started
@@ -540,8 +567,8 @@ func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, sy
 			return err
 		}
 		defer edgeIns.Close()
-		for e, dispatch := range edges {
-			if _, err := edgeIns.ExecContext(ctx, e[0], e[1], dispatch, "resolved"); err != nil {
+		for e, m := range edges {
+			if _, err := edgeIns.ExecContext(ctx, e[0], e[1], m.dispatch, m.precision); err != nil {
 				return err
 			}
 		}
