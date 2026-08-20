@@ -137,6 +137,11 @@ func writeFreshness(b *strings.Builder, f Freshness) {
 		msgs = append(msgs, fmt.Sprintf("stale_units[%d of %d]: %s",
 			len(f.StaleUnits), f.StaleUnitsTotal, strings.Join(f.StaleUnits, ", ")))
 	}
+	// fanout_capped is a build-level partiality fact like stale_units above,
+	// not a staleness signal — shown regardless of Stale (design D5/D6).
+	if f.FanoutCapped > 0 {
+		msgs = append(msgs, fmt.Sprintf("fanout_capped: %d (callsite(s) truncated at the repo-wide resolution cap)", f.FanoutCapped))
+	}
 	if len(msgs) == 0 {
 		return
 	}

@@ -23,6 +23,14 @@ import (
 type mapperEngine struct {
 	lang     *gts.Language
 	outliner *gts.Outliner
+	// calls is the compiled FactCalls extractor for lang, added here rather
+	// than as a parallel cache (design D3): FactProgram.Extract rejects a
+	// tree parsed with any OTHER *gts.Language by pointer identity
+	// (fact_program.go:124), so co-locating it with the exact lang value
+	// mapper_calls.go's parser used makes that match structural instead of
+	// incidental. nil when compilation fails — mapper_calls.go treats that
+	// as a per-file skip, the same policy outliner==nil already gets below.
+	calls *gts.FactProgram
 }
 
 // mapperEngines caches one mapperEngine per language NAME for the lifetime
@@ -47,6 +55,9 @@ func (e mapperEngines) get(entry *grammars.LangEntry) *mapperEngine {
 		eng.lang = lang
 		if outliner, err := gts.NewOutliner(lang, grammars.ResolveTagsQuery(*entry)); err == nil {
 			eng.outliner = outliner
+		}
+		if calls, err := gts.NewFactProgram(lang, gts.FactCalls); err == nil {
+			eng.calls = calls
 		}
 	}
 	e[entry.Name] = eng
