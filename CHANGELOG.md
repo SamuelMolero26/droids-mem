@@ -29,6 +29,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     way a Go package that stops type-checking already did.
   - The `imports` table records module specifiers for the JS family and
     Python, each with its own explicit precision.
+- **Building a mapper-language graph got roughly 14x faster.** A 200-file
+  TypeScript tree went from 4.6 s and 4.8 GiB of allocation to 290 ms and
+  211 MiB (-93.7% time, -95.7% bytes, -95.4% allocations). Two causes, both
+  found by profiling: a tree-sitter parser was constructed per file, and each
+  one rebuilds its parse tables because they are cached on the parser rather
+  than on the shared language; and parsed trees were never released, so every
+  parse allocated fresh node arenas instead of reusing the pooled ones. The
+  effect is user-visible as wait time — an agent's first `graph_symbol` call
+  on a large TypeScript repo is what pays for a build.
+
 - **Code-graph answers now say how much to trust them.** Three signals, all
   response-level rather than repeated per row:
   - `callers_in_tests` splits the caller count, so "89 callers" reads as
