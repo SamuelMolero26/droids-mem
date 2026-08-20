@@ -1,9 +1,13 @@
-// Mapper-tier import extraction: gts.ExtractImports -> importRow (the
-// `imports` table). Python only in this slice — gts.ExtractImports has
-// import-node support for go/java/python/starlark, of which only python is a
-// mapper language (mapper.go's mapperLanguages); TS/JS module-specifier
-// capture and binding-name/resolution work is PR-G1/G2, deliberately not
-// attempted here.
+// Mapper-tier import extraction -> importRow (the `imports` table), by two
+// paths that meet at the same row shape. Python goes through
+// gts.ExtractImports, which has import-node support for go/java/python/
+// starlark — of those, only python is a mapper language (mapper.go's
+// mapperLanguages). The JS family (typescript/tsx/javascript) has no such
+// support upstream, so it goes through tsImportsQuery below.
+//
+// Every row this file writes carries the module SPECIFIER exactly as written
+// in source. Resolving a specifier to a repo file, and the local binding
+// names an import introduces, are PR-G2 — deliberately not attempted here.
 package graph
 
 import (
@@ -33,22 +37,64 @@ type importRow struct {
 // mapper_calls.go) rather than inventing a third axis just for imports.
 const mapperImportPrecision = precisionSyntactic
 
-// mapperImports parses every Python file in files an EXTRA time (mirroring
-// mapperSymbols/collectMapperCalls/mapperCarry's own established policy:
-// gts.Parser is not safe to share across passes, and no prior pass returns a
-// tree) and extracts import declarations via gts.ExtractImports. Only Python
-// files are processed — files of any other mapper language are silently
-// skipped, not counted as an error, since wiring them is explicitly out of
-// scope for this slice (see the package doc comment above). Per-file
-// failures (unreadable file, unparseable source) are skip-and-continue,
-// mirroring mapperSymbols/collectMapperCalls' own policy exactly.
+// jsFamilyLanguages is the subset of mapperLanguages whose imports come from
+// tsImportsQuery rather than gts.ExtractImports. Python is the complement.
+var jsFamilyLanguages = map[string]bool{
+	"typescript": true,
+	"tsx":        true,
+	"javascript": true,
+}
+
+// tsImportsQuery closes the gap gotreesitter leaves for the JS family: it
+// emits FactSet.Imports for go and python but zero for TypeScript, and
+// upstream tree-sitter-typescript's tags.scm carries no import patterns
+// either. A .scm query is data, so this costs no CGO — the constraint that
+// rules out the official C bindings and any C++-side wrapper alike.
+//
+// Covers every import form that names a module: static (default, named,
+// namespace, type-only, side-effect), re-export, dynamic import(), and
+// CommonJS require(). The captured @name is the module specifier, which is
+// what an import edge points at.
+//
+// The last pattern's #eq? predicate is what keeps `require` from widening
+// into "any single-string call": without it every f("...") in the tree would
+// be reported as an import.
+const tsImportsQuery = `
+(import_statement
+  source: (string (string_fragment) @name)) @reference.import
+
+(export_statement
+  source: (string (string_fragment) @name)) @reference.import
+
+(call_expression
+  function: (import)
+  arguments: (arguments (string (string_fragment) @name))) @reference.import
+
+(call_expression
+  function: (identifier) @_fn
+  arguments: (arguments (string (string_fragment) @name))) @reference.import
+(#eq? @_fn "require")
+`
+
+// mapperImports parses every Python and JS-family file in files an EXTRA
+// time (mirroring mapperSymbols/collectMapperCalls/mapperCarry's own
+// established policy: gts.Parser is not safe to share across passes, and no
+// prior pass returns a tree) and extracts its import declarations — via
+// gts.ExtractImports for Python, via tsImportsQuery for the JS family.
+// Per-file failures (unreadable file, unparseable source) are
+// skip-and-continue, mirroring mapperSymbols/collectMapperCalls' own policy
+// exactly.
 func mapperImports(files []mapperFile) ([]importRow, mapperStats) {
 	var stats mapperStats
 	engines := mapperEngines{}
 	var out []importRow
 
 	for _, f := range files {
-		if f.entry == nil || f.entry.Name != "python" {
+		if f.entry == nil {
+			continue
+		}
+		isPython := f.entry.Name == "python"
+		if !isPython && !jsFamilyLanguages[f.entry.Name] {
 			continue
 		}
 		// #nosec G304 -- discovery admits only regular files under repo, size-capped
@@ -71,6 +117,28 @@ func mapperImports(files []mapperFile) ([]importRow, mapperStats) {
 		if err != nil {
 			stats.parseErr++
 			continue // unparsable file is skip-and-continue, not fatal
+		}
+
+		if !isPython {
+			if eng.imports == nil {
+				stats.parseErr++ // the query failed to compile for this grammar
+				continue
+			}
+			for _, m := range eng.imports.Execute(tree) {
+				for _, c := range m.Captures {
+					if c.Name != "name" {
+						continue // @_fn is the require predicate's operand, not a module
+					}
+					if spec := c.Text(src); spec != "" {
+						out = append(out, importRow{
+							importerFile:   f.rel,
+							importedModule: spec,
+							precision:      mapperImportPrecision,
+						})
+					}
+				}
+			}
+			continue
 		}
 
 		for _, ref := range gts.ExtractImports(tree) {
