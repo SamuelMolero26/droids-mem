@@ -74,14 +74,27 @@ func usableGoPackages(pkgs []*packages.Package, err error) []*packages.Package {
 	return out
 }
 
+// mapperQNameCollisions counts colliding mapper-tier qnames observed across
+// all builds (T4 part 1, design D-note "byQName Python collision"). Visibility
+// only in this PR: PR-E's carried-edge remap is what actually consumes a
+// per-build collided set (returned by buildByQName) to decide whether to
+// drop a remap rather than point it at a possibly-wrong last-wins row.
+var mapperQNameCollisions atomic.Uint64
+
 // buildIndex loads, type-checks, and analyzes the repo, then atomically
 // replaces dbPath with a fresh graph (build to .tmp, rename over). A repo
 // whose Go tier does not type-check (majority-broken) returns an error and
-// leaves any existing graph intact. A repo with no usable Go packages at all
-// (see usableGoPackages) is NOT an error here — the Go tier is simply
-// skipped, and the build succeeds with zero Go-sourced symbols; PR-C's mapper
-// wiring is what gives such a repo real content, and PR-C is also where the
-// "both tiers empty" hard-error condition becomes meaningful again.
+// leaves any existing graph intact — UNLESS mapper symbols are available to
+// compensate, in which case only the Go tier is suppressed (see the
+// majority-broken cap below, C.11). A repo with neither a usable Go package
+// nor a single mapper-tier symbol is a hard error (C.10) — PR-B deliberately
+// left this open (always non-erroring) because mapper discovery wasn't wired
+// in yet; see PR-B apply-progress "B.4 Deviation".
+//
+// PR-C process note (task C.8): mapper symbols now land in graph.db, but
+// this PR must not merge to develop standalone — it under-reports every
+// mapper caller until PR-D wires FactCalls-derived call edges on top of the
+// symbols this PR produces. Definitions and calls land together.
 func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	buildStarts.Add(1)
 	cfg := &packages.Config{
@@ -114,10 +127,29 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 			broken = append(broken, p)
 		}
 	}
-	// Greater-than-50%-broken safety cap: past this point the fresh symbols
-	// and edges would be built mostly from stubs, so the previous whole
-	// graph is a better answer than a fresh one that is mostly
-	// carried-forward guesswork. Checked before any symbol/SSA work — no
+
+	// Mapper-tier discovery + conversion is independent of the Go tier's
+	// health — it never inspects go/packages output at all — so it runs
+	// unconditionally and early, before both the both-tiers-empty check
+	// (C.10) and the majority-broken cap (C.11) decide anything. Best-effort:
+	// a mapperFiles walk failure (root WalkDir error only) folds to zero
+	// mapper symbols rather than failing the whole build — the Go tier can
+	// still stand on its own.
+	var mapperSyms []mapperSym
+	if mFiles, _, mErr := mapperFiles(repo); mErr == nil {
+		mapperSyms, _ = mapperSymbols(mFiles)
+	}
+
+	// C.10: a repo with neither a usable Go package nor a single mapper-tier
+	// symbol has nothing to build from at all.
+	if len(pkgs) == 0 && len(mapperSyms) == 0 {
+		return fmt.Errorf("repo has no indexable Go packages or mapper-tier files: %s", repo)
+	}
+
+	// Greater-than-50%-broken safety cap: past this point the fresh Go
+	// symbols and edges would be built mostly from stubs, so the previous
+	// whole graph is a better answer than a fresh one that is mostly
+	// carried-forward guesswork. Checked before any Go symbol/SSA work — no
 	// point paying for it on a doomed build. Computed over the funneled
 	// pkgs, not the raw packages.Load result: a Go-free tree's single
 	// synthetic "no Go files" package would otherwise count as 100% broken
@@ -125,8 +157,25 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	// the tolerance usableGoPackages exists to provide. On an empty pkgs,
 	// broken is also empty, so this never fires (0*2 > 0 is false) — no
 	// extra guard needed.
+	//
+	// C.11: when mapper symbols ARE available, the cap suppresses the Go
+	// tier only instead of aborting the whole build — mapper content has
+	// nothing to do with Go's brokenness, and discarding it too would be a
+	// needless regression. Suppression reuses the exact len(pkgs) > 0 guards
+	// the Go-free path (D2) already relies on, by zeroing pkgs/broken here.
+	// The previous graph's Go symbols/edges are NOT preserved in this path —
+	// a real, disclosed trade-off (meta.empty_reason below), not silent data
+	// loss. A Go-only repo with no mapper content to compensate keeps the
+	// exact pre-C.11 hard-error behavior: this cap's existing protection is
+	// not weakened where it already applied.
+	goSuppressed := false
 	if len(broken)*2 > len(pkgs) {
-		return fmt.Errorf("repo does not type-check: %d of %d packages broken (majority), serving previous graph", len(broken), len(pkgs))
+		if len(mapperSyms) == 0 {
+			return fmt.Errorf("repo does not type-check: %d of %d packages broken (majority), serving previous graph", len(broken), len(pkgs))
+		}
+		goSuppressed = true
+		pkgs = nil
+		broken = nil
 	}
 
 	module := ""
@@ -151,19 +200,25 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 		return b
 	}
 
-	var symbols []*symRow
-	byPos := map[string]*symRow{} // "abs-file:line" → row, for SSA function matching
-	for _, p := range dedupeVariants(pkgs) {
-		shortPkg := shortPkgPath(p.PkgPath, module)
-		for _, f := range p.Syntax {
-			for _, decl := range f.Decls {
-				symbols = appendDeclSymbols(symbols, byPos, fset, readFile, decl, shortPkg, repo)
-			}
-		}
+	// symbols/byPos start from the Go tier (empty when pkgs is nil, e.g. a
+	// Go-free tree or a suppressed majority-broken build). Mapper rows are
+	// appended BEFORE positional ID assignment (C.2) — symbol IDs are
+	// positional, so landing them after that loop would collide with id 0.
+	symbols, byPos := goSymbols(pkgs, module, fset, readFile, repo)
+	for _, ms := range mapperSyms {
+		symbols = append(symbols, ms.row)
 	}
 	for i, s := range symbols {
 		s.id = int64(i + 1)
 	}
+
+	// byQName is built from ALL symbols (Go + mapper) unconditionally, not
+	// just when broken packages exist — mapper qnames can collide with each
+	// other regardless of the Go tier's health (T4 part 1), and PR-E's
+	// carried-edge remap needs the collision set from every build, not only
+	// ones with a broken Go package.
+	byQName, collidedQNames := buildByQName(symbols)
+	mapperQNameCollisions.Add(uint64(len(collidedQNames)))
 
 	// callEdges/implementsEdges both deref pkgs[0] (ssa.NewProgram's Fset,
 	// implementsEdges' Fset), so they are gated behind len(pkgs) > 0 rather
@@ -179,13 +234,19 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 		impls = implementsEdges(pkgs, byPos)
 	}
 
-	// Empty-graph hint (spec "Go-Free Empty-Graph Hint"): a build that
-	// completes successfully but indexes zero symbols is a legitimate,
-	// healthy outcome for a Go-free tree in the PR-B-to-PR-C window (mapper
-	// wiring not yet consuming discovered files) — record why, so it is
-	// never confused with a build failure downstream.
+	// Empty-graph / suppression hint: meta.empty_reason distinguishes a
+	// build failure from two legitimate non-failure outcomes that would
+	// otherwise ship a symbol-less or Go-less graph silently.
+	//   - "go_tier_suppressed_majority_broken" (C.11): mapper symbols exist,
+	//     but the Go tier was dropped by the majority-broken cap above.
+	//   - "no_indexable_symbols": a successful build that still indexed zero
+	//     symbols — e.g. a real Go package with no top-level declarations and
+	//     no mapper content (the only way this remains reachable after C.10).
 	emptyReason := ""
-	if len(symbols) == 0 {
+	switch {
+	case goSuppressed:
+		emptyReason = "go_tier_suppressed_majority_broken"
+	case len(symbols) == 0:
 		emptyReason = "no_indexable_symbols"
 	}
 
@@ -209,16 +270,56 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 		}
 		carriedUnits = slices.Sorted(maps.Keys(brokenPkgNames))
 
-		byQName := make(map[string]int64, len(symbols))
-		for _, s := range symbols {
-			byQName[s.qname] = s.id
-		}
 		for k, m := range carriedEdges(dbPath, brokenPkgNames, byQName) {
 			edges.add(k, m)
 		}
 	}
 
 	return writeGraphDB(ctx, dbPath, repo, module, stampVal, symbols, edges, impls, carriedUnits, emptyReason)
+}
+
+// goSymbols extracts symbol rows from the type-checked Go packages,
+// populating byPos (declaration-position → row, used later to match SSA
+// functions back to rows) as a side effect. This is the ONLY place that ever
+// writes to byPos: mapperSymbols has no byPos parameter and structurally
+// cannot reach it, which is what keeps the mapper tier out of Go's
+// SSA-matching map by construction (tier disjointness, C.7). Safe when pkgs
+// is nil (zero iterations), matching the Go-free/suppressed-Go-tier paths.
+func goSymbols(pkgs []*packages.Package, module string, fset *token.FileSet, readFile func(string) []byte, repo string) ([]*symRow, map[string]*symRow) {
+	var symbols []*symRow
+	byPos := map[string]*symRow{}
+	for _, p := range dedupeVariants(pkgs) {
+		shortPkg := shortPkgPath(p.PkgPath, module)
+		for _, f := range p.Syntax {
+			for _, decl := range f.Decls {
+				symbols = appendDeclSymbols(symbols, byPos, fset, readFile, decl, shortPkg, repo)
+			}
+		}
+	}
+	return symbols, byPos
+}
+
+// buildByQName builds the qname→id lookup carriedEdges' remap uses, and
+// records every qname collision it observes along the way — never silently
+// last-wins with no trace (T4 part 1). Mapper-tier qnames are the realistic
+// source: Python's a/b/__init__.py and a/b.py both synthesize modulePath
+// "a.b" (mapper.go's modulePath), so their symbols' qnames can collide.
+// PR-E's carried-edge remap is what actually consumes the returned collided
+// set (dropping rather than remapping onto a possibly-wrong row) — this PR
+// only makes the collision visible.
+func buildByQName(symbols []*symRow) (map[string]int64, map[string]bool) {
+	byQName := make(map[string]int64, len(symbols))
+	var collided map[string]bool
+	for _, s := range symbols {
+		if _, exists := byQName[s.qname]; exists {
+			if collided == nil {
+				collided = map[string]bool{}
+			}
+			collided[s.qname] = true
+		}
+		byQName[s.qname] = s.id
+	}
+	return byQName, collided
 }
 
 // dedupeVariants collapses packages.Load(Tests:true)'s multiple variants per
