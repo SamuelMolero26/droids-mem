@@ -136,11 +136,20 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	// a mapperFiles walk failure (root WalkDir error only) folds to zero
 	// mapper symbols rather than failing the whole build — the Go tier can
 	// still stand on its own.
+	//
+	// mapperCarry (PR-E, design D6) runs BEFORE C.10's both-tiers-empty check:
+	// a file whose fresh parse is too broken to trust may otherwise leave
+	// mapperSyms empty even though its previous build has rows to carry —
+	// running carry-substitution first is what makes those rows count toward
+	// "not empty". dbPath still holds the previous build's graph.db here;
+	// writeGraphDB below is what replaces it.
 	var mapperFileList []mapperFile
 	var mapperSyms []mapperSym
+	var mapperCarriedUnits []string
 	if mFiles, _, mErr := mapperFiles(repo); mErr == nil {
 		mapperFileList = mFiles
-		mapperSyms, _ = mapperSymbols(mFiles)
+		freshMapperSyms, _ := mapperSymbols(mFiles)
+		mapperSyms, mapperCarriedUnits = mapperCarry(dbPath, mFiles, freshMapperSyms)
 	}
 
 	// C.10: a repo with neither a usable Go package nor a single mapper-tier
@@ -289,6 +298,29 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 		for k, m := range carriedEdges(dbPath, brokenPkgNames, byQName) {
 			edges.add(k, m)
 		}
+	}
+
+	// Mapper carry-forward edges (PR-E, design D6): a carried file's fresh
+	// (broken) parse has no usable byte ranges, so attributeMapperCalls can
+	// never attribute a callsite to it this build — only its own previous
+	// OUTGOING edges are missing without this, mirroring carriedEdges' exact
+	// asymmetry for the Go tier. Recovered by module path (mapperCarry's own
+	// key, matching symRow.pkg for a mapper row), and an edge whose callee
+	// qname collided at buildByQName time is dropped rather than remapped
+	// (T4 part 2) — collidedQNames is threaded straight through, no
+	// additional plumbing needed.
+	if len(mapperCarriedUnits) > 0 {
+		carriedModules := make(map[string]bool, len(mapperCarriedUnits))
+		for _, mp := range mapperCarriedUnits {
+			carriedModules[mp] = true
+		}
+		for k, m := range mapperCarriedEdges(dbPath, carriedModules, byQName, collidedQNames) {
+			edges.add(k, m)
+		}
+		carriedUnits = append(carriedUnits, mapperCarriedUnits...)
+	}
+	if len(carriedUnits) > 1 {
+		slices.Sort(carriedUnits)
 	}
 
 	return writeGraphDB(ctx, dbPath, repo, module, stampVal, symbols, edges, impls, carriedUnits, emptyReason, fanoutCapped)
