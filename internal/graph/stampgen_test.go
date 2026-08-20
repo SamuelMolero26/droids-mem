@@ -1,9 +1,14 @@
 package graph
 
 import (
+	"database/sql"
+	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	_ "modernc.org/sqlite"
 )
 
 // ensureFresh gates entirely on `fresh.Stamp == current`, and graph.db stores
@@ -147,5 +152,60 @@ func TestCanonicalRepo_ModuleRootBeatsGitRoot(t *testing.T) {
 	}
 	if got != want {
 		t.Errorf("canonicalRepo(%q) = %q, want the nested module root %q", sub, got, want)
+	}
+}
+
+// The indexed extension set widened for the mapper tier.
+// Pinning the exact set protects the stamp contract: widening it again is a
+// deliberate decision, because it auto-invalidates every cached graph.
+func TestIndexedExtensions_IncludesMapperLanguages(t *testing.T) {
+	want := []string{".go", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".py"}
+	if got := indexedExtensions(); !slices.Equal(got, want) {
+		t.Errorf("indexedExtensions() = %v, want %v", got, want)
+	}
+}
+
+// Schema additions: every edge table carries a precision
+// column and the imports table exists with module-text endpoints. A regression
+// here silently drops the provenance model the mapper tier depends on,
+// and — because stampGen hashes the schema text — would do so without moving
+// the stamp.
+func TestSchema_HasPrecisionColumnsAndImportsTable(t *testing.T) {
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "graph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(schema); err != nil {
+		t.Fatalf("apply schema: %v", err)
+	}
+
+	tables := map[string][]string{
+		"edges":      {"caller", "callee", "dispatch", "precision"},
+		"implements": {"iface", "impl", "precision"},
+		"imports":    {"importer_file", "imported_module", "precision"},
+	}
+	for table, wantCols := range tables {
+		rows, err := db.Query(fmt.Sprintf(`SELECT name FROM pragma_table_info('%s')`, table))
+		if err != nil {
+			t.Fatalf("%s: %v", table, err)
+		}
+		defer rows.Close()
+		var got []string
+		for rows.Next() {
+			var c string
+			if err := rows.Scan(&c); err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, c)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range wantCols {
+			if !slices.Contains(got, c) {
+				t.Errorf("%s: missing column %q (have %v)", table, c, got)
+			}
+		}
 	}
 }
