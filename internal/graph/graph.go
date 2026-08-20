@@ -110,12 +110,13 @@ type Freshness struct {
 	// true count even when the list is capped.
 	StaleUnits      []string `json:"stale_units,omitempty"`
 	StaleUnitsTotal int      `json:"stale_units_total,omitempty"`
-	// EmptyReason distinguishes a successful build that indexed zero symbols
-	// ("no_indexable_symbols") from a build failure, so a healthy-but-empty
-	// graph (e.g. a pure-TS repo in the PR-B-to-PR-C window, before mapper
-	// wiring lands) is never confused with Stale/IndexError. Only meaningful
-	// when the graph is NOT Stale — a stale graph's failure state is already
-	// distinguishable via IndexError (see writeFreshness).
+	// EmptyReason distinguishes two legitimate non-failure outcomes from a
+	// build failure, so neither is ever confused with Stale/IndexError:
+	// "no_indexable_symbols" (a successful build that still indexed zero
+	// symbols) and "go_tier_suppressed_majority_broken" (mapper symbols
+	// exist, but the majority-broken cap dropped the Go tier — C.11). Only
+	// meaningful when the graph is NOT Stale — a stale graph's failure state
+	// is already distinguishable via IndexError (see writeFreshness).
 	EmptyReason string `json:"empty_reason,omitempty"`
 	// carriedUnits is the FULL list (unexported, never serialized) backing the
 	// per-symbol Carried flag (query.go) — membership can fall outside the

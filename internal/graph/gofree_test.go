@@ -151,7 +151,11 @@ func (errPkgLoadSentinel) Error() string { return "fake packages.Load failure" }
 // TestBuildIndex_GoFreeTree_DoesNotPanic is task B.3: buildIndex over a
 // Go-free fixture tree must not panic or hard-error, guarding the pkgs[0]
 // derefs the pre-PR-B code performed unconditionally for module, Fset, and
-// ssa.NewProgram.
+// ssa.NewProgram. Both fixtures carry a mapper-indexable function (not a bare
+// `const x = 1`, which the outliner does not capture as a symbol at all) so
+// that post-PR-C, the mapper tier is non-empty and C.10's both-tiers-empty
+// hard error correctly does not fire here — that error's own dedicated case
+// is TestBuildIndex_BothTiersEmpty_HardErrors (mapper_wiring_test.go).
 func TestBuildIndex_GoFreeTree_DoesNotPanic(t *testing.T) {
 	cases := []struct {
 		name string
@@ -161,7 +165,7 @@ func TestBuildIndex_GoFreeTree_DoesNotPanic(t *testing.T) {
 		{"go.mod present, zero .go files", func(t *testing.T) string {
 			repo := t.TempDir()
 			writeFile(t, repo, "go.mod", "module x\n\ngo 1.21\n")
-			writeFile(t, repo, "app.ts", "export const x = 1;\n")
+			writeFile(t, repo, "app.ts", "export function hello(): string { return 'hi'; }\n")
 			return repo
 		}},
 	}
@@ -187,43 +191,14 @@ func TestBuildIndex_GoFreeTree_DoesNotPanic(t *testing.T) {
 	}
 }
 
-// TestBuildIndex_GoFreeTree_EmptyReasonHint is tasks B.7/B.8: a build that
-// completes with zero indexed symbols (the PR-B-to-PR-C window, before mapper
-// wiring lands) must record meta.empty_reason so the response can distinguish
-// "no indexable symbols found" from an actual build failure.
-func TestBuildIndex_GoFreeTree_EmptyReasonHint(t *testing.T) {
-	repo := goFreeRepo(t)
-	dbPath := filepath.Join(t.TempDir(), "graph.db")
-	st, err := stamp(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
-		t.Fatalf("buildIndex: %v", err)
-	}
-
-	conn, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-
-	var reason string
-	if err := conn.QueryRow(`SELECT value FROM meta WHERE key = 'empty_reason'`).Scan(&reason); err != nil {
-		t.Fatalf("read meta.empty_reason: %v", err)
-	}
-	if reason != "no_indexable_symbols" {
-		t.Errorf("meta.empty_reason = %q, want %q", reason, "no_indexable_symbols")
-	}
-
-	var symCount int
-	if err := conn.QueryRow(`SELECT COUNT(*) FROM symbols`).Scan(&symCount); err != nil {
-		t.Fatal(err)
-	}
-	if symCount != 0 {
-		t.Errorf("symbols count = %d, want 0 for a Go-free tree in the PR-B-to-PR-C window", symCount)
-	}
-}
+// TestBuildIndex_GoFreeTree_EmptyReasonHint (PR-B, tasks B.7/B.8) was scoped
+// by the spec explicitly to "the PR-B-to-PR-C window": once PR-C wires
+// mapper discovery into buildIndex, a Go-free tree with a mapper-language
+// file is no longer empty at all (it now yields mapper symbols). See
+// TestBuildIndex_GoPackageWithZeroDecls_EmptyReasonHint (mapper_wiring_test.go)
+// for the residual post-PR-C case, and TestBuildIndex_BothTiersEmpty_HardErrors
+// (task C.10) for the case this test used to exercise, which now hard-errors
+// instead of succeeding-with-a-hint.
 
 // TestBuildIndex_NonEmptyGraph_NoEmptyReason pins the negative case: a
 // healthy Go build must not carry the empty-graph hint.

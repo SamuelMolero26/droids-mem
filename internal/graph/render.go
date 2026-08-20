@@ -123,8 +123,13 @@ func writeFreshness(b *strings.Builder, f Freshness) {
 	// failure would misleadingly imply the CURRENT (failed) build is the one
 	// that was empty-but-healthy, when it is really a leftover from the last
 	// good build.
-	if !f.Stale && f.EmptyReason == "no_indexable_symbols" {
-		msgs = append(msgs, "no indexable symbols found")
+	if !f.Stale {
+		switch f.EmptyReason {
+		case "no_indexable_symbols":
+			msgs = append(msgs, "no indexable symbols found")
+		case "go_tier_suppressed_majority_broken":
+			msgs = append(msgs, "Go tier suppressed (majority of packages broken); showing mapper-tier symbols only")
+		}
 	}
 	if len(f.StaleUnits) > 0 {
 		// "[N of M]" already says the list is capped and how much it hides;
