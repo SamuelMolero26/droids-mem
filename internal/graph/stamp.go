@@ -20,14 +20,14 @@ func indexedExtensions() []string {
 // indexerGen is the third stampGen input: a build-semantics generation that
 // changes whenever what a build MEANS changes without necessarily changing
 // the schema DDL string or the indexed-extension set (design D8). PR-B
-// bumped it for Go-free tolerance + the widened census walk; PR-C bumps it
-// again for mapper-symbol-indexing semantics (a repo indexed before mapper
-// wiring must rebuild to pick up mapper symbols, even though its schema and
-// extension set are unchanged); PR-D/E each bump it again for their own
-// semantics change (call edges, carry-forward). A schema edit or an
-// extension-set widening already moves the generation on its own — this
-// constant exists for the case neither does.
-const indexerGen = "2"
+// bumped it for Go-free tolerance + the widened census walk; PR-C bumped it
+// again for mapper-symbol-indexing semantics; PR-D bumps it again for
+// mapper-tier call-edge-producing semantics (a repo indexed before PR-D must
+// rebuild to pick up call edges, even though its schema and extension set
+// are unchanged); PR-E bumps it again for its own semantics change
+// (carry-forward). A schema edit or an extension-set widening already moves
+// the generation on its own — this constant exists for the case neither does.
+const indexerGen = "3"
 
 // stampGen derives the stamp's generation prefix from the things that change
 // what a cached graph MEANS: the schema its rows were written under, the file
