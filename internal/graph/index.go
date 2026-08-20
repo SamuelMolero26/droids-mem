@@ -41,9 +41,47 @@ type symRow struct {
 	source    string
 }
 
+// usableGoPackages normalizes packages.Load's possible outcomes on a Go-free
+// tree into a single "no usable Go packages" nil result, so buildIndex never
+// needs to branch on which of the shapes it got.
+//
+// Empirically observed (TestPackagesLoad_GoFreeTree_ObservedShape): a tree
+// with no go.mod and no .go file yields err == nil and exactly one SYNTHETIC
+// package (PkgPath "./...", zero GoFiles/CompiledGoFiles, one ListError-kind
+// entry in Errors); a tree with a go.mod but zero .go files yields err == nil
+// and an EMPTY slice. Per design D2, a genuine load error (e.g. a missing Go
+// toolchain) folds into the same "unusable" outcome — the mapper tier can
+// still index the tree even when the Go tier cannot load at all.
+//
+// A package is dropped as "no Go files"-class only when it carries NO
+// GoFiles/CompiledGoFiles at all; a package that has real source files but
+// also errors (a genuine type/parse failure) is kept and flows into the
+// existing `broken` accounting below, unchanged from pre-PR-B behavior.
+func usableGoPackages(pkgs []*packages.Package, err error) []*packages.Package {
+	if err != nil {
+		return nil
+	}
+	out := make([]*packages.Package, 0, len(pkgs))
+	for _, p := range pkgs {
+		if len(p.GoFiles) == 0 && len(p.CompiledGoFiles) == 0 && len(p.Errors) > 0 {
+			continue // synthetic "no Go files"-class package: nothing to index
+		}
+		out = append(out, p)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // buildIndex loads, type-checks, and analyzes the repo, then atomically
-// replaces dbPath with a fresh graph (build to .tmp, rename over). A repo that
-// does not type-check returns an error and leaves any existing graph intact.
+// replaces dbPath with a fresh graph (build to .tmp, rename over). A repo
+// whose Go tier does not type-check (majority-broken) returns an error and
+// leaves any existing graph intact. A repo with no usable Go packages at all
+// (see usableGoPackages) is NOT an error here — the Go tier is simply
+// skipped, and the build succeeds with zero Go-sourced symbols; PR-C's mapper
+// wiring is what gives such a repo real content, and PR-C is also where the
+// "both tiers empty" hard-error condition becomes meaningful again.
 func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	buildStarts.Add(1)
 	cfg := &packages.Config{
@@ -55,19 +93,21 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 			packages.NeedImports | packages.NeedDeps | packages.NeedTypes |
 			packages.NeedSyntax | packages.NeedTypesInfo | packages.NeedModule,
 	}
-	pkgs, err := packages.Load(cfg, "./...")
-	if err != nil {
-		return fmt.Errorf("load packages (is the Go toolchain installed?): %w", err)
-	}
-	if len(pkgs) == 0 {
-		return fmt.Errorf("no Go packages found under %s", repo)
-	}
-	// broken is the raw (not deduped) subset with type errors, kept un-deduped
-	// because callEdges' SSA walk needs to know per-variant (plain vs.
-	// in-package test) whether a package failed to type-check. dedupeVariants
-	// below is what symbol rows are emitted for — broken or clean, because
-	// symbols are AST-derived and a body-local type error never invalidates
-	// the AST.
+	rawPkgs, loadErr := packages.Load(cfg, "./...")
+	// pkgs is the funneled, "usable" view: nil on any of the three Go-free
+	// shapes (load error, empty slice, synthetic "no Go files" package —
+	// see usableGoPackages). Everything below that used to index the raw
+	// packages.Load result unconditionally now guards on len(pkgs) instead,
+	// since pkgs[0] is no longer safe to deref unconditionally.
+	pkgs := usableGoPackages(rawPkgs, loadErr)
+
+	// broken is the raw (not deduped) subset with type errors, kept
+	// un-deduped because callEdges' SSA walk needs to know per-variant
+	// (plain vs. in-package test) whether a package failed to type-check.
+	// dedupeVariants below is what symbol rows are emitted for — broken or
+	// clean, because symbols are AST-derived and a body-local type error
+	// never invalidates the AST. Ranging over pkgs is safe when pkgs is nil
+	// (zero iterations), so broken is naturally empty on a Go-free tree.
 	var broken []*packages.Package
 	for _, p := range pkgs {
 		if len(p.Errors) > 0 {
@@ -75,20 +115,29 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 		}
 	}
 	// Greater-than-50%-broken safety cap: past this point the fresh symbols
-	// and edges would be built mostly from stubs, so the previous whole graph
-	// is a better answer than a fresh one that is mostly carried-forward
-	// guesswork. Checked before any symbol/SSA work — no point paying for it
-	// on a doomed build.
+	// and edges would be built mostly from stubs, so the previous whole
+	// graph is a better answer than a fresh one that is mostly
+	// carried-forward guesswork. Checked before any symbol/SSA work — no
+	// point paying for it on a doomed build. Computed over the funneled
+	// pkgs, not the raw packages.Load result: a Go-free tree's single
+	// synthetic "no Go files" package would otherwise count as 100% broken
+	// and re-trigger this exact hard error on every Go-free tree, undoing
+	// the tolerance usableGoPackages exists to provide. On an empty pkgs,
+	// broken is also empty, so this never fires (0*2 > 0 is false) — no
+	// extra guard needed.
 	if len(broken)*2 > len(pkgs) {
 		return fmt.Errorf("repo does not type-check: %d of %d packages broken (majority), serving previous graph", len(broken), len(pkgs))
 	}
 
 	module := ""
-	if pkgs[0].Module != nil {
-		module = pkgs[0].Module.Path
+	var fset *token.FileSet
+	if len(pkgs) > 0 {
+		if pkgs[0].Module != nil {
+			module = pkgs[0].Module.Path
+		}
+		fset = pkgs[0].Fset
 	}
 
-	fset := pkgs[0].Fset
 	files := map[string][]byte{}
 	readFile := func(name string) []byte {
 		if b, ok := files[name]; ok {
@@ -116,9 +165,28 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 		s.id = int64(i + 1)
 	}
 
-	edges, err := callEdges(pkgs, broken, byPos)
-	if err != nil {
-		return err
+	// callEdges/implementsEdges both deref pkgs[0] (ssa.NewProgram's Fset,
+	// implementsEdges' Fset), so they are gated behind len(pkgs) > 0 rather
+	// than guarded internally — buildIndex is their only caller.
+	edges := edgeSet{}
+	var impls map[[2]int64]bool
+	if len(pkgs) > 0 {
+		var err error
+		edges, err = callEdges(pkgs, broken, byPos)
+		if err != nil {
+			return err
+		}
+		impls = implementsEdges(pkgs, byPos)
+	}
+
+	// Empty-graph hint (spec "Go-Free Empty-Graph Hint"): a build that
+	// completes successfully but indexes zero symbols is a legitimate,
+	// healthy outcome for a Go-free tree in the PR-B-to-PR-C window (mapper
+	// wiring not yet consuming discovered files) — record why, so it is
+	// never confused with a build failure downstream.
+	emptyReason := ""
+	if len(symbols) == 0 {
+		emptyReason = "no_indexable_symbols"
 	}
 
 	// Carry-forward: a broken package's own functions have no SSA body, so
@@ -150,9 +218,7 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 		}
 	}
 
-	impls := implementsEdges(pkgs, byPos)
-
-	return writeGraphDB(ctx, dbPath, repo, module, stampVal, symbols, edges, impls, carriedUnits)
+	return writeGraphDB(ctx, dbPath, repo, module, stampVal, symbols, edges, impls, carriedUnits, emptyReason)
 }
 
 // dedupeVariants collapses packages.Load(Tests:true)'s multiple variants per
@@ -519,8 +585,10 @@ func implementsEdges(pkgs []*packages.Package, byPos map[string]*symRow) map[[2]
 // analyzed this build (broken packages, carried forward from the previous
 // graph.db where possible) — stored wholesale as meta.carried_units,
 // newline-joined (package names never contain a newline, so no escaping is
-// needed).
-func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string) error {
+// needed). emptyReason is "no_indexable_symbols" when the build indexed zero
+// symbols (a healthy, not a failed, outcome), or "" otherwise — stored as
+// meta.empty_reason.
+func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string, emptyReason string) error {
 	if err := ctx.Err(); err != nil {
 		return err // cancelled before work started
 	}
@@ -590,6 +658,7 @@ func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, sy
 		for k, v := range map[string]string{
 			"stamp": stampVal, "repo": repo, "module": module, "indexed_at": nowUTC(),
 			"carried_units": strings.Join(carriedUnits, "\n"),
+			"empty_reason":  emptyReason,
 		} {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO meta (key, value) VALUES (?,?)`, k, v); err != nil {
 				return err

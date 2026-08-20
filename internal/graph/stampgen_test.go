@@ -18,8 +18,8 @@ import (
 // generation from the schema text closes that by construction — you cannot
 // forget to bump what you never write by hand.
 func TestStampGen_ChangesWithSchema(t *testing.T) {
-	a := stampGen("CREATE TABLE x(a INT);", []string{".go"})
-	b := stampGen("CREATE TABLE x(a INT, b INT);", []string{".go"})
+	a := stampGen("CREATE TABLE x(a INT);", []string{".go"}, "1")
+	b := stampGen("CREATE TABLE x(a INT, b INT);", []string{".go"}, "1")
 	if a == b {
 		t.Errorf("stampGen ignored a schema change: both %q", a)
 	}
@@ -32,10 +32,25 @@ func TestStampGen_ChangesWithSchema(t *testing.T) {
 // extension set grows, every cached graph was built from a narrower file set
 // and must be rebuilt, even though the old files are untouched.
 func TestStampGen_ChangesWithIndexedExtensions(t *testing.T) {
-	a := stampGen("CREATE TABLE x(a INT);", []string{".go"})
-	b := stampGen("CREATE TABLE x(a INT);", []string{".go", ".ts"})
+	a := stampGen("CREATE TABLE x(a INT);", []string{".go"}, "1")
+	b := stampGen("CREATE TABLE x(a INT);", []string{".go", ".ts"}, "1")
 	if a == b {
 		t.Errorf("stampGen ignored an extension-set change: both %q", a)
+	}
+}
+
+// TestStampGen_ChangesWithIndexerGen is task B.9 (T1/D8): an identical schema
+// and extension set must still produce a different generation when the
+// indexer-generation input changes, because that input is what forces a
+// rebuild when a PR changes what a build MEANS without changing the schema
+// DDL string or the indexed-extension set (design D8).
+func TestStampGen_ChangesWithIndexerGen(t *testing.T) {
+	const ddl = "CREATE TABLE x(a INT);"
+	exts := []string{".go", ".ts"}
+	a := stampGen(ddl, exts, "1")
+	b := stampGen(ddl, exts, "2")
+	if a == b {
+		t.Errorf("stampGen ignored an indexerGen change: both %q", a)
 	}
 }
 
@@ -57,7 +72,7 @@ func TestStampGen_IsDeterministic(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, want := stampGen(ddl, tt.a), stampGen(ddl, tt.b)
+			got, want := stampGen(ddl, tt.a, "1"), stampGen(ddl, tt.b, "1")
 			if got != want {
 				t.Errorf("stampGen(%v) = %q, stampGen(%v) = %q; want equal\n"+
 					"a generation that is not stable rebuilds every graph on every query",
@@ -78,7 +93,7 @@ func TestStamp_CarriesDerivedGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stamp: %v", err)
 	}
-	want := stampGen(schema, indexedExtensions()) + ":"
+	want := stampGen(schema, indexedExtensions(), indexerGen) + ":"
 	if !strings.HasPrefix(got, want) {
 		t.Errorf("stamp = %q, want prefix %q", got, want)
 	}

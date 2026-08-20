@@ -35,3 +35,26 @@ func TestStamp_TestFileEditMovesStamp(t *testing.T) {
 		t.Errorf("test-file edit did not move stamp: still %q; with Tests:true a _test.go edit must invalidate the cache", base)
 	}
 }
+
+// TestStamp_MapperOnlyEditMovesStamp is task B.5/B.6: the census walk must
+// cover indexedExtensions(), not just .go, so a mapper-only file change moves
+// the stamp and triggers a rebuild even when no .go file changed at all.
+func TestStamp_MapperOnlyEditMovesStamp(t *testing.T) {
+	repo := t.TempDir()
+	writeFile(t, repo, "app.ts", "export const x = 1;\n")
+
+	base, err := stamp(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(filepath.Join(repo, "app.ts"), future, future); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := stamp(repo); err != nil {
+		t.Fatal(err)
+	} else if s == base {
+		t.Errorf("a .ts-only edit did not move the stamp: still %q; census must cover indexedExtensions(), not just .go", base)
+	}
+}
