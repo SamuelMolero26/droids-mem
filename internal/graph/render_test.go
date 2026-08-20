@@ -126,6 +126,40 @@ func TestRenderSymbol_StaleWordingNotClaimedWithoutFailure(t *testing.T) {
 	}
 }
 
+// TestRenderSymbol_EmptyReasonHint is task B.8: a fresh (non-stale) build
+// that indexed zero symbols must surface meta.empty_reason through
+// writeFreshness, distinguishing "no indexable symbols found" from a build
+// failure.
+func TestRenderSymbol_EmptyReasonHint(t *testing.T) {
+	r := &SymbolResponse{
+		Repo:      "/repo",
+		Freshness: Freshness{Stamp: "v1", EmptyReason: "no_indexable_symbols"},
+	}
+	out := RenderSymbol(r)
+	if !strings.Contains(out, "no indexable symbols found") {
+		t.Errorf("missing empty-graph hint:\n%s", out)
+	}
+}
+
+// TestRenderSymbol_EmptyReasonNotShownWhenStale pins the ordering rule from
+// D2: a genuine build failure (Stale + IndexError) is already distinguishable
+// at the source, so a stale EmptyReason left over from a prior good build
+// must not be surfaced alongside a failure — that would misleadingly imply
+// the CURRENT (failed) build is the one that was empty-but-healthy.
+func TestRenderSymbol_EmptyReasonNotShownWhenStale(t *testing.T) {
+	r := &SymbolResponse{
+		Repo: "/repo",
+		Freshness: Freshness{
+			Stamp: "v1", Stale: true, IndexError: "type error",
+			EmptyReason: "no_indexable_symbols",
+		},
+	}
+	out := RenderSymbol(r)
+	if strings.Contains(out, "no indexable symbols found") {
+		t.Errorf("empty-graph hint shown alongside a stale build failure:\n%s", out)
+	}
+}
+
 func TestRenderPackage_EmptyAndStale(t *testing.T) {
 	r := &PackageResponse{
 		Repo:      "/repo",
