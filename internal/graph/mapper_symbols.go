@@ -53,16 +53,28 @@ func (e mapperEngines) get(entry *grammars.LangEntry) *mapperEngine {
 	return eng
 }
 
+// mapperSym is the build-time carrier mapperSymbols returns: the persisted
+// *symRow plus PR-D's call-attribution inputs (the outline symbol's byte
+// range and its lexical container chain), which never persist to graph.db
+// themselves (design.md decision 8 — keeps symRow clean, keeps the two tiers
+// decoupled). Introduced in PR-C so PR-D's FactCalls attribution adds no
+// signature churn to mapperSymbols.
+type mapperSym struct {
+	row        *symRow
+	start, end uint32 // gts byte range, build-time only, NEVER persisted
+	container  string // enclosing class chain, for PR-D's ladder rungs 1/2
+}
+
 // mapperSymbols parses and outlines every file in files, converting each
-// accepted gts.OutlineSymbol into a production *symRow. Per-file failures
-// (unreadable file, unloadable language, unparseable source, declined
-// outline) are skip-and-continue: one bad file never loses the rest of the
-// run, and every skip is counted in the returned mapperStats
-// (design.md decision 4).
-func mapperSymbols(files []mapperFile) ([]*symRow, mapperStats) {
+// accepted gts.OutlineSymbol into a production *symRow wrapped in a
+// mapperSym carrier. Per-file failures (unreadable file, unloadable
+// language, unparseable source, declined outline) are skip-and-continue: one
+// bad file never loses the rest of the run, and every skip is counted in the
+// returned mapperStats (design.md decision 4).
+func mapperSymbols(files []mapperFile) ([]mapperSym, mapperStats) {
 	var stats mapperStats
 	engines := mapperEngines{}
-	var out []*symRow
+	var out []mapperSym
 
 	for _, f := range files {
 		// #nosec G304 -- discovery admits only regular files under repo, size-capped
@@ -109,7 +121,7 @@ func mapperSymbols(files []mapperFile) ([]*symRow, mapperStats) {
 // lexical container chain built from OutlineSymbol.Children byte
 // containment (empty at the top level); topLevel and parentExported drive
 // TS/TSX/JS export inheritance (design.md decision 6).
-func buildMapperSymbols(sym gts.OutlineSymbol, container string, f mapperFile, src []byte, tree *gts.Tree, lang *gts.Language, topLevel, parentExported bool) []*symRow {
+func buildMapperSymbols(sym gts.OutlineSymbol, container string, f mapperFile, src []byte, tree *gts.Tree, lang *gts.Language, topLevel, parentExported bool) []mapperSym {
 	exported := mapperExported(sym, f.entry.Name, tree, lang, topLevel, parentExported)
 
 	qname := f.modulePath + ":"
@@ -130,7 +142,7 @@ func buildMapperSymbols(sym gts.OutlineSymbol, container string, f mapperFile, s
 		doc:       "", // always empty in this slice — see design.md decision 10
 		source:    truncate(mapperSlice(src, sym.Range), maxSourceBytes),
 	}
-	out := []*symRow{row}
+	out := []mapperSym{{row: row, start: sym.Range.StartByte, end: sym.Range.EndByte, container: container}}
 
 	childContainer := sym.Name
 	if container != "" {

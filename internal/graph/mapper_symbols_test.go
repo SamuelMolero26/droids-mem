@@ -29,15 +29,28 @@ func mapMapperFile(t *testing.T, dir, name, content, modPath string) mapperFile 
 	}
 }
 
-func findSymRow(t *testing.T, rows []*symRow, name string) *symRow {
+func findSymRow(t *testing.T, rows []mapperSym, name string) *symRow {
 	t.Helper()
 	for _, r := range rows {
-		if r.name == name {
-			return r
+		if r.row.name == name {
+			return r.row
 		}
 	}
 	t.Fatalf("no symRow named %q among %d rows", name, len(rows))
 	return nil
+}
+
+// findMapperSym is findSymRow's carrier-returning counterpart, for tests
+// that need the byte-range/container fields alongside the row itself.
+func findMapperSym(t *testing.T, rows []mapperSym, name string) mapperSym {
+	t.Helper()
+	for _, r := range rows {
+		if r.row.name == name {
+			return r
+		}
+	}
+	t.Fatalf("no mapperSym named %q among %d rows", name, len(rows))
+	return mapperSym{}
 }
 
 func TestMapperSymbols_LineFromNameRange(t *testing.T) {
@@ -97,8 +110,8 @@ func TestMapperSymbols_DocAlwaysEmpty(t *testing.T) {
 		t.Fatal("no symbols produced")
 	}
 	for _, r := range rows {
-		if r.doc != "" {
-			t.Errorf("%s.doc = %q, want empty (doc is always \"\" in this slice)", r.name, r.doc)
+		if r.row.doc != "" {
+			t.Errorf("%s.doc = %q, want empty (doc is always \"\" in this slice)", r.row.name, r.row.doc)
 		}
 	}
 }
@@ -196,8 +209,8 @@ func TestMapperSymbols_QnameContainerChain(t *testing.T) {
 		t.Errorf("method.qname = %q, want src/util:Outer.method", method.qname)
 	}
 	for _, r := range rows {
-		if !strings.Contains(r.qname, ":") {
-			t.Errorf("%s.qname = %q missing the colon separator", r.name, r.qname)
+		if !strings.Contains(r.row.qname, ":") {
+			t.Errorf("%s.qname = %q missing the colon separator", r.row.name, r.row.qname)
 		}
 	}
 
@@ -220,7 +233,7 @@ func TestMapperSymbols_ReadErrorCountedSkipAndContinue(t *testing.T) {
 	if stats.readErr != 1 {
 		t.Errorf("readErr = %d, want 1", stats.readErr)
 	}
-	if len(rows) != 1 || rows[0].name != "foo" {
+	if len(rows) != 1 || rows[0].row.name != "foo" {
 		t.Errorf("walk did not continue past the read error: rows=%+v", rows)
 	}
 }
@@ -238,7 +251,7 @@ func TestMapperSymbols_EngineLoadFailureCountedSkipAndContinue(t *testing.T) {
 	if stats.parseErr != 1 {
 		t.Errorf("parseErr = %d, want 1", stats.parseErr)
 	}
-	if len(rows) != 1 || rows[0].name != "foo" {
+	if len(rows) != 1 || rows[0].row.name != "foo" {
 		t.Errorf("walk did not continue past the engine load failure: rows=%+v", rows)
 	}
 }
@@ -262,7 +275,38 @@ func TestMapperSymbols_OutlineDeclineCountedSkipAndContinue(t *testing.T) {
 	if stats.outlineDecline != 1 {
 		t.Errorf("outlineDecline = %d, want 1", stats.outlineDecline)
 	}
-	if len(rows) != 1 || rows[0].name != "foo" {
+	if len(rows) != 1 || rows[0].row.name != "foo" {
 		t.Errorf("walk did not continue past the outline decline: rows=%+v", rows)
+	}
+}
+
+// TestMapperSymbols_CarrierByteRangeAndContainer is task C.3: mapperSym's
+// start/end/container fields (PR-D's call-attribution inputs) must be
+// populated from the outline symbol's own byte range and lexical container
+// chain, not left zero-valued — even though PR-C wires no consumer for them
+// yet (design.md decision 8: the carrier is introduced here so PR-D's
+// FactCalls attribution adds no signature churn to mapperSymbols).
+func TestMapperSymbols_CarrierByteRangeAndContainer(t *testing.T) {
+	dir := t.TempDir()
+	f := mapMapperFile(t, dir, "a.ts", "export class Outer {\n  method() {}\n}\n", "a")
+
+	rows, _ := mapperSymbols([]mapperFile{f})
+	outer := findMapperSym(t, rows, "Outer")
+	method := findMapperSym(t, rows, "method")
+
+	if outer.start >= outer.end {
+		t.Errorf("Outer carrier byte range invalid: start=%d end=%d", outer.start, outer.end)
+	}
+	if outer.container != "" {
+		t.Errorf("Outer.container = %q, want empty (top-level symbol)", outer.container)
+	}
+	if method.container != "Outer" {
+		t.Errorf("method.container = %q, want %q", method.container, "Outer")
+	}
+	// The method's range must fall within its enclosing class's range, or
+	// PR-D's containment attribution would misplace calls made inside it.
+	if method.start < outer.start || method.end > outer.end {
+		t.Errorf("method range [%d,%d) not contained within Outer's range [%d,%d)",
+			method.start, method.end, outer.start, outer.end)
 	}
 }
