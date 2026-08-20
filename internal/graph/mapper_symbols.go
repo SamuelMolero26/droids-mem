@@ -36,6 +36,11 @@ type mapperEngine struct {
 	// ExtractImports covers it — so this stays nil there, and mapperImports
 	// dispatches on language rather than on this field being set.
 	imports *gts.Query
+	// bindings is the companion local-name query (tsBindingsQuery), JS family
+	// only for the same reason. Kept separate from imports rather than folded
+	// into it: that query is corpus-validated for specifier recall, and adding
+	// captures to its patterns would change what each match carries.
+	bindings *gts.Query
 }
 
 // mapperEngines caches one mapperEngine per language NAME for the lifetime
@@ -67,6 +72,9 @@ func (e mapperEngines) get(entry *grammars.LangEntry) *mapperEngine {
 		if jsFamilyLanguages[entry.Name] {
 			if q, err := gts.NewQuery(tsImportsQuery, lang); err == nil {
 				eng.imports = q
+			}
+			if q, err := gts.NewQuery(tsBindingsQuery, lang); err == nil {
+				eng.bindings = q
 			}
 		}
 	}
