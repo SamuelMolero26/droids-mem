@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -135,8 +136,10 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	// a mapperFiles walk failure (root WalkDir error only) folds to zero
 	// mapper symbols rather than failing the whole build — the Go tier can
 	// still stand on its own.
+	var mapperFileList []mapperFile
 	var mapperSyms []mapperSym
 	if mFiles, _, mErr := mapperFiles(repo); mErr == nil {
+		mapperFileList = mFiles
 		mapperSyms, _ = mapperSymbols(mFiles)
 	}
 
@@ -234,6 +237,19 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 		impls = implementsEdges(pkgs, byPos)
 	}
 
+	// Mapper-tier call edges (PR-D): every mapper symbol's row.id is now
+	// final (set by the positional-ID loop above), so mapperEdges can build
+	// real (caller, callee) pairs. Merged via .add, never assigned outright —
+	// callEdges above may have already populated edges for the Go tier, and
+	// the two tiers' id spaces are disjoint by construction (D.7) so merging
+	// can never collide. fanoutCapped counts CALLSITES whose rung-5 candidate
+	// set exceeded fanoutCap (design D5/D6) — a build-level partiality fact,
+	// not a per-edge one, persisted below as meta.fanout_capped.
+	mapperEdgeSet, fanoutCapped := mapperEdges(mapperFileList, mapperSyms)
+	for k, m := range mapperEdgeSet {
+		edges.add(k, m)
+	}
+
 	// Empty-graph / suppression hint: meta.empty_reason distinguishes a
 	// build failure from two legitimate non-failure outcomes that would
 	// otherwise ship a symbol-less or Go-less graph silently.
@@ -275,7 +291,7 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 		}
 	}
 
-	return writeGraphDB(ctx, dbPath, repo, module, stampVal, symbols, edges, impls, carriedUnits, emptyReason)
+	return writeGraphDB(ctx, dbPath, repo, module, stampVal, symbols, edges, impls, carriedUnits, emptyReason, fanoutCapped)
 }
 
 // goSymbols extracts symbol rows from the type-checked Go packages,
@@ -688,8 +704,11 @@ func implementsEdges(pkgs []*packages.Package, byPos map[string]*symRow) map[[2]
 // newline-joined (package names never contain a newline, so no escaping is
 // needed). emptyReason is "no_indexable_symbols" when the build indexed zero
 // symbols (a healthy, not a failed, outcome), or "" otherwise — stored as
-// meta.empty_reason.
-func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string, emptyReason string) error {
+// meta.empty_reason. fanoutCapped is the count of mapper-tier CALLSITES
+// whose rung-5 candidate set exceeded fanoutCap (design D5/D6) — stored as
+// meta.fanout_capped, always written (even "0") so its absence never has to
+// be interpreted as "unknown" vs "none".
+func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string, emptyReason string, fanoutCapped int) error {
 	if err := ctx.Err(); err != nil {
 		return err // cancelled before work started
 	}
@@ -760,6 +779,7 @@ func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, sy
 			"stamp": stampVal, "repo": repo, "module": module, "indexed_at": nowUTC(),
 			"carried_units": strings.Join(carriedUnits, "\n"),
 			"empty_reason":  emptyReason,
+			"fanout_capped": strconv.Itoa(fanoutCapped),
 		} {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO meta (key, value) VALUES (?,?)`, k, v); err != nil {
 				return err
