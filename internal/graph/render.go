@@ -118,6 +118,14 @@ func writeFreshness(b *strings.Builder, f Freshness) {
 	if f.Rebuilding {
 		msgs = append(msgs, "REBUILDING (async rebuild in progress)")
 	}
+	// Only surfaced when NOT stale: a stale graph's failure state is already
+	// distinguishable via IndexError above, and showing this alongside a
+	// failure would misleadingly imply the CURRENT (failed) build is the one
+	// that was empty-but-healthy, when it is really a leftover from the last
+	// good build.
+	if !f.Stale && f.EmptyReason == "no_indexable_symbols" {
+		msgs = append(msgs, "no indexable symbols found")
+	}
 	if len(f.StaleUnits) > 0 {
 		// "[N of M]" already says the list is capped and how much it hides;
 		// those packages ride on carried-forward edges from the previous build.

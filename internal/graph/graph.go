@@ -110,6 +110,13 @@ type Freshness struct {
 	// true count even when the list is capped.
 	StaleUnits      []string `json:"stale_units,omitempty"`
 	StaleUnitsTotal int      `json:"stale_units_total,omitempty"`
+	// EmptyReason distinguishes a successful build that indexed zero symbols
+	// ("no_indexable_symbols") from a build failure, so a healthy-but-empty
+	// graph (e.g. a pure-TS repo in the PR-B-to-PR-C window, before mapper
+	// wiring lands) is never confused with Stale/IndexError. Only meaningful
+	// when the graph is NOT Stale — a stale graph's failure state is already
+	// distinguishable via IndexError (see writeFreshness).
+	EmptyReason string `json:"empty_reason,omitempty"`
 	// carriedUnits is the FULL list (unexported, never serialized) backing the
 	// per-symbol Carried flag (query.go) — membership can fall outside the
 	// capped StaleUnits list above.
@@ -777,7 +784,7 @@ func (m *Manager) open(path string) (*sql.DB, func(), Freshness, error) {
 	// through freshnessNow and its callers for a two-row read off an
 	// already-cached local handle. The cancellation that matters is on the
 	// walks and the build, both of which are context-bound.
-	rows, err := entry.db.Query(`SELECT key, value FROM meta WHERE key IN ('stamp','indexed_at','carried_units')`) //nolint:noctx // see above
+	rows, err := entry.db.Query(`SELECT key, value FROM meta WHERE key IN ('stamp','indexed_at','carried_units','empty_reason')`) //nolint:noctx // see above
 	if err != nil {
 		release()
 		return nil, noopRelease, Freshness{}, fmt.Errorf("read graph meta: %w", err)
@@ -801,6 +808,8 @@ func (m *Manager) open(path string) (*sql.DB, func(), Freshness, error) {
 				fresh.StaleUnitsTotal = len(units)
 				fresh.StaleUnits = units[:min(len(units), staleUnitsCap)]
 			}
+		case "empty_reason":
+			fresh.EmptyReason = v
 		}
 	}
 	if err := rows.Err(); err != nil {
