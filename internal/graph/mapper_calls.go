@@ -61,8 +61,7 @@ func collectMapperCalls(files []mapperFile) ([]mapperFileCalls, mapperStats) {
 			continue
 		}
 
-		parser := gts.NewParser(eng.lang) // fresh per file: Parser is not concurrency-safe
-		tree, err := parser.Parse(src)
+		tree, err := eng.parsers.Parse(src) // pooled: see mapperEngine.parsers
 		if err != nil {
 			stats.parseErr++
 			continue // unparsable file is skip-and-continue, not fatal
