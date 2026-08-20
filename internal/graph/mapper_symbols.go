@@ -31,6 +31,11 @@ type mapperEngine struct {
 	// incidental. nil when compilation fails — mapper_calls.go treats that
 	// as a per-file skip, the same policy outliner==nil already gets below.
 	calls *gts.FactProgram
+	// imports is the compiled module-specifier query for the JS family only
+	// (mapper_imports.go's tsImportsQuery). Python needs no query — gts's own
+	// ExtractImports covers it — so this stays nil there, and mapperImports
+	// dispatches on language rather than on this field being set.
+	imports *gts.Query
 }
 
 // mapperEngines caches one mapperEngine per language NAME for the lifetime
@@ -58,6 +63,11 @@ func (e mapperEngines) get(entry *grammars.LangEntry) *mapperEngine {
 		}
 		if calls, err := gts.NewFactProgram(lang, gts.FactCalls); err == nil {
 			eng.calls = calls
+		}
+		if jsFamilyLanguages[entry.Name] {
+			if q, err := gts.NewQuery(tsImportsQuery, lang); err == nil {
+				eng.imports = q
+			}
 		}
 	}
 	e[entry.Name] = eng

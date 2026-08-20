@@ -152,8 +152,9 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 		mapperSyms, mapperCarriedUnits = mapperCarry(dbPath, mFiles, freshMapperSyms)
 	}
 
-	// Mapper-tier imports (PR-F, Python only — see mapper_imports.go's package
-	// doc comment): independent of both mapper symbols and carry-forward, so it
+	// Mapper-tier imports (Python via gts.ExtractImports, the JS family via
+	// tsImportsQuery — see mapper_imports.go's package doc comment):
+	// independent of both mapper symbols and carry-forward, so it
 	// runs unconditionally off the same discovered file list. Best-effort, same
 	// policy as the symbols/calls passes: a failure here never fails the build.
 	mapperImportRows, _ := mapperImports(mapperFileList)
@@ -746,7 +747,7 @@ func implementsEdges(pkgs []*packages.Package, byPos map[string]*symRow) map[[2]
 // whose rung-5 candidate set exceeded fanoutCap (design D5/D6) — stored as
 // meta.fanout_capped, always written (even "0") so its absence never has to
 // be interpreted as "unknown" vs "none". imports is the mapper tier's
-// import rows (PR-F, mapper_imports.go — Python only in this slice), each
+// import rows (mapper_imports.go — Python and the JS family), each
 // carrying its own explicit precision (the imports.precision column has no
 // DDL default, unlike edges/implements).
 func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string, emptyReason string, fanoutCapped int, imports []importRow) error {
