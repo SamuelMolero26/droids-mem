@@ -152,6 +152,12 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 		mapperSyms, mapperCarriedUnits = mapperCarry(dbPath, mFiles, freshMapperSyms)
 	}
 
+	// Mapper-tier imports (PR-F, Python only — see mapper_imports.go's package
+	// doc comment): independent of both mapper symbols and carry-forward, so it
+	// runs unconditionally off the same discovered file list. Best-effort, same
+	// policy as the symbols/calls passes: a failure here never fails the build.
+	mapperImportRows, _ := mapperImports(mapperFileList)
+
 	// C.10: a repo with neither a usable Go package nor a single mapper-tier
 	// symbol has nothing to build from at all.
 	if len(pkgs) == 0 && len(mapperSyms) == 0 {
@@ -323,7 +329,7 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 		slices.Sort(carriedUnits)
 	}
 
-	return writeGraphDB(ctx, dbPath, repo, module, stampVal, symbols, edges, impls, carriedUnits, emptyReason, fanoutCapped)
+	return writeGraphDB(ctx, dbPath, repo, module, stampVal, symbols, edges, impls, carriedUnits, emptyReason, fanoutCapped, mapperImportRows)
 }
 
 // goSymbols extracts symbol rows from the type-checked Go packages,
@@ -739,8 +745,11 @@ func implementsEdges(pkgs []*packages.Package, byPos map[string]*symRow) map[[2]
 // meta.empty_reason. fanoutCapped is the count of mapper-tier CALLSITES
 // whose rung-5 candidate set exceeded fanoutCap (design D5/D6) — stored as
 // meta.fanout_capped, always written (even "0") so its absence never has to
-// be interpreted as "unknown" vs "none".
-func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string, emptyReason string, fanoutCapped int) error {
+// be interpreted as "unknown" vs "none". imports is the mapper tier's
+// import rows (PR-F, mapper_imports.go — Python only in this slice), each
+// carrying its own explicit precision (the imports.precision column has no
+// DDL default, unlike edges/implements).
+func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string, emptyReason string, fanoutCapped int, imports []importRow) error {
 	if err := ctx.Err(); err != nil {
 		return err // cancelled before work started
 	}
@@ -800,6 +809,16 @@ func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, sy
 		for e := range impls {
 			if _, err := implIns.ExecContext(ctx, e[0], e[1], "resolved"); err != nil {
 				return err
+			}
+		}
+		impIns, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO imports (importer_file, imported_module, precision) VALUES (?,?,?)`)
+		if err != nil {
+			return err
+		}
+		defer impIns.Close()
+		for _, r := range imports {
+			if _, err := impIns.ExecContext(ctx, r.importerFile, r.importedModule, r.precision); err != nil {
+				return fmt.Errorf("insert import %s -> %s: %w", r.importerFile, r.importedModule, err)
 			}
 		}
 		// FTS mirror for the search fallback; rowid == symbols.id for the join back.
