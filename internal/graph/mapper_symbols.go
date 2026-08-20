@@ -134,27 +134,49 @@ func mapperSymbols(files []mapperFile) ([]mapperSym, mapperStats) {
 			continue
 		}
 
-		tree, err := eng.parsers.Parse(src) // pooled: see mapperEngine.parsers
-		if err != nil {
-			stats.parseErr++
-			continue // unparsable file is skip-and-continue, not fatal
-		}
-
-		if eng.outliner == nil {
-			stats.outlineDecline++
-			continue
-		}
-		syms, report := eng.outliner.OutlineTree(tree)
-		if report.DeclineReason != "" {
-			stats.outlineDecline++
-			continue
-		}
-
-		for _, s := range syms {
-			out = append(out, buildMapperSymbols(s, "", f, src, tree, eng.lang, true, false)...)
-		}
+		out = append(out, outlineMapperFile(eng, f, src, &stats)...)
 	}
 	return out, stats
+}
+
+// outlineMapperFile is one file's parse-and-outline, extracted from
+// mapperSymbols' loop so the tree has a SCOPE rather than a loop iteration.
+// That is what makes `defer tree.Release()` correct here: it runs on every
+// exit path, including the two mid-way declines, where a release placed at
+// the bottom of the loop body would be skipped. A `defer` written directly
+// inside the loop would instead queue every release until the whole pass
+// returned, which returns no arena in time to be reused and so defeats the
+// point entirely.
+//
+// Releasing is safe because nothing this returns is arena-backed:
+// gts.OutlineSymbol is values throughout (Kind/Name/NodeType strings, Range/
+// NameRange as byte offsets and points, Children recursively the same), its
+// strings come from QueryCapture.Text which is a `string(source[a:b])` copy,
+// and every symRow field is derived from src — the caller's own buffer —
+// never from the tree. No *gts.Node escapes.
+func outlineMapperFile(eng *mapperEngine, f mapperFile, src []byte, stats *mapperStats) []mapperSym {
+	tree, err := eng.parsers.Parse(src) // pooled: see mapperEngine.parsers
+	if err != nil {
+		stats.parseErr++
+		return nil // unparsable file is skip-and-continue, not fatal
+	}
+	defer tree.Release()
+
+	if eng.outliner == nil {
+		stats.outlineDecline++
+		return nil
+	}
+	syms, report := eng.outliner.OutlineTree(tree)
+	if report.DeclineReason != "" {
+		stats.outlineDecline++
+		return nil
+	}
+
+	var out []mapperSym
+	for _, s := range syms {
+		out = append(out, buildMapperSymbols(s, "", f, src, tree, eng.lang, true, false)...)
+	}
+	return out
 }
 
 // buildMapperSymbols converts one gts.OutlineSymbol and its Children,

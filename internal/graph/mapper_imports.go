@@ -156,73 +156,90 @@ func mapperImports(files []mapperFile) ([]importRow, mapperImportBindings, mappe
 			continue
 		}
 
-		tree, err := eng.parsers.Parse(src) // pooled: see mapperEngine.parsers
-		if err != nil {
-			stats.parseErr++
-			continue // unparsable file is skip-and-continue, not fatal
-		}
-
-		if !isPython {
-			if eng.imports == nil {
-				stats.parseErr++ // the query failed to compile for this grammar
-				continue
-			}
-			for _, m := range eng.imports.Execute(tree) {
-				for _, c := range m.Captures {
-					if c.Name != "name" {
-						continue // @_fn is the require predicate's operand, not a module
-					}
-					if spec := c.Text(src); spec != "" {
-						out = append(out, importRow{
-							importerFile:   f.rel,
-							importedModule: spec,
-							precision:      mapperImportPrecision,
-						})
-					}
-				}
-			}
-			if eng.bindings != nil {
-				for _, m := range eng.bindings.Execute(tree) {
-					var name, spec string
-					for _, c := range m.Captures {
-						switch c.Name {
-						case "binding":
-							name = c.Text(src)
-						case "name":
-							spec = c.Text(src)
-						}
-					}
-					if name == "" || spec == "" {
-						continue
-					}
-					if bindings[f.rel] == nil {
-						bindings[f.rel] = map[string]string{}
-					}
-					bindings[f.rel][name] = spec
-				}
-			}
-			continue
-		}
-
-		for _, ref := range gts.ExtractImports(tree) {
-			// Kind is "import" or "from_import" for python (gts's own
-			// extractPythonImportNode never emits "package" — that Kind exists
-			// only for go/java's own package clause). Path is already the full
-			// dotted module text ("foo.bar" for `import foo.bar`; "foo.bar" for
-			// `from foo import bar` via joinPythonImportPath) — no assembly
-			// needed here.
-			if ref.Kind != "import" && ref.Kind != "from_import" {
-				continue
-			}
-			if ref.Path == "" {
-				continue // defensive: never write an empty imported_module
-			}
-			out = append(out, importRow{
-				importerFile:   f.rel,
-				importedModule: ref.Path,
-				precision:      mapperImportPrecision,
-			})
-		}
+		importsFromMapperFile(eng, f, src, isPython, &out, bindings, &stats)
 	}
 	return out, bindings, stats
+}
+
+// importsFromMapperFile is one file's parse-and-extract, extracted from
+// mapperImports' loop for the same reason outlineMapperFile is (see its
+// comment): it scopes the tree so `defer tree.Release()` runs on every exit
+// path without queueing behind the whole pass.
+//
+// This is the one mapper pass that touches *gts.Node directly —
+// QueryCapture.Node is a live pointer into the tree, and reading one after
+// Release would read a recycled arena. It is safe here because every capture
+// is consumed inside the loop that produced it: c.Text(src) returns
+// `string(src[a:b])`, a fresh copy taken from the CALLER's buffer, and no
+// capture, match, or node outlives this function. The Python branch is safe
+// for the plainer reason that gts.ImportRef is a pure value struct.
+func importsFromMapperFile(eng *mapperEngine, f mapperFile, src []byte, isPython bool, out *[]importRow, bindings mapperImportBindings, stats *mapperStats) {
+	tree, err := eng.parsers.Parse(src) // pooled: see mapperEngine.parsers
+	if err != nil {
+		stats.parseErr++
+		return // unparsable file is skip-and-continue, not fatal
+	}
+	defer tree.Release()
+
+	if !isPython {
+		if eng.imports == nil {
+			stats.parseErr++ // the query failed to compile for this grammar
+			return
+		}
+		for _, m := range eng.imports.Execute(tree) {
+			for _, c := range m.Captures {
+				if c.Name != "name" {
+					continue // @_fn is the require predicate's operand, not a module
+				}
+				if spec := c.Text(src); spec != "" {
+					*out = append(*out, importRow{
+						importerFile:   f.rel,
+						importedModule: spec,
+						precision:      mapperImportPrecision,
+					})
+				}
+			}
+		}
+		if eng.bindings != nil {
+			for _, m := range eng.bindings.Execute(tree) {
+				var name, spec string
+				for _, c := range m.Captures {
+					switch c.Name {
+					case "binding":
+						name = c.Text(src)
+					case "name":
+						spec = c.Text(src)
+					}
+				}
+				if name == "" || spec == "" {
+					continue
+				}
+				if bindings[f.rel] == nil {
+					bindings[f.rel] = map[string]string{}
+				}
+				bindings[f.rel][name] = spec
+			}
+		}
+		return
+	}
+
+	for _, ref := range gts.ExtractImports(tree) {
+		// Kind is "import" or "from_import" for python (gts's own
+		// extractPythonImportNode never emits "package" — that Kind exists
+		// only for go/java's own package clause). Path is already the full
+		// dotted module text ("foo.bar" for `import foo.bar`; "foo.bar" for
+		// `from foo import bar` via joinPythonImportPath) — no assembly
+		// needed here.
+		if ref.Kind != "import" && ref.Kind != "from_import" {
+			continue
+		}
+		if ref.Path == "" {
+			continue // defensive: never write an empty imported_module
+		}
+		*out = append(*out, importRow{
+			importerFile:   f.rel,
+			importedModule: ref.Path,
+			precision:      mapperImportPrecision,
+		})
+	}
 }
