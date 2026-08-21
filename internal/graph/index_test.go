@@ -339,3 +339,78 @@ func Broken() {
 		t.Errorf("edge zz.Near -> zz.Hub: got %d, want 1 (must be carried forward from the previous graph.db)", n)
 	}
 }
+
+// TestEdgeSetAdd_MergeSemantics pins task A.1: edgeMeta.add must merge each
+// field independently — dispatch: "static" wins over "interface"; precision:
+// "resolved" wins over "syntactic"; an empty incoming field (either one)
+// never overwrites an already-set field on the same key.
+func TestEdgeSetAdd_MergeSemantics(t *testing.T) {
+	key := [2]int64{1, 2}
+
+	tests := []struct {
+		name     string
+		seed     edgeMeta // absent from the set if both fields are ""
+		add      edgeMeta
+		wantMeta edgeMeta
+	}{
+		{
+			name:     "new key: values pass through unchanged",
+			add:      edgeMeta{dispatch: "static", precision: "resolved"},
+			wantMeta: edgeMeta{dispatch: "static", precision: "resolved"},
+		},
+		{
+			name:     "static wins over interface on dispatch merge",
+			seed:     edgeMeta{dispatch: "interface", precision: "resolved"},
+			add:      edgeMeta{dispatch: "static", precision: "resolved"},
+			wantMeta: edgeMeta{dispatch: "static", precision: "resolved"},
+		},
+		{
+			name:     "static already set: incoming interface does not overwrite",
+			seed:     edgeMeta{dispatch: "static", precision: "resolved"},
+			add:      edgeMeta{dispatch: "interface", precision: "resolved"},
+			wantMeta: edgeMeta{dispatch: "static", precision: "resolved"},
+		},
+		{
+			name:     "resolved wins over syntactic on precision merge",
+			seed:     edgeMeta{dispatch: "static", precision: "syntactic"},
+			add:      edgeMeta{dispatch: "static", precision: "resolved"},
+			wantMeta: edgeMeta{dispatch: "static", precision: "resolved"},
+		},
+		{
+			name:     "resolved already set: incoming syntactic does not overwrite",
+			seed:     edgeMeta{dispatch: "static", precision: "resolved"},
+			add:      edgeMeta{dispatch: "static", precision: "syntactic"},
+			wantMeta: edgeMeta{dispatch: "static", precision: "resolved"},
+		},
+		{
+			name:     "empty incoming dispatch never overwrites a set dispatch",
+			seed:     edgeMeta{dispatch: "interface", precision: "resolved"},
+			add:      edgeMeta{dispatch: "", precision: "resolved"},
+			wantMeta: edgeMeta{dispatch: "interface", precision: "resolved"},
+		},
+		{
+			name:     "empty incoming precision never overwrites a set precision",
+			seed:     edgeMeta{dispatch: "static", precision: "syntactic"},
+			add:      edgeMeta{dispatch: "static", precision: ""},
+			wantMeta: edgeMeta{dispatch: "static", precision: "syntactic"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			es := edgeSet{}
+			if tt.seed != (edgeMeta{}) {
+				es[key] = tt.seed
+			}
+			es.add(key, tt.add)
+
+			got, ok := es[key]
+			if !ok {
+				t.Fatalf("add() did not insert key %v into edgeSet", key)
+			}
+			if got != tt.wantMeta {
+				t.Errorf("es[%v] = %+v, want %+v", key, got, tt.wantMeta)
+			}
+		})
+	}
+}

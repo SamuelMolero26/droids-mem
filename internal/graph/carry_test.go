@@ -68,14 +68,14 @@ func TestCarriedEdges_CallerInBrokenPackageIsCarriedAndRemapped(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("got %d edges, want 1: %v", len(got), got)
 	}
-	if dispatch, ok := got[[2]int64{501, 502}]; !ok {
+	if meta, ok := got[[2]int64{501, 502}]; !ok {
 		t.Errorf("edge not remapped to the fresh ids: %v", got)
-	} else if dispatch != "static" {
+	} else if meta.dispatch != "static" {
 		// seedPrevGraph does not set a per-edge dispatch, so it falls back to
 		// the schema's DEFAULT 'static' — carriedEdges must preserve whatever
 		// value the previous graph.db actually stored (see
 		// TestCarriedEdges_PreservesRealDispatchLabel for the non-default case).
-		t.Errorf("carried edge dispatch = %q, want %q", dispatch, "static")
+		t.Errorf("carried edge dispatch = %q, want %q", meta.dispatch, "static")
 	}
 }
 
@@ -231,12 +231,12 @@ func TestCarriedEdges_PreservesRealDispatchLabel(t *testing.T) {
 	byQName := map[string]int64{"zz.Near": 501, "zz.Hub": 502}
 
 	got := carriedEdges(dbPath, broken, byQName)
-	dispatch, ok := got[[2]int64{501, 502}]
+	meta, ok := got[[2]int64{501, 502}]
 	if !ok {
 		t.Fatalf("edge not carried: %v", got)
 	}
-	if dispatch != "interface" {
-		t.Errorf("carried edge dispatch = %q, want the preserved real label %q", dispatch, "interface")
+	if meta.dispatch != "interface" {
+		t.Errorf("carried edge dispatch = %q, want the preserved real label %q", meta.dispatch, "interface")
 	}
 }
 

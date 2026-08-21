@@ -19,7 +19,7 @@ func TestWriteGraphDB_CancelledCtxDoesNotPublish(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if err := writeGraphDB(ctx, dbPath, "repo", "mod", "s", nil, nil, nil, nil); !errors.Is(err, context.Canceled) {
+	if err := writeGraphDB(ctx, dbPath, "repo", "mod", "s", nil, nil, nil, nil, "", 0, nil); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {

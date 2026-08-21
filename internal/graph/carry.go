@@ -35,10 +35,10 @@ import (
 // dispatch", which this contract swallows into zero carried edges rather
 // than a buildIndex error (task 5.6).
 //
-// Each carried edge preserves the REAL dispatch label read from the
-// previous graph.db (task 5.7) — the previous build's callEdges/carriedEdges
-// already computed it correctly; carrying it forward is strictly more
-// faithful than re-defaulting every carried edge to "static".
+// Each carried edge preserves the REAL dispatch AND precision labels read
+// from the previous graph.db (task 5.7, widened by task A.5) — the previous
+// build already computed them correctly; carrying them forward is strictly
+// more faithful than re-defaulting every carried edge to "static"/"resolved".
 func carriedEdges(dbPath string, brokenPkgs map[string]bool, byQName map[string]int64) edgeSet {
 	if _, err := os.Stat(dbPath); err != nil {
 		return nil // no previous graph.db (first-ever build on a broken tree)
@@ -50,7 +50,7 @@ func carriedEdges(dbPath string, brokenPkgs map[string]bool, byQName map[string]
 	}
 	defer db.Close()
 
-	rows, err := db.Query(`SELECT s1.qname, s1.package, s2.qname, e.dispatch
+	rows, err := db.Query(`SELECT s1.qname, s1.package, s2.qname, e.dispatch, e.precision
 		FROM edges e
 		JOIN symbols s1 ON s1.id = e.caller
 		JOIN symbols s2 ON s2.id = e.callee`)
@@ -61,8 +61,8 @@ func carriedEdges(dbPath string, brokenPkgs map[string]bool, byQName map[string]
 
 	edges := edgeSet{}
 	for rows.Next() {
-		var callerQName, callerPkg, calleeQName, dispatch string
-		if err := rows.Scan(&callerQName, &callerPkg, &calleeQName, &dispatch); err != nil {
+		var callerQName, callerPkg, calleeQName, dispatch, precision string
+		if err := rows.Scan(&callerQName, &callerPkg, &calleeQName, &dispatch, &precision); err != nil {
 			return nil
 		}
 		if !brokenPkgs[callerPkg] {
@@ -76,7 +76,7 @@ func carriedEdges(dbPath string, brokenPkgs map[string]bool, byQName map[string]
 		if !ok {
 			continue // callee symbol no longer exists in the fresh build
 		}
-		edges[[2]int64{callerID, calleeID}] = dispatch
+		edges[[2]int64{callerID, calleeID}] = edgeMeta{dispatch: dispatch, precision: precision}
 	}
 	if err := rows.Err(); err != nil {
 		return nil

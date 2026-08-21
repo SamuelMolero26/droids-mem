@@ -8,6 +8,37 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **The code graph now covers TypeScript, TSX, JavaScript and Python, not just
+  Go.** `graph_symbol` and `graph_package` answer for those languages through a
+  new mapper tier built on tree-sitter, running alongside the Go tier rather
+  than replacing it. The two never mix: no edge joins a Go symbol to a mapper
+  one. What the new tier costs in precision is stated rather than hidden:
+  - Every symbol response carries `precision` — `"resolved"` for a Go answer
+    backed by the type checker, `"syntactic"` for a mapper answer resolved by
+    name. A syntactic answer says so in its hint as well.
+  - Mapper call edges come from a resolution ladder that narrows candidates by
+    receiver arity, enclosing class, imported binding, defining file, then
+    package. A rung that matches nothing falls through *without* narrowing, so
+    a callsite can never resolve to zero candidates — the graph may report a
+    caller that cannot fire, but never misses one that can.
+  - A callsite whose repo-wide fallback exceeds the fan-out cap is labelled in
+    `meta.fanout_capped` alongside its true pre-cap count, never silently
+    truncated.
+  - A mapper file that stops parsing cleanly carries its previous build's
+    symbols and edges forward instead of dropping out of the graph, the same
+    way a Go package that stops type-checking already did.
+  - The `imports` table records module specifiers for the JS family and
+    Python, each with its own explicit precision.
+- **Building a mapper-language graph got roughly 14x faster.** A 200-file
+  TypeScript tree went from 4.6 s and 4.8 GiB of allocation to 290 ms and
+  211 MiB (-93.7% time, -95.7% bytes, -95.4% allocations). Two causes, both
+  found by profiling: a tree-sitter parser was constructed per file, and each
+  one rebuilds its parse tables because they are cached on the parser rather
+  than on the shared language; and parsed trees were never released, so every
+  parse allocated fresh node arenas instead of reusing the pooled ones. The
+  effect is user-visible as wait time — an agent's first `graph_symbol` call
+  on a large TypeScript repo is what pays for a build.
+
 - **Code-graph answers now say how much to trust them.** Three signals, all
   response-level rather than repeated per row:
   - `callers_in_tests` splits the caller count, so "89 callers" reads as
