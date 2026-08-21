@@ -16,12 +16,24 @@ import (
 // mapperEngine bundles the per-language state needed to parse and outline a
 // mapper-tier file. gts.Parser is deliberately NOT part of it: v0.49.0
 // documents Parser as not safe for concurrent use, and it carries
-// reuse/incremental state bound to a prior document, so a fresh
-// gts.NewParser(lang) is created per file (see mapperSymbols). Query.Exec is
+// reuse/incremental state bound to a prior document. Query.Exec is
 // documented concurrency-safe and OutlineTree is documented read-only, so
 // reusing one Outliner per language across the whole run is sound.
 type mapperEngine struct {
-	lang     *gts.Language
+	lang *gts.Language
+	// parsers replaces the per-file gts.NewParser(lang) every pass used to
+	// do. A Parser builds its parse tables (buildSmallTokenLookup and
+	// friends) lazily and caches them ON THE PARSER, not on the shared
+	// Language — so constructing one per file rebuilt every table per file.
+	// Profiling a 200-file TS tree put gts.NewParser at 50.6% of all bytes
+	// allocated in a mapper build, ~6.4 MB per file to parse ~500 bytes of
+	// source.
+	//
+	// gts.ParserPool is the library's own answer, and it addresses both
+	// halves of the reason the per-file construction existed: it is
+	// documented concurrency-safe, and it resets mutable parser state on
+	// checkout so no reuse/incremental state bleeds from the previous file.
+	parsers  *gts.ParserPool
 	outliner *gts.Outliner
 	// calls is the compiled FactCalls extractor for lang, added here rather
 	// than as a parallel cache (design D3): FactProgram.Extract rejects a
@@ -63,6 +75,7 @@ func (e mapperEngines) get(entry *grammars.LangEntry) *mapperEngine {
 	eng := &mapperEngine{}
 	if lang := entry.Language(); lang != nil {
 		eng.lang = lang
+		eng.parsers = gts.NewParserPool(lang)
 		if outliner, err := gts.NewOutliner(lang, grammars.ResolveTagsQuery(*entry)); err == nil {
 			eng.outliner = outliner
 		}
@@ -121,28 +134,49 @@ func mapperSymbols(files []mapperFile) ([]mapperSym, mapperStats) {
 			continue
 		}
 
-		parser := gts.NewParser(eng.lang) // fresh per file: Parser is not concurrency-safe and carries reuse state
-		tree, err := parser.Parse(src)
-		if err != nil {
-			stats.parseErr++
-			continue // unparsable file is skip-and-continue, not fatal
-		}
-
-		if eng.outliner == nil {
-			stats.outlineDecline++
-			continue
-		}
-		syms, report := eng.outliner.OutlineTree(tree)
-		if report.DeclineReason != "" {
-			stats.outlineDecline++
-			continue
-		}
-
-		for _, s := range syms {
-			out = append(out, buildMapperSymbols(s, "", f, src, tree, eng.lang, true, false)...)
-		}
+		out = append(out, outlineMapperFile(eng, f, src, &stats)...)
 	}
 	return out, stats
+}
+
+// outlineMapperFile is one file's parse-and-outline, extracted from
+// mapperSymbols' loop so the tree has a SCOPE rather than a loop iteration.
+// That is what makes `defer tree.Release()` correct here: it runs on every
+// exit path, including the two mid-way declines, where a release placed at
+// the bottom of the loop body would be skipped. A `defer` written directly
+// inside the loop would instead queue every release until the whole pass
+// returned, which returns no arena in time to be reused and so defeats the
+// point entirely.
+//
+// Releasing is safe because nothing this returns is arena-backed:
+// gts.OutlineSymbol is values throughout (Kind/Name/NodeType strings, Range/
+// NameRange as byte offsets and points, Children recursively the same), its
+// strings come from QueryCapture.Text which is a `string(source[a:b])` copy,
+// and every symRow field is derived from src — the caller's own buffer —
+// never from the tree. No *gts.Node escapes.
+func outlineMapperFile(eng *mapperEngine, f mapperFile, src []byte, stats *mapperStats) []mapperSym {
+	tree, err := eng.parsers.Parse(src) // pooled: see mapperEngine.parsers
+	if err != nil {
+		stats.parseErr++
+		return nil // unparsable file is skip-and-continue, not fatal
+	}
+	defer tree.Release()
+
+	if eng.outliner == nil {
+		stats.outlineDecline++
+		return nil
+	}
+	syms, report := eng.outliner.OutlineTree(tree)
+	if report.DeclineReason != "" {
+		stats.outlineDecline++
+		return nil
+	}
+
+	var out []mapperSym
+	for _, s := range syms {
+		out = append(out, buildMapperSymbols(s, "", f, src, tree, eng.lang, true, false)...)
+	}
+	return out
 }
 
 // buildMapperSymbols converts one gts.OutlineSymbol and its Children,
