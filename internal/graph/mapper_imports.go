@@ -6,8 +6,13 @@
 // support upstream, so it goes through tsImportsQuery below.
 //
 // Every row this file writes carries the module SPECIFIER exactly as written
-// in source. Resolving a specifier to a repo file, and the local binding
-// names an import introduces, are PR-G2 — deliberately not attempted here.
+// in source; resolving one to a repo file is mapper_calls.go's job, next to
+// the ladder rung that consumes it.
+//
+// Alongside the rows, the JS family also yields BINDINGS: the local names an
+// import introduces in the importing file. Those never persist — the imports
+// table has no column for them — they exist only to feed ladder rung 2a
+// within the same build.
 package graph
 
 import (
@@ -76,6 +81,44 @@ const tsImportsQuery = `
 (#eq? @_fn "require")
 `
 
+// tsBindingsQuery is a SECOND query over the same tree, kept separate from
+// tsImportsQuery rather than folded into it: that one is validated against
+// real corpora for specifier recall, and adding captures to its patterns
+// would change what each match carries. Each pattern here binds one local
+// name to the specifier it came from, in the same match.
+//
+// The `!alias` anchor on the last pattern is load-bearing. Without it,
+// `import { Foo as Bar }` records BOTH Bar (via the alias pattern) and Foo
+// (via this one) — but Foo is not in scope in the importing file at all.
+// Rung 2a would then fire on a receiver named Foo that means something else,
+// narrow to the wrong file, and STOP the ladder: a missed caller, which the
+// over-approximation contract does not permit.
+//
+// A side-effect import (`import "./x"`) binds nothing and matches no pattern
+// here by construction — it has no import_clause.
+const tsBindingsQuery = `
+(import_statement
+  (import_clause (identifier) @binding)
+  source: (string (string_fragment) @name)) @binding.default
+
+(import_statement
+  (import_clause (namespace_import (identifier) @binding))
+  source: (string (string_fragment) @name)) @binding.namespace
+
+(import_statement
+  (import_clause (named_imports (import_specifier alias: (identifier) @binding)))
+  source: (string (string_fragment) @name)) @binding.alias
+
+(import_statement
+  (import_clause (named_imports (import_specifier !alias name: (identifier) @binding)))
+  source: (string (string_fragment) @name)) @binding.named
+`
+
+// mapperImportBindings maps a repo-relative importer file to the local names
+// its imports introduce, each pointing at the module specifier it came from:
+// file -> binding name -> specifier. Build-time only, never persisted.
+type mapperImportBindings map[string]map[string]string
+
 // mapperImports parses every Python and JS-family file in files an EXTRA
 // time (mirroring mapperSymbols/collectMapperCalls/mapperCarry's own
 // established policy: gts.Parser is not safe to share across passes, and no
@@ -84,10 +127,11 @@ const tsImportsQuery = `
 // Per-file failures (unreadable file, unparseable source) are
 // skip-and-continue, mirroring mapperSymbols/collectMapperCalls' own policy
 // exactly.
-func mapperImports(files []mapperFile) ([]importRow, mapperStats) {
+func mapperImports(files []mapperFile) ([]importRow, mapperImportBindings, mapperStats) {
 	var stats mapperStats
 	engines := mapperEngines{}
 	var out []importRow
+	bindings := mapperImportBindings{}
 
 	for _, f := range files {
 		if f.entry == nil {
@@ -138,6 +182,26 @@ func mapperImports(files []mapperFile) ([]importRow, mapperStats) {
 					}
 				}
 			}
+			if eng.bindings != nil {
+				for _, m := range eng.bindings.Execute(tree) {
+					var name, spec string
+					for _, c := range m.Captures {
+						switch c.Name {
+						case "binding":
+							name = c.Text(src)
+						case "name":
+							spec = c.Text(src)
+						}
+					}
+					if name == "" || spec == "" {
+						continue
+					}
+					if bindings[f.rel] == nil {
+						bindings[f.rel] = map[string]string{}
+					}
+					bindings[f.rel][name] = spec
+				}
+			}
 			continue
 		}
 
@@ -161,5 +225,5 @@ func mapperImports(files []mapperFile) ([]importRow, mapperStats) {
 			})
 		}
 	}
-	return out, stats
+	return out, bindings, stats
 }

@@ -23,7 +23,7 @@ func TestPythonImports_SimpleImportProducesRowWithExplicitPrecision(t *testing.T
 	dir := t.TempDir()
 	f := mapMapperFile(t, dir, "a.py", "import foo.bar\n", "a")
 
-	rows, stats := mapperImports([]mapperFile{f})
+	rows, _, stats := mapperImports([]mapperFile{f})
 	if stats.parseErr != 0 || stats.readErr != 0 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
@@ -54,7 +54,7 @@ func TestTSImports_DefaultImportProducesSpecifierRow(t *testing.T) {
 	dir := t.TempDir()
 	f := mapMapperFile(t, dir, "a.ts", "import Baz from \"./y\";\n", "a")
 
-	rows, stats := mapperImports([]mapperFile{f})
+	rows, _, stats := mapperImports([]mapperFile{f})
 	if stats.parseErr != 0 || stats.readErr != 0 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
@@ -82,7 +82,7 @@ func TestJSImports_RequireCallProducesSpecifierRow(t *testing.T) {
 	dir := t.TempDir()
 	f := mapMapperFile(t, dir, "a.js", "const cjs = require(\"./g\");\n", "a")
 
-	rows, stats := mapperImports([]mapperFile{f})
+	rows, _, stats := mapperImports([]mapperFile{f})
 	if stats.parseErr != 0 || stats.readErr != 0 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
@@ -191,7 +191,7 @@ notRequire("./NOT-AN-IMPORT");
 console.log("./ALSO-NOT");
 `, "a")
 
-	rows, stats := mapperImports([]mapperFile{f})
+	rows, _, stats := mapperImports([]mapperFile{f})
 	if stats.parseErr != 0 || stats.readErr != 0 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
@@ -208,5 +208,72 @@ console.log("./ALSO-NOT");
 		if got[never] {
 			t.Errorf("over-captured %q as an import: the require() #eq? predicate is not narrowing", never)
 		}
+	}
+}
+
+// ---------- G2.1 / G2.2: binding names ----------
+
+// TestTSBindings_AliasedNamedImportRecordsLocalNameOnly is G2.1. For
+// `import { Foo as Bar } from "./x"`, the name in scope in this file is Bar;
+// Foo is NOT bound here at all. Recording Foo would let rung 2a fire on a
+// receiver named Foo that actually refers to something else entirely, narrow
+// the candidate set to the wrong file, and STOP the ladder — a miss, which
+// the over-approximation contract does not permit. So the absence of Foo is
+// the load-bearing assertion here, not an incidental detail.
+func TestTSBindings_AliasedNamedImportRecordsLocalNameOnly(t *testing.T) {
+	dir := t.TempDir()
+	f := mapMapperFile(t, dir, "a.ts", "import { Foo as Bar, Plain } from \"./x\";\n", "a")
+
+	_, bindings, stats := mapperImports([]mapperFile{f})
+	if stats.parseErr != 0 || stats.readErr != 0 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+	got := bindings[f.rel]
+	if got["Bar"] != "./x" {
+		t.Errorf("bindings[%q][\"Bar\"] = %q, want %q", f.rel, got["Bar"], "./x")
+	}
+	if got["Plain"] != "./x" {
+		t.Errorf("bindings[%q][\"Plain\"] = %q, want %q", f.rel, got["Plain"], "./x")
+	}
+	if _, ok := got["Foo"]; ok {
+		t.Errorf("recorded %q as a binding, but only the alias %q is in scope: %v", "Foo", "Bar", got)
+	}
+}
+
+// TestTSBindings_DefaultAndNamespaceImports is G2.2: the default-import form
+// (`import Baz from "./y"`) and the namespace form (`import * as ns from
+// "./c"`) each bind exactly one local name.
+func TestTSBindings_DefaultAndNamespaceImports(t *testing.T) {
+	dir := t.TempDir()
+	f := mapMapperFile(t, dir, "a.ts", "import Baz from \"./y\";\nimport * as ns from \"./c\";\n", "a")
+
+	_, bindings, _ := mapperImports([]mapperFile{f})
+	got := bindings[f.rel]
+	if got["Baz"] != "./y" {
+		t.Errorf("bindings[\"Baz\"] = %q, want %q", got["Baz"], "./y")
+	}
+	if got["ns"] != "./c" {
+		t.Errorf("bindings[\"ns\"] = %q, want %q", got["ns"], "./c")
+	}
+}
+
+// TestBindings_SideEffectImportAndPythonBindNothing pins the two forms that
+// must produce no binding at all: a side-effect import introduces no local
+// name, and Python is not wired for bindings (rung 2a is JS-family only —
+// Python still gets its import ROWS via gts.ExtractImports).
+func TestBindings_SideEffectImportAndPythonBindNothing(t *testing.T) {
+	dir := t.TempDir()
+	ts := mapMapperFile(t, dir, "a.ts", "import \"./side-effect\";\n", "a")
+	py := mapMapperFile(t, dir, "b.py", "import foo.bar\n", "b")
+
+	rows, bindings, _ := mapperImports([]mapperFile{ts, py})
+	if len(bindings[ts.rel]) != 0 {
+		t.Errorf("side-effect import bound %v, want nothing", bindings[ts.rel])
+	}
+	if len(bindings[py.rel]) != 0 {
+		t.Errorf("python bound %v, want nothing", bindings[py.rel])
+	}
+	if len(rows) != 2 {
+		t.Errorf("len(rows) = %d, want 2 (both files still produce import ROWS)", len(rows))
 	}
 }
