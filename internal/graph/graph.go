@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -110,6 +111,19 @@ type Freshness struct {
 	// true count even when the list is capped.
 	StaleUnits      []string `json:"stale_units,omitempty"`
 	StaleUnitsTotal int      `json:"stale_units_total,omitempty"`
+	// EmptyReason distinguishes two legitimate non-failure outcomes from a
+	// build failure, so neither is ever confused with Stale/IndexError:
+	// "no_indexable_symbols" (a successful build that still indexed zero
+	// symbols) and "go_tier_suppressed_majority_broken" (mapper symbols
+	// exist, but the majority-broken cap dropped the Go tier — C.11). Only
+	// meaningful when the graph is NOT Stale — a stale graph's failure state
+	// is already distinguishable via IndexError (see writeFreshness).
+	EmptyReason string `json:"empty_reason,omitempty"`
+	// FanoutCapped is the count of mapper-tier CALLSITES whose rung-5
+	// candidate set exceeded fanoutCap (design D5/D6) — a build-level
+	// partiality fact, not a per-edge one. Zero (the JSON-omitted default)
+	// means no callsite in this build hit the cap.
+	FanoutCapped int `json:"fanout_capped,omitempty"`
 	// carriedUnits is the FULL list (unexported, never serialized) backing the
 	// per-symbol Carried flag (query.go) — membership can fall outside the
 	// capped StaleUnits list above.
@@ -777,7 +791,7 @@ func (m *Manager) open(path string) (*sql.DB, func(), Freshness, error) {
 	// through freshnessNow and its callers for a two-row read off an
 	// already-cached local handle. The cancellation that matters is on the
 	// walks and the build, both of which are context-bound.
-	rows, err := entry.db.Query(`SELECT key, value FROM meta WHERE key IN ('stamp','indexed_at','carried_units')`) //nolint:noctx // see above
+	rows, err := entry.db.Query(`SELECT key, value FROM meta WHERE key IN ('stamp','indexed_at','carried_units','empty_reason','fanout_capped')`) //nolint:noctx // see above
 	if err != nil {
 		release()
 		return nil, noopRelease, Freshness{}, fmt.Errorf("read graph meta: %w", err)
@@ -800,6 +814,15 @@ func (m *Manager) open(path string) (*sql.DB, func(), Freshness, error) {
 				fresh.carriedUnits = units
 				fresh.StaleUnitsTotal = len(units)
 				fresh.StaleUnits = units[:min(len(units), staleUnitsCap)]
+			}
+		case "empty_reason":
+			fresh.EmptyReason = v
+		case "fanout_capped":
+			// Best-effort: an unparsable value (e.g. a pre-PR-D graph.db with no
+			// such row, v=="") behaves the same as "not truncated" — 0 — rather
+			// than an error, since a missing/empty row is not a build failure.
+			if n, err := strconv.Atoi(v); err == nil {
+				fresh.FanoutCapped = n
 			}
 		}
 	}

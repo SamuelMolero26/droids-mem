@@ -796,6 +796,16 @@ func TestBuildAsync_ForeignStateWithSameStampIsIgnored(t *testing.T) {
 // Do not regenerate the golden. Its value is entirely in having been captured
 // before the change it guards — a regenerated golden would pin whatever the
 // current code does and prove nothing.
+//
+// Task A.3 (edgeSet widening to {dispatch, precision}) extends this test with
+// a second, independent assertion: every edge's precision column must equal
+// "resolved" — 100% of Go-sourced edges carry the resolved tier, per the
+// code-graph-build spec's "Go Edge Set Parity Under Precision Widening"
+// requirement. This assertion depends on testdata/testmod staying Go-only
+// (verified today: go.mod, main.go, zz/zz.go, no .ts/.py/etc.) — the golden
+// query below is unfiltered `FROM edges`, so a mapper-language file added to
+// this fixture would inject "syntactic" edges into both assertions and break
+// this pin. Do not add one; see the constraint in spec.md.
 func TestCallEdges_MatchesCleanGoldenEdgeSet(t *testing.T) {
 	repo, err := filepath.Abs("testdata/testmod")
 	if err != nil {
@@ -849,6 +859,26 @@ func TestCallEdges_MatchesCleanGoldenEdgeSet(t *testing.T) {
 
 	if !slices.Equal(got, want) {
 		t.Errorf("edge set drifted from testdata/edges_clean.golden:\n got:  %v\n want: %v", got, want)
+	}
+
+	precRows, err := conn.Query(`SELECT DISTINCT precision FROM edges`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer precRows.Close()
+	var precisions []string
+	for precRows.Next() {
+		var p string
+		if err := precRows.Scan(&p); err != nil {
+			t.Fatal(err)
+		}
+		precisions = append(precisions, p)
+	}
+	if err := precRows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"resolved"}; !slices.Equal(precisions, want) {
+		t.Errorf("edges.precision on a Go-only tree = %v, want %v (every Go-sourced edge must be resolved)", precisions, want)
 	}
 }
 

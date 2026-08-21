@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 	"unicode"
@@ -58,6 +59,20 @@ const (
 	// OUT-edges cannot be rediscovered, while its symbols come from the AST
 	// and its in-edges resolve through the types-only stub.
 	carriedHint = "this symbol's package did not type-check, so its callees are carried forward from the previous build and may be out of date; the symbol, its signature, and its callers are freshly analyzed"
+	// syntacticHint tells the agent the numbers/edges just reported are
+	// mapper-tier: name+containment heuristics (design D4), not type-checked
+	// call resolution. Appended after carriedHint/rebuildingHint and before
+	// the later truncatedHint append — see the ordered chain comment in
+	// Symbol() (design D5/D7). Attached only when Precision == "syntactic";
+	// a "resolved" (Go) answer needs no caveat.
+	syntacticHint = "this symbol is mapper-tier (non-Go): its callers/callees are syntactically resolved from names and lexical containment, not type-checked — treat an ambiguous call site's candidates as approximate, not exact"
+	// precisionResolved/precisionSyntactic name SymbolResponse.Precision's two
+	// values (design D7). The rest of the mapper tier (edgeSet, mapper_calls.go)
+	// uses the same two values as bare string literals; named here because
+	// query.go's derivation and weakestPrecision below compare against them
+	// repeatedly.
+	precisionResolved  = "resolved"
+	precisionSyntactic = "syntactic"
 )
 
 // maxNeighbors caps neighbors per direction across all depths. A var, not a
@@ -125,6 +140,16 @@ type SymbolResponse struct {
 	// build's carried_units set) — a partial-index honesty signal distinct
 	// from Freshness.Stale (which a successful partial build does not set).
 	Carried bool `json:"carried,omitempty"`
+	// Precision names the queried symbol's own tier: "resolved" (Go,
+	// type-checked) or "syntactic" (mapper: FactCalls + name/containment
+	// heuristics, never type-checked). Because the two edge subgraphs are
+	// disjoint (D.7 — TestEdges_NeverJoinGoSymbolToMapperSymbol), this one
+	// value also describes every caller/callee counted below; there is no
+	// separate per-caller-class breakdown (design D7, spec "Mixed
+	// transitive_callers Count with Precision Label"). Set whenever Symbol
+	// is non-nil; absent on a search-menu/ambiguous response, where there is
+	// no single symbol whose tier could be named.
+	Precision string `json:"precision,omitempty"`
 	// TransitiveCallers is the blast size: distinct symbols that transitively
 	// call this one (up-closure, capped). A pointer so 0 ("safe to change,
 	// nothing calls it") is distinct from absent (a search-menu response, no
@@ -150,6 +175,46 @@ func addHint(h, extra string) string {
 		return extra
 	}
 	return h + "; " + extra
+}
+
+// mapperFileExtensions is the syntactic (mapper) tier's extension set,
+// mirroring mapperLanguages (mapper.go) but keyed by extension instead of
+// grammar name — the only lookup Precision derivation needs. Any extension
+// outside this set (in practice, only ".go") is the resolved tier.
+var mapperFileExtensions = map[string]bool{
+	".ts": true, ".tsx": true, ".js": true, ".jsx": true, ".mjs": true, ".py": true,
+}
+
+// symbolPrecision derives a symbol's precision class from its OWN file
+// extension — zero extra SQL (design D7). Because the two edge subgraphs are
+// disjoint (D.7, pinned by TestEdges_NeverJoinGoSymbolToMapperSymbol), a
+// symbol's entire transitive closure lives in its own tier, so the queried
+// symbol's own extension is enough to label the whole answer; no per-edge or
+// per-caller precision read is needed.
+func symbolPrecision(file string) string {
+	if mapperFileExtensions[filepath.Ext(file)] {
+		return precisionSyntactic
+	}
+	return precisionResolved
+}
+
+// weakestPrecision returns the weakest precision present in precisions
+// ("syntactic" beats "resolved" — spec "Mixed transitive_callers Count with
+// Precision Label"). Never called with genuinely mixed input in production:
+// tier disjointness means a real symbol's callers are always single-tier, so
+// Symbol() uses the cheap symbolPrecision(file) shortcut instead. This
+// function pins the general "weakest wins" semantic that shortcut relies on,
+// and is the documented fallback (D7's guard note) if the disjointness
+// invariant is ever disproved: replace the shortcut call site with a real
+// per-edge `SELECT precision FROM edges WHERE ...` fed through this same
+// function. An empty/all-resolved input returns "resolved".
+func weakestPrecision(precisions []string) string {
+	for _, p := range precisions {
+		if p == precisionSyntactic {
+			return precisionSyntactic
+		}
+	}
+	return precisionResolved
 }
 
 // Symbol resolves and answers a symbol-anchored query against repo's graph.
@@ -200,6 +265,7 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	}
 	resp.Symbol = &info
 	resp.Carried = slices.Contains(fresh.carriedUnits, info.Package)
+	resp.Precision = symbolPrecision(info.File)
 
 	var blastHint string // see blastTypeHint/blastRefHint above for the why
 	switch info.Kind {
@@ -258,6 +324,9 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	}
 	if fresh.Rebuilding {
 		resp.Hint = addHint(resp.Hint, rebuildingHint)
+	}
+	if resp.Precision == precisionSyntactic {
+		resp.Hint = addHint(resp.Hint, syntacticHint)
 	}
 
 	depth := min(max(req.Depth, 1), maxDepth)
