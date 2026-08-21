@@ -61,24 +61,34 @@ func collectMapperCalls(files []mapperFile) ([]mapperFileCalls, mapperStats) {
 			continue
 		}
 
-		parser := gts.NewParser(eng.lang) // fresh per file: Parser is not concurrency-safe
-		tree, err := parser.Parse(src)
-		if err != nil {
-			stats.parseErr++
-			continue // unparsable file is skip-and-continue, not fatal
+		if refs := extractMapperCalls(eng, src, &stats); len(refs) > 0 {
+			out = append(out, mapperFileCalls{file: f.rel, lang: f.entry.Name, refs: refs})
 		}
-
-		if eng.calls == nil {
-			stats.outlineDecline++ // FactProgram failed to compile for this language
-			continue
-		}
-		facts := eng.calls.Extract(tree)
-		if len(facts.Calls) == 0 {
-			continue
-		}
-		out = append(out, mapperFileCalls{file: f.rel, lang: f.entry.Name, refs: facts.Calls})
 	}
 	return out, stats
+}
+
+// extractMapperCalls is one file's parse-and-extract, extracted from
+// collectMapperCalls' loop for the same reason outlineMapperFile is (see its
+// comment): it gives the tree a scope, so `defer tree.Release()` returns its
+// borrowed arenas on every exit path without queueing behind the whole pass.
+//
+// Releasing is safe because gts.CallRef is a pure value struct — strings and
+// uint32 byte offsets, no *gts.Node — so the returned slice holds nothing
+// that points into the tree.
+func extractMapperCalls(eng *mapperEngine, src []byte, stats *mapperStats) []gts.CallRef {
+	tree, err := eng.parsers.Parse(src) // pooled: see mapperEngine.parsers
+	if err != nil {
+		stats.parseErr++
+		return nil // unparsable file is skip-and-continue, not fatal
+	}
+	defer tree.Release()
+
+	if eng.calls == nil {
+		stats.outlineDecline++ // FactProgram failed to compile for this language
+		return nil
+	}
+	return eng.calls.Extract(tree).Calls
 }
 
 // mapperCallsite is one attributed call, in exactly the shape the ladder

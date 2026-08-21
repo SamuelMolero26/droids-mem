@@ -12,8 +12,6 @@ import (
 	"os"
 	"slices"
 
-	gts "github.com/odvcencio/gotreesitter"
-
 	_ "modernc.org/sqlite"
 )
 
@@ -33,9 +31,10 @@ func mapperCarryTrigger(hasError bool, defCount, prevDefCount int) bool {
 // mapperFileHasError re-parses f a THIRD time — mapper_symbols.go's outline
 // pass is the first, mapper_calls.go's collectMapperCalls FactCalls pass is
 // the second — purely to read whether the resulting tree contains any ERROR
-// node. mapperSym's carrier does not retain *gts.Tree (design.md decision 8)
-// and gts.Parser is not safe to share across passes, the same constraint
-// collectMapperCalls' own second pass already documents. Best-effort: any
+// node. mapperSym's carrier does not retain *gts.Tree (design.md decision 8),
+// so no prior pass has a tree to hand over. The parse itself is pooled per
+// language (mapperEngine.parsers), so the repeat costs a parse, not a parser
+// construction. Best-effort: any
 // read/language/parse failure reports false — carry-forward is a positive
 // trigger, never the default for a file this build cannot even see.
 func mapperFileHasError(engines mapperEngines, f mapperFile) bool {
@@ -50,11 +49,19 @@ func mapperFileHasError(engines mapperEngines, f mapperFile) bool {
 	if eng.lang == nil {
 		return false
 	}
-	parser := gts.NewParser(eng.lang) // fresh per file: Parser is not concurrency-safe
-	tree, err := parser.Parse(src)
+	tree, err := eng.parsers.Parse(src) // pooled: see mapperEngine.parsers
 	if err != nil {
 		return false
 	}
+	// A parsed tree borrows node arenas from a package-level pool, and the
+	// pool only refills on Release — without it every parse allocates fresh
+	// arenas, which profiling showed as ~87% of this pass's bytes. Releasing
+	// here is safe precisely because this function retains NOTHING derived
+	// from the tree: it answers one bool and drops it. Release hands the
+	// arenas to the next parse, so a caller that kept a *gts.Node, or a
+	// string aliasing arena memory, would be reading recycled bytes — which
+	// is why the other three mapper passes do not do this yet.
+	defer tree.Release()
 	root := tree.RootNode()
 	if root == nil {
 		return false
