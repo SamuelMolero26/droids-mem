@@ -5,7 +5,12 @@ All notable changes to droids-mem are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.3.0] — 2026-08-21
+
+Headline: the code graph goes multi-language — a tree-sitter-backed mapper
+tier now answers `graph_symbol`/`graph_package` for TypeScript, TSX,
+JavaScript and Python alongside the existing Go tier — plus a code-graph
+trust-signal pass, a dedupe-tokenization fix, and a scrub false-positive fix.
 
 ### Added
 - **The code graph now covers TypeScript, TSX, JavaScript and Python, not just
