@@ -13,29 +13,84 @@ third-party service.
 
 ---
 
-## For whom?
+## Where to go
 
-You use an AI coding agent (Claude Code, Codex, OpenCode, Cursor, any MCP host)
-and you're tired of:
+| I want to… | Go to |
+|---|---|
+| Install droids-mem and wire it to my agent | [Install](#install) |
+| Try it in 30 seconds | [Quick start](#quick-start) |
+| Understand how it works | [What it does](#what-it-does) |
+| See how well retrieval actually performs | [Retrieval performance](#retrieval-performance) |
+| Use the MCP tools from an agent | [MCP tools](#mcp-tools) |
+| See every CLI command | [CLI reference](#cli-reference) |
+| Share memories with teammates | [Shared context](#shared-context) |
+| Know how secrets are scrubbed | [Secret scrub](#secret-scrub) |
+| Tune or troubleshoot | [Configuration](#configuration) · [Troubleshooting](#troubleshooting) |
 
-- Re-explaining the same project conventions every session.
-- Watching your agent repeat mistakes it fixed last week.
-- Wiring up vector databases, embedding pipelines, and API keys just to give an
-  agent continuity.
+---
 
-**droids-mem is local-first persistent memory that works out of the box.** Your
-agent writes lessons; it reads the relevant ones at the start of the next run.
-That's it.
+## Install
+
+### Homebrew (macOS / Linux)
+
+```shell
+brew tap samuelmolero26/tap
+brew install droids-mem
+```
+
+If Homebrew refuses the tap as untrusted: `brew trust samuelmolero26/tap`.
+
+### Install script (macOS / Linux)
+
+```shell
+curl -fsSL https://raw.githubusercontent.com/SamuelMolero26/droids-mem/main/install.sh | sh
+```
+
+Downloads the release binary for your platform, verifies it against the
+published `.sha256`, and installs it to `/usr/local/bin` — or `~/.local/bin`
+when that is not writable. Set `DROIDS_MEM_PREFIX` to choose a directory, or
+`DROIDS_MEM_VERSION` to pin a tag.
+
+Every release asset also carries a SLSA provenance attestation:
+
+```shell
+gh attestation verify "$(command -v droids-mem)" --repo SamuelMolero26/droids-mem
+```
+
+### Prebuilt binary
+
+Grab one for `linux/{amd64,arm64}` or `darwin/{amd64,arm64}` from the
+[Releases page](https://github.com/SamuelMolero26/droids-mem/releases).
+
+### From source
+
+Requires Go 1.25+. Pure-Go (`modernc.org/sqlite`) — builds without CGO.
+
+```shell
+git clone https://github.com/SamuelMolero26/droids-mem
+cd droids-mem && go build ./cmd/droids-mem
+./droids-mem --version
+```
+
+### Wire it to your agent
+
+```shell
+# One-shot: hooks, stdio MCP registration, and CLAUDE.md block
+droids-mem install --all
+
+# Or per host
+droids-mem install --host opencode
+droids-mem install --host codex
+```
+
+Done. Your agent now has persistent memory. Claude Code connects over **stdio**
+(`serve --stdio`) — no port, no token file; the host owns the server lifecycle.
 
 ---
 
 ## Quick start
 
 ```shell
-# macOS / Linux
-brew tap samuelmolero26/tap
-brew install droids-mem
-
 # Save your first lesson
 droids-mem save \
   --task-type "my-project" \
@@ -53,20 +108,6 @@ droids-mem tui
 
 All output is JSON on stdout; errors are JSON on stderr. Exit codes: `0` ok,
 `1` runtime, `2` usage, `3` not found, `5` conflict/duplicate, `10` dry-run.
-
-### Wire it to your agent
-
-```shell
-# One-shot: hooks, stdio MCP registration, and CLAUDE.md block
-droids-mem install --all
-
-# Or per host
-droids-mem install --host opencode
-droids-mem install --host codex
-```
-
-Done. Your agent now has persistent memory. Claude Code connects over **stdio**
-(`serve --stdio`) — no port, no token file; the host owns the server lifecycle.
 
 ---
 
@@ -160,51 +201,6 @@ Reproduce:
 
 ```shell
 go test ./internal/store -run TestRecallBenchmark -v
-```
-
----
-
-## Install
-
-### Homebrew (macOS / Linux)
-
-```shell
-brew tap samuelmolero26/tap
-brew install droids-mem
-```
-
-If Homebrew refuses the tap as untrusted: `brew trust samuelmolero26/tap`.
-
-### Install script (macOS / Linux)
-
-```shell
-curl -fsSL https://raw.githubusercontent.com/SamuelMolero26/droids-mem/main/install.sh | sh
-```
-
-Downloads the release binary for your platform, verifies it against the
-published `.sha256`, and installs it to `/usr/local/bin` — or `~/.local/bin`
-when that is not writable. Set `DROIDS_MEM_PREFIX` to choose a directory, or
-`DROIDS_MEM_VERSION` to pin a tag.
-
-Every release asset also carries a SLSA provenance attestation:
-
-```shell
-gh attestation verify "$(command -v droids-mem)" --repo SamuelMolero26/droids-mem
-```
-
-### Prebuilt binary
-
-Grab one for `linux/{amd64,arm64}` or `darwin/{amd64,arm64}` from the
-[Releases page](https://github.com/SamuelMolero26/droids-mem/releases).
-
-### From source
-
-Requires Go 1.25+. Pure-Go (`modernc.org/sqlite`) — builds without CGO.
-
-```shell
-git clone https://github.com/SamuelMolero26/droids-mem
-cd droids-mem && go build ./cmd/droids-mem
-./droids-mem --version
 ```
 
 ---
