@@ -110,6 +110,26 @@ type SaveRequest struct {
 	// in the same txn on successful insert, scope-bound so a mismatched/missing
 	// target is a benign no-op. Empty = no supersession.
 	Supersedes string `json:"supersedes,omitempty"`
+	// AuthoredAt is when the lesson was originally WRITTEN, in unix seconds.
+	// Zero (the normal case) means "authored here, now". Only ImportShared sets
+	// it, carrying the peer's stamp across the pool so the origin date survives
+	// independent of created_at (which always means "entered this store").
+	// Pure provenance: it is never an ordering key and never derives
+	// review_after — there is no decay clock in this change.
+	AuthoredAt int64 `json:"authored_at,omitempty"`
+}
+
+// resolveAuthoredAt clamps an out-of-range stamp to now: authored_at crosses
+// the pool trust boundary on import, and a skewed or hostile peer clock could
+// otherwise claim any past or future date. Clamp-only, never reject — a
+// non-positive or future stamp becomes "authored now" rather than failing the
+// save. Losing an entire lesson to clock skew is worse than importing it with
+// a conservative stamp (spec: "authored_at is clamp-only, never rejected").
+func resolveAuthoredAt(reqAuthoredAt, now int64) int64 {
+	if reqAuthoredAt <= 0 || reqAuthoredAt > now {
+		return now
+	}
+	return reqAuthoredAt
 }
 
 type SaveResponse struct {
@@ -258,12 +278,17 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 	// scrub provenance always matches the most recent body.
 	// origin is intentionally NOT in the ON CONFLICT SET: a fingerprint
 	// collision overwrites the body/provenance-of-scrub but preserves how the
-	// existing row was originally authored.
+	// existing row was originally authored. authored_at IS in the SET clause —
+	// this path is defensive-only (layer-1 fingerprint dedupe already returns
+	// "skipped" inside this same BEGIN IMMEDIATE), and the conflict clause
+	// overwrites the body, so overwriting the body's authorship stamp along
+	// with it is consistent, not contradictory.
+	authoredAt := resolveAuthoredAt(req.AuthoredAt, now)
 	_, err = conn.ExecContext(ctx, `
 		INSERT INTO memories
 			(id, session_id, task_type, kind, title, what, learned, tags, fingerprint,
-			 created_at, updated_at, scope, scrub_pattern_version, scrub_counts, origin)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 created_at, updated_at, scope, scrub_pattern_version, scrub_counts, origin, authored_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(fingerprint) DO UPDATE SET
 			title                 = excluded.title,
 			what                  = excluded.what,
@@ -273,9 +298,10 @@ func (s *Store) Save(ctx context.Context, req SaveRequest) (*SaveResponse, error
 			updated_at            = excluded.updated_at,
 			scope                 = excluded.scope,
 			scrub_pattern_version = excluded.scrub_pattern_version,
-			scrub_counts          = excluded.scrub_counts
+			scrub_counts          = excluded.scrub_counts,
+			authored_at           = excluded.authored_at
 	`, id, sessionID, req.TaskType, req.Kind, req.Title, req.What, req.Learned, req.Tags, fp,
-		now, now, req.Scope, scrub.Version, scrubCountsJSON, req.Origin)
+		now, now, req.Scope, scrub.Version, scrubCountsJSON, req.Origin, authoredAt)
 	if err != nil {
 		return nil, fmt.Errorf("insert memory: %w", err)
 	}
@@ -431,7 +457,12 @@ const (
 
 // pruneSessionSummariesConn enforces the per-task_type newest-5 cap for MANUAL
 // session summaries. Scoped to origin='manual' so it never evicts an auto
-// summary that happens to share a task_type bucket.
+// summary that happens to share a task_type bucket, and to scope='personal' so
+// bulk-imported pool content is never counted against, or evicted by, the
+// user's own retention window: importLine stamps rows scope='shared' but
+// leaves origin='manual' and re-stamps created_at to now, so an unfenced
+// import lands a whole tie group of foreign rows newer than every local
+// summary and would beat the user's own history out of its own cap.
 //
 // `id DESC` is the same-second tiebreak. created_at is 1-second resolution and
 // session-end rollups save several summaries inside one second, so without it
@@ -440,10 +471,10 @@ const (
 func pruneSessionSummariesConn(ctx context.Context, conn *sql.Conn, taskType string) error {
 	_, err := conn.ExecContext(ctx, `
 		DELETE FROM memories
-		WHERE task_type = ? AND kind = 'session_summary' AND origin = 'manual'
+		WHERE task_type = ? AND kind = 'session_summary' AND origin = 'manual' AND scope = 'personal'
 		AND id NOT IN (
 			SELECT id FROM memories
-			WHERE task_type = ? AND kind = 'session_summary' AND origin = 'manual'
+			WHERE task_type = ? AND kind = 'session_summary' AND origin = 'manual' AND scope = 'personal'
 			ORDER BY created_at DESC, id DESC
 			LIMIT ?
 		)
@@ -488,13 +519,25 @@ func pruneAutoSummariesConn(ctx context.Context, conn *sql.Conn) error {
 }
 
 func forceUpdateConn(ctx context.Context, conn *sql.Conn, existingID, sessionID string, req SaveRequest, fp string, now int64, scrubCountsJSON sql.NullString) (*SaveResponse, error) {
+	// A force-update is a body correction (HITL), not a re-authoring: the row
+	// keeps its authored_at unless the caller supplies one. Every real force
+	// caller leaves it zero, so resolving it like a fresh insert would erase an
+	// imported row's peer origin date, and on a local row would push authored_at
+	// past created_at — the exact divergence the TUI reads as "came from the
+	// pool". NULLIF(?, 0) is the "keep" sentinel; a supplied stamp is clamped
+	// like any other.
+	var authoredAt int64
+	if req.AuthoredAt > 0 {
+		authoredAt = resolveAuthoredAt(req.AuthoredAt, now)
+	}
 	_, err := conn.ExecContext(ctx, `
 		UPDATE memories
 		SET title=?, what=?, learned=?, tags=?, fingerprint=?, updated_at=?,
-		    scope=?, scrub_pattern_version=?, scrub_counts=?
+		    scope=?, scrub_pattern_version=?, scrub_counts=?,
+		    authored_at=COALESCE(NULLIF(?, 0), authored_at)
 		WHERE id=?
 	`, req.Title, req.What, req.Learned, req.Tags, fp, now,
-		req.Scope, scrub.Version, scrubCountsJSON, existingID)
+		req.Scope, scrub.Version, scrubCountsJSON, authoredAt, existingID)
 	if err != nil {
 		return nil, fmt.Errorf("force update: %w", err)
 	}
@@ -954,35 +997,23 @@ func dedupeTokens(body string) ([]string, map[string]struct{}) {
 }
 
 // searchTerms extracts unique lowercase words (len > 2) for BM25 queries.
+//
+// It kept its own normalization sweep until it was folded into dedupeTokens,
+// which also fixed a real divergence: this stripped punctuation to "" while
+// dedupeTokens and tokenSet replace it with " ". So "mem_save.Error" became
+// one token "mem_saveerror" here and two tokens there — and FTS5's unicode61
+// tokenizer, which the query has to match, splits it. dupeQuery documents
+// itself as building "the same query the save-time near-duplicate check
+// uses"; before the fold it demonstrably did not.
 func searchTerms(s string) []string {
-	s = strings.ToLower(s)
-	s = rePunct.ReplaceAllString(s, "")
-	s = reWhitespace.ReplaceAllString(s, " ")
-	words := strings.Fields(strings.TrimSpace(s))
-	seen := make(map[string]bool, len(words))
-	result := make([]string, 0, len(words))
-	for _, w := range words {
-		if len(w) > 2 && !seen[w] {
-			seen[w] = true
-			result = append(result, w)
-		}
-	}
-	return result
+	terms, _ := dedupeTokens(s)
+	return terms
 }
 
 // tokenSet builds the deduplicated set of meaningful tokens used for
 // Jaccard similarity. Excludes 1-2 char tokens (noise).
 func tokenSet(s string) map[string]struct{} {
-	s = strings.ToLower(s)
-	s = rePunct.ReplaceAllString(s, " ")
-	s = reWhitespace.ReplaceAllString(s, " ")
-	words := strings.Fields(strings.TrimSpace(s))
-	set := make(map[string]struct{}, len(words))
-	for _, w := range words {
-		if len(w) > 2 {
-			set[w] = struct{}{}
-		}
-	}
+	_, set := dedupeTokens(s)
 	return set
 }
 

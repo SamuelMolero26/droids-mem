@@ -19,7 +19,7 @@ func TestWriteGraphDB_CancelledCtxDoesNotPublish(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if err := writeGraphDB(ctx, dbPath, "repo", "mod", "s", nil, nil, nil); !errors.Is(err, context.Canceled) {
+	if err := writeGraphDB(ctx, dbPath, "repo", "mod", "s", nil, nil, nil, nil, "", 0, nil); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
@@ -480,9 +480,11 @@ func TestImplements(t *testing.T) {
 	}
 }
 
-// A _test.go edit must NOT move the stamp (test files are never indexed, so a
-// rebuild would be pure waste); a source .go edit must.
-func TestStampIgnoresTestFiles(t *testing.T) {
+// A source .go edit must move the stamp. The _test.go half of this guarantee
+// (Tests:true means a test-file edit must ALSO move the stamp) now lives in
+// TestStamp_TestFileEditMovesStamp (stamp_test.go) — see that test's comment
+// for why the old "ignores test files" expectation was inverted.
+func TestStampMovesOnSourceEdit(t *testing.T) {
 	repo := t.TempDir()
 	write := func(name, body string) {
 		if err := os.WriteFile(filepath.Join(repo, name), []byte(body), 0o600); err != nil {
@@ -491,7 +493,6 @@ func TestStampIgnoresTestFiles(t *testing.T) {
 	}
 	write("go.mod", "module x\n\ngo 1.21\n")
 	write("a.go", "package x\n\nfunc A() {}\n")
-	write("a_test.go", "package x\n")
 
 	base, err := stamp(repo)
 	if err != nil {
@@ -499,11 +500,6 @@ func TestStampIgnoresTestFiles(t *testing.T) {
 	}
 
 	future := time.Now().Add(2 * time.Second)
-	_ = os.Chtimes(filepath.Join(repo, "a_test.go"), future, future)
-	if s, _ := stamp(repo); s != base {
-		t.Errorf("test-file edit moved stamp: %q → %q", base, s)
-	}
-
 	_ = os.Chtimes(filepath.Join(repo, "a.go"), future, future)
 	if s, _ := stamp(repo); s == base {
 		t.Errorf("source edit did not move stamp: still %q", base)

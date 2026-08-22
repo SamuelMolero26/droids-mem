@@ -30,7 +30,7 @@
 #   validator   optional structural gate: ipv4_octets | entropy
 #   min_entropy Shannon bits/char threshold (validator: entropy only)
 
-version: 3
+version: 4
 
 detectors:
   - name: pem_key
@@ -147,7 +147,13 @@ detectors:
   - name: phone
     class: pii
     token: "[PHONE]"
-    regex: '\+[1-9]\d{1,14}\b'
+    # E.164 real-world minimum is 7 digits after the leading '+' (e.g.
+    # +2902020). The old `\d{1,14}` floor matched any signed number
+    # (+370 bytes, +46%, +532 diff stat) — 6 of 7 matches were numeric
+    # deltas, not phones. Floor raised to 6 digits (7+ total) to reject them.
+    # Known residual: a 7+ digit numeric delta like `+1000000 rows` still
+    # matches; fixing that needs context rules, deliberately out of scope.
+    regex: '\+[1-9]\d{6,14}\b'
     needles: ["+"]
 
   - name: private_ipv4

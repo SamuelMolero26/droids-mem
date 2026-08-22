@@ -53,7 +53,8 @@ func TestGraphQueries_RespectContextCancellation(t *testing.T) {
 		name string
 		call func() error
 	}{
-		{"edgeCount", func() error { _, err := edgeCount(ctx, conn, "caller", id); return err }},
+		{"calleeCount", func() error { _, err := calleeCount(ctx, conn, id); return err }},
+		{"callerSplit", func() error { _, _, _, err := callerSplit(ctx, conn, id); return err }},
 		{"findSymbol", func() error { _, err := findSymbol(ctx, conn, qname); return err }},
 		{"searchSymbols", func() error { _, err := searchSymbols(ctx, conn, "announce greeting"); return err }},
 		{"transitiveCallers", func() error { _, err := transitiveCallers(ctx, conn, id); return err }},
