@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/samuelmolero26/droids-mem/internal/store"
@@ -226,6 +227,16 @@ func renderDetail(mem *store.Memory, neighbors []store.Neighbor, w int) string {
 	}
 	b.WriteString(strings.Join(chips, " "))
 	b.WriteString("\n\n")
+
+	// authored_at is provenance, not recency: it only earns a line when it
+	// diverges from created_at, which happens on an imported (scope='shared')
+	// row — ImportShared re-stamps created_at to the local import time but
+	// carries the peer's original authoring date forward.
+	if mem.AuthoredAt != 0 && mem.AuthoredAt != mem.CreatedAt {
+		authored := time.Unix(mem.AuthoredAt, 0).UTC().Format("2006-01-02")
+		b.WriteString(metaStyle.Render("authored " + authored))
+		b.WriteString("\n\n")
+	}
 
 	body := mem.Learned
 	if body == "" {

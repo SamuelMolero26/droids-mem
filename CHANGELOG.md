@@ -5,6 +5,134 @@ All notable changes to droids-mem are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **The code graph now covers TypeScript, TSX, JavaScript and Python, not just
+  Go.** `graph_symbol` and `graph_package` answer for those languages through a
+  new mapper tier built on tree-sitter, running alongside the Go tier rather
+  than replacing it. The two never mix: no edge joins a Go symbol to a mapper
+  one. What the new tier costs in precision is stated rather than hidden:
+  - Every symbol response carries `precision` — `"resolved"` for a Go answer
+    backed by the type checker, `"syntactic"` for a mapper answer resolved by
+    name. A syntactic answer says so in its hint as well.
+  - Mapper call edges come from a resolution ladder that narrows candidates by
+    receiver arity, enclosing class, imported binding, defining file, then
+    package. A rung that matches nothing falls through *without* narrowing, so
+    a callsite can never resolve to zero candidates — the graph may report a
+    caller that cannot fire, but never misses one that can.
+  - A callsite whose repo-wide fallback exceeds the fan-out cap is labelled in
+    `meta.fanout_capped` alongside its true pre-cap count, never silently
+    truncated.
+  - A mapper file that stops parsing cleanly carries its previous build's
+    symbols and edges forward instead of dropping out of the graph, the same
+    way a Go package that stops type-checking already did.
+  - The `imports` table records module specifiers for the JS family and
+    Python, each with its own explicit precision.
+- **Building a mapper-language graph got roughly 14x faster.** A 200-file
+  TypeScript tree went from 4.6 s and 4.8 GiB of allocation to 290 ms and
+  211 MiB (-93.7% time, -95.7% bytes, -95.4% allocations). Two causes, both
+  found by profiling: a tree-sitter parser was constructed per file, and each
+  one rebuilds its parse tables because they are cached on the parser rather
+  than on the shared language; and parsed trees were never released, so every
+  parse allocated fresh node arenas instead of reusing the pooled ones. The
+  effect is user-visible as wait time — an agent's first `graph_symbol` call
+  on a large TypeScript repo is what pays for a build.
+
+- **Code-graph answers now say how much to trust them.** Three signals, all
+  response-level rather than repeated per row:
+  - `callers_in_tests` splits the caller count, so "89 callers" reads as
+    "5 production, 84 in tests" — the difference between a semantic change and
+    a mechanical one, which a bare total hides.
+  - `callers_via_interface` counts callers reached through interface dispatch.
+    CHA over-approximates on purpose, so a method whose name is shared across
+    many types (`Error`, `String`, `Close`) can report every function in the
+    repo that calls *anything* of that name. That answer is now labelled
+    instead of looking like a genuine hub.
+  - `carried` on a symbol, and `stale_units` on freshness, name the packages
+    whose edges came from the previous build rather than this one.
+    `stale_units` is capped and rendered as `[N of M]`, like every other list
+    on this surface. `carried` carries a hint, because the flag is narrower
+    than it looks: the symbol, its signature and its callers are all freshly
+    analyzed, and only its callees ride on the previous build. Without that,
+    the safe reading is to distrust the whole answer and throw away the fresh
+    caller list a blast-radius query was asking for.
+- `freshness.stale` correspondingly narrows to mean a genuine build failure —
+  a whole-graph fallback — instead of doubling as "some package didn't
+  type-check". The MCP tool descriptions were updated to match; they had
+  described the old behaviour.
+
+### Fixed
+- **A repo that stops type-checking no longer blanks the whole code graph.**
+  Previously the first package with a type error aborted the entire build and
+  every query fell back to the last good graph, marked stale — so one typo in
+  one function body cost fresh answers for the whole tree. Now a broken package
+  degrades alone: symbols are still extracted from source for every package
+  (that needs no type information), fresh call edges are still computed for
+  every package that compiles, and edges *out of* a broken package — the only
+  ones that genuinely need a body we cannot type-check — are carried forward
+  from the previous build and remapped by qualified name. Edges into a broken
+  package survive natively. Carry-forward is best-effort: if the previous graph
+  cannot be read the build still succeeds with nothing carried. If more than
+  half the packages are broken the previous whole graph is served instead,
+  since a mostly-carried answer is not worth the confusion.
+- **The code graph now indexes test callers, and keeps its own reachability
+  contract.** The graph documented that it "may report a caller that can't
+  fire, never misses one that can", but `packages.Config` never set `Tests`, so
+  no `_test.go` was loaded and **zero** indexed symbols came from a test file.
+  `store.Store.Save` reported 5 callers while 84 distinct test functions call
+  it — the blind spot largest exactly on exported API, which is what an agent
+  queries before changing a signature. Three changes make it hold:
+  - `Tests: true`, with package-variant deduplication. `packages.Load` returns
+    several variants per tested package and the in-package test variant shares
+    a `PkgPath` while re-parsing the same production files; without dedupe
+    every production symbol was emitted twice, and because `symbols.qname` is
+    not unique those duplicates inserted silently and made every symbol in a
+    tested package report as ambiguous.
+  - The staleness stamp's file census now includes `_test.go`, so editing a
+    test file moves the stamp. Previously a newly added test caller was never
+    indexed.
+  - Caller lists order production callers before test callers. Test indexing
+    roughly triples caller counts, and the previous ordering put a package's
+    own test callers ahead of production callers in other packages — at the
+    50-neighbour cap an agent could see zero production callers and wrongly
+    conclude a signature change was test-only. Same-package proximity is kept
+    as the secondary key. **Existing graphs rebuild once** on the first query
+    after upgrading, because the file census changed.
+- **`prune --suggest-dupes` now tokenizes like the save-time duplicate check it
+  claims to mirror.** `dupeQuery` documents itself as building "the same capped,
+  phrase-quoted OR query the save-time near-duplicate check uses", but the two
+  had silently diverged: save-time runs on `dedupeTokens`, which replaces
+  punctuation with a space, while `searchTerms` stripped it to nothing. So
+  `store.Save` became the single token `storesave` in the prune query while
+  FTS5's `unicode61` tokenizer had indexed it as `store` and `save` — a
+  phrase-quoted term that could never match. `searchTerms` and `tokenSet` are
+  now thin projections of the one `dedupeTokens` sweep, which is what the
+  original fold intended.
+- **The `phone` scrub detector no longer redacts numeric deltas** (issue #102).
+  Its regex floor was two digits, so any signed number (`+370 bytes`, `+46%`,
+  diff stats) matched the E.164 phone shape and was silently and irreversibly
+  redacted before the row was stored — 6 of 7 matches were false positives.
+  The floor is now the E.164 real-world minimum of seven digits. A 7+ digit
+  numeric delta still matches; tightening further needs context rules and stays
+  documented as a deliberate residual.
+- **Code-graph cache now invalidates on a schema change.** `ensureFresh` gated
+  only on the file-census stamp, and `graph.db` records no schema version, so
+  editing the schema left every cached graph serving rows in the old shape
+  until an unrelated source edit happened to move the stamp — a repo whose
+  `.go` files were untouched kept the stale shape indefinitely. The stamp's
+  generation is now derived from `sha256(schema + indexed extensions)` instead
+  of a hand-written literal, so it cannot be forgotten. **Existing graphs
+  rebuild once** on the first query after upgrading.
+- **Non-Go repositories no longer split their cache.** `moduleRoot` anchored on
+  `go.mod` only, so a tree without one had no anchor and naming a subdirectory
+  keyed a second cache built from that subtree alone. It now falls back to the
+  nearest ancestor `.git`, keeping `go.mod` first so a nested module still
+  resolves to itself.
+- **Build output is excluded from the source walk**: `dist`, `build`, `target`
+  and `__pycache__` join the existing dotdir/`vendor`/`node_modules`
+  exclusions, so a build no longer moves the staleness stamp.
+
 ## [1.2.1] — 2026-08-10
 
 Headline: the MCP bridge stops trusting predictable secrets and loopback HTTP —
@@ -349,6 +477,7 @@ normally.
 - `workspace.yml` / inline scrub config → v1.1. v1.0 pattern set + order are
   hardcoded.
 
+[Unreleased]: https://github.com/SamuelMolero26/droids-mem/compare/v1.2.1...HEAD
 [1.2.1]: https://github.com/SamuelMolero26/droids-mem/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/SamuelMolero26/droids-mem/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/SamuelMolero26/droids-mem/compare/v1.1.0...v1.1.1
