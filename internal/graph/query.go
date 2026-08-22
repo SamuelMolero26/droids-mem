@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -18,12 +20,16 @@ const (
 	// re-query with, never a specific invocation ("graph_symbol" vs
 	// "droids-mem graph symbol"). The agent already holds the surface it just
 	// called; the qname is the only missing payload and it is in the rows.
-	expandHint      = "neighbors are signatures only; re-query a neighbor's exact qname to see its body"
-	ambiguousHint   = "multiple symbols share that name; re-query with one of the qnames in matches"
-	searchHint      = "no exact symbol match; these are the closest by relevance — re-query with one qname from matches for its full body, callers, and callees"
-	maxSeeds        = 10  // search-fallback menu size
-	blastCap        = 500 // transitive-caller count sentinel (compute + number guard)
-	staleGraphHint  = "graph is stale: the repo changed but no longer type-checks, serving the last good index"
+	expandHint    = "neighbors are signatures only; re-query a neighbor's exact qname to see its body"
+	ambiguousHint = "multiple symbols share that name; re-query with one of the qnames in matches"
+	searchHint    = "no exact symbol match; these are the closest by relevance — re-query with one qname from matches for its full body, callers, and callees"
+	maxSeeds      = 10  // search-fallback menu size
+	blastCap      = 500 // transitive-caller count sentinel (compute + number guard)
+	// staleGraphHint no longer claims the repo "no longer type-checks" — Stale
+	// also covers a benign in-flight rebuild with no failure at all (a partial
+	// build that itself succeeds is never stale; see graph.go's Freshness doc).
+	// freshness.index_error, when present, carries the real failure reason.
+	staleGraphHint  = "graph is stale: serving the last good index while it updates (see freshness.index_error if the last build failed)"
 	pkgSymbolsLimit = "exported symbols only; re-query an unexported symbol by its name"
 	// blast radius rides entirely on call edges, and only func/method symbols are
 	// edge endpoints (byPos maps FuncDecls only). So transitive_callers is a
@@ -45,6 +51,28 @@ const (
 	// (depth=1 only). Redirect: narrow with direction+depth=1 or graph_package.
 	truncatedHint  = "neighbor list is a partial slice at the cap (see *_total), not the closest — narrow with a single direction at depth=1, or graph_package"
 	rebuildingHint = "graph is being rebuilt asynchronously — use graph_build_wait to block until ready, or retry"
+	// carriedHint names WHICH half of a carried answer is degraded. Carried
+	// alone is a bare fact, and the safe reading of a bare fact is to distrust
+	// the whole response — which discards a freshly-analyzed caller list, the
+	// exact payload a blast-radius query asked for. Only callees ride on the
+	// previous build: a broken package's functions have no SSA body, so its
+	// OUT-edges cannot be rediscovered, while its symbols come from the AST
+	// and its in-edges resolve through the types-only stub.
+	carriedHint = "this symbol's package did not type-check, so its callees are carried forward from the previous build and may be out of date; the symbol, its signature, and its callers are freshly analyzed"
+	// syntacticHint tells the agent the numbers/edges just reported are
+	// mapper-tier: name+containment heuristics (design D4), not type-checked
+	// call resolution. Appended after carriedHint/rebuildingHint and before
+	// the later truncatedHint append — see the ordered chain comment in
+	// Symbol() (design D5/D7). Attached only when Precision == "syntactic";
+	// a "resolved" (Go) answer needs no caveat.
+	syntacticHint = "this symbol is mapper-tier (non-Go): its callers/callees are syntactically resolved from names and lexical containment, not type-checked — treat an ambiguous call site's candidates as approximate, not exact"
+	// precisionResolved/precisionSyntactic name SymbolResponse.Precision's two
+	// values (design D7). The rest of the mapper tier (edgeSet, mapper_calls.go)
+	// uses the same two values as bare string literals; named here because
+	// query.go's derivation and weakestPrecision below compare against them
+	// repeatedly.
+	precisionResolved  = "resolved"
+	precisionSyntactic = "syntactic"
 )
 
 // maxNeighbors caps neighbors per direction across all depths. A var, not a
@@ -100,6 +128,28 @@ type SymbolResponse struct {
 	// and 0 (omitted) unambiguously means "not truncated".
 	CallersTotal int `json:"callers_total,omitempty"`
 	CalleesTotal int `json:"callees_total,omitempty"`
+	// CallersInTests/CallersViaInterface are response-level splits over the
+	// symbol's DIRECT (depth=1) callers, computed in SQL, independent of
+	// maxNeighbors and of the request's own Depth (issue #48, #49, decision
+	// 7a/2 amended). No per-row test/dispatch field exists on Neighbor — only
+	// these response-level scalars.
+	CallersInTests      int `json:"callers_in_tests,omitempty"`
+	CallersViaInterface int `json:"callers_via_interface,omitempty"`
+	// Carried reports whether the queried symbol's package rode on
+	// carried-forward edges in the most recent build (its package is in the
+	// build's carried_units set) — a partial-index honesty signal distinct
+	// from Freshness.Stale (which a successful partial build does not set).
+	Carried bool `json:"carried,omitempty"`
+	// Precision names the queried symbol's own tier: "resolved" (Go,
+	// type-checked) or "syntactic" (mapper: FactCalls + name/containment
+	// heuristics, never type-checked). Because the two edge subgraphs are
+	// disjoint (D.7 — TestEdges_NeverJoinGoSymbolToMapperSymbol), this one
+	// value also describes every caller/callee counted below; there is no
+	// separate per-caller-class breakdown (design D7, spec "Mixed
+	// transitive_callers Count with Precision Label"). Set whenever Symbol
+	// is non-nil; absent on a search-menu/ambiguous response, where there is
+	// no single symbol whose tier could be named.
+	Precision string `json:"precision,omitempty"`
 	// TransitiveCallers is the blast size: distinct symbols that transitively
 	// call this one (up-closure, capped). A pointer so 0 ("safe to change,
 	// nothing calls it") is distinct from absent (a search-menu response, no
@@ -117,6 +167,54 @@ type SymbolResponse struct {
 	// interfaces, never near the neighbor cap, so the list is its own count).
 	Satisfies []Neighbor `json:"satisfies,omitempty"`
 	Hint      string     `json:"hint,omitempty"`
+}
+
+// addHint appends extra to the "; "-joined hint chain h, empty-safe.
+func addHint(h, extra string) string {
+	if h == "" {
+		return extra
+	}
+	return h + "; " + extra
+}
+
+// mapperFileExtensions is the syntactic (mapper) tier's extension set,
+// mirroring mapperLanguages (mapper.go) but keyed by extension instead of
+// grammar name — the only lookup Precision derivation needs. Any extension
+// outside this set (in practice, only ".go") is the resolved tier.
+var mapperFileExtensions = map[string]bool{
+	".ts": true, ".tsx": true, ".js": true, ".jsx": true, ".mjs": true, ".py": true,
+}
+
+// symbolPrecision derives a symbol's precision class from its OWN file
+// extension — zero extra SQL (design D7). Because the two edge subgraphs are
+// disjoint (D.7, pinned by TestEdges_NeverJoinGoSymbolToMapperSymbol), a
+// symbol's entire transitive closure lives in its own tier, so the queried
+// symbol's own extension is enough to label the whole answer; no per-edge or
+// per-caller precision read is needed.
+func symbolPrecision(file string) string {
+	if mapperFileExtensions[filepath.Ext(file)] {
+		return precisionSyntactic
+	}
+	return precisionResolved
+}
+
+// weakestPrecision returns the weakest precision present in precisions
+// ("syntactic" beats "resolved" — spec "Mixed transitive_callers Count with
+// Precision Label"). Never called with genuinely mixed input in production:
+// tier disjointness means a real symbol's callers are always single-tier, so
+// Symbol() uses the cheap symbolPrecision(file) shortcut instead. This
+// function pins the general "weakest wins" semantic that shortcut relies on,
+// and is the documented fallback (D7's guard note) if the disjointness
+// invariant is ever disproved: replace the shortcut call site with a real
+// per-edge `SELECT precision FROM edges WHERE ...` fed through this same
+// function. An empty/all-resolved input returns "resolved".
+func weakestPrecision(precisions []string) string {
+	for _, p := range precisions {
+		if p == precisionSyntactic {
+			return precisionSyntactic
+		}
+	}
+	return precisionResolved
 }
 
 // Symbol resolves and answers a symbol-anchored query against repo's graph.
@@ -166,6 +264,8 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 		return nil, err
 	}
 	resp.Symbol = &info
+	resp.Carried = slices.Contains(fresh.carriedUnits, info.Package)
+	resp.Precision = symbolPrecision(info.File)
 
 	var blastHint string // see blastTypeHint/blastRefHint above for the why
 	switch info.Kind {
@@ -217,13 +317,16 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 			resp.Hint = staleGraphHint + "; " + blastHint
 		}
 	}
-	// Append rebuilding hint when async rebuild is in progress.
+	// Append, never replace: blastHint above assigns, so a carried symbol must
+	// keep its blast-radius redirect as well as the carried caveat.
+	if resp.Carried {
+		resp.Hint = addHint(resp.Hint, carriedHint)
+	}
 	if fresh.Rebuilding {
-		if resp.Hint != "" {
-			resp.Hint += "; " + rebuildingHint
-		} else {
-			resp.Hint = rebuildingHint
-		}
+		resp.Hint = addHint(resp.Hint, rebuildingHint)
+	}
+	if resp.Precision == precisionSyntactic {
+		resp.Hint = addHint(resp.Hint, syntacticHint)
 	}
 
 	depth := min(max(req.Depth, 1), maxDepth)
@@ -252,8 +355,13 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	}
 
 	var upTrunc, downTrunc bool
+	var callersTotal int // true depth=1 caller total, from callerSplit
 	if dir == "up" || dir == "both" {
 		resp.Callers, upTrunc, err = bfsNeighbors(ctx, conn, id, "up", depth, info.Package)
+		if err != nil {
+			return nil, err
+		}
+		callersTotal, resp.CallersInTests, resp.CallersViaInterface, err = callerSplit(ctx, conn, id)
 		if err != nil {
 			return nil, err
 		}
@@ -266,33 +374,47 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	}
 	// True neighbor totals only when a list was capped, and only at depth=1 (a
 	// deeper total = full-closure walk, defeating the cap). See issue #49.
+	// The caller total is already in hand: upTrunc implies the up branch ran,
+	// so callerSplit counted exactly the same distinct callers.
 	if upTrunc && depth == 1 {
-		if resp.CallersTotal, err = edgeCount(ctx, conn, "up", id); err != nil {
-			return nil, err
-		}
+		resp.CallersTotal = callersTotal
 	}
 	if downTrunc && depth == 1 {
-		if resp.CalleesTotal, err = edgeCount(ctx, conn, "down", id); err != nil {
+		if resp.CalleesTotal, err = calleeCount(ctx, conn, id); err != nil {
 			return nil, err
 		}
 	}
 	if upTrunc || downTrunc {
 		resp.Truncated = true
-		resp.Hint += "; " + truncatedHint
+		resp.Hint = addHint(resp.Hint, truncatedHint)
 	}
 	return resp, nil
 }
 
-// edgeCount is the true neighbor total behind a truncated depth=1 list: distinct
-// callers of id ("up") or distinct callees of id ("down").
-func edgeCount(ctx context.Context, conn *sql.DB, dir string, id int64) (int, error) {
-	q := `SELECT COUNT(DISTINCT caller) FROM edges WHERE callee = ?` // up: who calls me
-	if dir == "down" {
-		q = `SELECT COUNT(DISTINCT callee) FROM edges WHERE caller = ?`
-	}
+// calleeCount is the true neighbor total behind a truncated depth=1 callee
+// list. The caller side needs no equivalent: callerSplit already returns it.
+func calleeCount(ctx context.Context, conn *sql.DB, id int64) (int, error) {
 	var n int
-	err := conn.QueryRowContext(ctx, q, id).Scan(&n)
+	err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(DISTINCT callee) FROM edges WHERE caller = ?`, id).Scan(&n)
 	return n, err
+}
+
+// callerSplit computes response-level caller-fidelity splits over id's
+// DIRECT (depth=1) callers in one pass over the edges table — total distinct
+// callers, how many are in _test.go files, and how many are reached only via
+// interface dispatch. All three are independent of maxNeighbors (issue #49)
+// and of the request's own Depth (design.md: "all depth=1 only, computed in
+// SQL"). The escaped LIKE avoids misclassifying a literal underscore (e.g.
+// "helpertest.go") as a wildcard match (issue #48/decision 7a).
+func callerSplit(ctx context.Context, conn *sql.DB, id int64) (total, inTests, viaInterface int, err error) {
+	err = conn.QueryRowContext(ctx, `SELECT
+			COUNT(DISTINCT e.caller),
+			COUNT(DISTINCT CASE WHEN s.file LIKE '%\_test.go' ESCAPE '\' THEN e.caller END),
+			COUNT(DISTINCT CASE WHEN e.dispatch = 'interface' THEN e.caller END)
+		FROM edges e JOIN symbols s ON s.id = e.caller
+		WHERE e.callee = ?`, id).Scan(&total, &inTests, &viaInterface)
+	return total, inTests, viaInterface, err
 }
 
 // findSymbol resolves a name to symbol stubs: exact qname first, then short
@@ -477,12 +599,18 @@ func bfsNeighbors(ctx context.Context, conn *sql.DB, start int64, dir string, de
 func neighborLevel(ctx context.Context, conn *sql.DB, from, to string, frontier []int64, seen map[int64]bool,
 	out *[]Neighbor, depth int, startPkg string) (next []int64, truncated bool, err error) {
 
-	// ORDER BY (s.package != ?) puts same-package neighbors first (0 < 1), so the
-	// cap keeps the closest, then qname. The startPkg arg trails the frontier IN
-	// placeholders — positional order must match (issue #49).
+	// ORDER BY is_test first: a same-package _test.go caller must NOT outrank a
+	// cross-package production caller, or the cap can show zero production
+	// callers and an agent wrongly concludes a signature change is test-only.
+	// (s.package != ?) then puts same-package neighbors first within each
+	// is_test group (0 < 1), so the cap keeps the closest, then qname. The
+	// escaped LIKE avoids misclassifying a literal underscore (e.g.
+	// "helpertest.go") as a wildcard match. The startPkg arg trails the
+	// frontier IN placeholders — positional order must match (issue #49).
 	rows, err := conn.QueryContext(ctx, fmt.Sprintf(`SELECT DISTINCT s.id, s.qname, s.signature, s.file, s.line
 		FROM edges e JOIN symbols s ON s.id = e.%s
-		WHERE e.%s IN (%s) ORDER BY (s.package != ?), s.qname`, to, from, placeholders(len(frontier))),
+		WHERE e.%s IN (%s)
+		ORDER BY (s.file LIKE '%%\_test.go' ESCAPE '\'), (s.package != ?), s.qname`, to, from, placeholders(len(frontier))),
 		append(idArgs(frontier), startPkg)...)
 	if err != nil {
 		return nil, false, err

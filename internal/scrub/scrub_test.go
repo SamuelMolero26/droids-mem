@@ -90,8 +90,8 @@ func TestScrub(t *testing.T) {
 // tells the editor what to do. This replaces the old "NEVER reorder without
 // bumping ScrubPatternVersion" comment with an enforced invariant.
 func TestSpecHashPinsVersion(t *testing.T) {
-	const pinnedVersion = 3
-	const pinnedHash = "37ab2971f3f9b5a407b9c47932a93538088a45f9608d3c70cd2960af7662a5bb"
+	const pinnedVersion = 4
+	const pinnedHash = "13e3af65eb55dd77ae8ee158bb225d42a4ccdaf884a1c5ff9b582b66a4836069"
 
 	sum := sha256.Sum256(specYAML)
 	got := hex.EncodeToString(sum[:])

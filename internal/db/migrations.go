@@ -7,7 +7,7 @@ import (
 
 // CurrentSchemaVersion is the user_version that a fully-initialized
 // database reports. Bump when adding a new entry to the migrations ladder.
-const CurrentSchemaVersion = 8
+const CurrentSchemaVersion = 9
 
 // migration is one rung in the PRAGMA user_version ladder. Each rung runs
 // inside its own transaction; partial failure rolls back atomically.
@@ -42,6 +42,7 @@ var migrations = []migration{
 	{from: 5, to: 6, sql: migrationV5ToV6},
 	{from: 6, to: 7, sql: migrationV6ToV7},
 	{from: 7, to: 8, sql: migrationV7ToV8},
+	{from: 8, to: 9, sql: migrationV8ToV9},
 }
 
 // migrationV0ToV1 widens the row shape and adds the meta table.
@@ -345,4 +346,28 @@ DROP INDEX IF EXISTS idx_memories_origin_created;
 CREATE INDEX idx_memories_origin_created ON memories(origin, created_at DESC, id DESC);
 
 DROP INDEX IF EXISTS idx_memories_task_type;
+`
+
+// migrationV8ToV9 adds authored_at: pure provenance, distinct from
+// created_at, for a memory's original authoring date. The two agree for a
+// locally-authored row and diverge on import, where ImportShared re-stamps
+// created_at to the local import time but carries the peer's authored_at
+// forward. authored_at is never an ORDER BY key and never drives review_after
+// — there is no decay clock in this change.
+//
+// Backfilled to created_at rather than left at the DEFAULT 0: SQLite has no
+// ADD COLUMN ... DEFAULT (<other column>), so two statements per table. A
+// bare 0 would misreport every pre-existing row as authored in 1970 once
+// GetRow/List start projecting the column — created_at is the closest honest
+// value for a row whose real authoring date was never recorded.
+//
+// archived_memories gets the same column + backfill for column-parity with
+// memories (TestArchivedMemories_ColumnParityWithMemories); the UPDATE is a
+// no-op today since nothing writes to that table yet.
+const migrationV8ToV9 = `
+ALTER TABLE memories ADD COLUMN authored_at INTEGER NOT NULL DEFAULT 0;
+UPDATE memories SET authored_at = created_at;
+
+ALTER TABLE archived_memories ADD COLUMN authored_at INTEGER NOT NULL DEFAULT 0;
+UPDATE archived_memories SET authored_at = created_at;
 `
