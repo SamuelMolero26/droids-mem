@@ -7,8 +7,11 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -17,7 +20,6 @@ import (
 	"golang.org/x/tools/go/callgraph/cha"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
-	"golang.org/x/tools/go/ssa/ssautil"
 )
 
 const (
@@ -40,38 +42,170 @@ type symRow struct {
 	source    string
 }
 
+// usableGoPackages normalizes packages.Load's possible outcomes on a Go-free
+// tree into a single "no usable Go packages" nil result, so buildIndex never
+// needs to branch on which of the shapes it got.
+//
+// Empirically observed (TestPackagesLoad_GoFreeTree_ObservedShape): a tree
+// with no go.mod and no .go file yields err == nil and exactly one SYNTHETIC
+// package (PkgPath "./...", zero GoFiles/CompiledGoFiles, one ListError-kind
+// entry in Errors); a tree with a go.mod but zero .go files yields err == nil
+// and an EMPTY slice. Per design D2, a genuine load error (e.g. a missing Go
+// toolchain) folds into the same "unusable" outcome — the mapper tier can
+// still index the tree even when the Go tier cannot load at all.
+//
+// A package is dropped as "no Go files"-class only when it carries NO
+// GoFiles/CompiledGoFiles at all; a package that has real source files but
+// also errors (a genuine type/parse failure) is kept and flows into the
+// existing `broken` accounting below, unchanged from pre-PR-B behavior.
+func usableGoPackages(pkgs []*packages.Package, err error) []*packages.Package {
+	if err != nil {
+		return nil
+	}
+	out := make([]*packages.Package, 0, len(pkgs))
+	for _, p := range pkgs {
+		if len(p.GoFiles) == 0 && len(p.CompiledGoFiles) == 0 && len(p.Errors) > 0 {
+			continue // synthetic "no Go files"-class package: nothing to index
+		}
+		out = append(out, p)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// mapperQNameCollisions counts colliding mapper-tier qnames observed across
+// all builds (T4 part 1, design D-note "byQName Python collision"). Visibility
+// only in this PR: PR-E's carried-edge remap is what actually consumes a
+// per-build collided set (returned by buildByQName) to decide whether to
+// drop a remap rather than point it at a possibly-wrong last-wins row.
+var mapperQNameCollisions atomic.Uint64
+
 // buildIndex loads, type-checks, and analyzes the repo, then atomically
-// replaces dbPath with a fresh graph (build to .tmp, rename over). A repo that
-// does not type-check returns an error and leaves any existing graph intact.
+// replaces dbPath with a fresh graph (build to .tmp, rename over). A repo
+// whose Go tier does not type-check (majority-broken) returns an error and
+// leaves any existing graph intact — UNLESS mapper symbols are available to
+// compensate, in which case only the Go tier is suppressed (see the
+// majority-broken cap below, C.11). A repo with neither a usable Go package
+// nor a single mapper-tier symbol is a hard error (C.10) — PR-B deliberately
+// left this open (always non-erroring) because mapper discovery wasn't wired
+// in yet; see PR-B apply-progress "B.4 Deviation".
+//
+// PR-C process note (task C.8): mapper symbols now land in graph.db, but
+// this PR must not merge to develop standalone — it under-reports every
+// mapper caller until PR-D wires FactCalls-derived call edges on top of the
+// symbols this PR produces. Definitions and calls land together.
 func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	buildStarts.Add(1)
 	cfg := &packages.Config{
 		Context: ctx,
 		Dir:     repo,
 		Env:     goToolEnv(),
+		Tests:   true, // index _test.go declarations as symbols/callers (see dedupeVariants)
 		Mode: packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
 			packages.NeedImports | packages.NeedDeps | packages.NeedTypes |
 			packages.NeedSyntax | packages.NeedTypesInfo | packages.NeedModule,
 	}
-	pkgs, err := packages.Load(cfg, "./...")
-	if err != nil {
-		return fmt.Errorf("load packages (is the Go toolchain installed?): %w", err)
-	}
-	if len(pkgs) == 0 {
-		return fmt.Errorf("no Go packages found under %s", repo)
-	}
+	rawPkgs, loadErr := packages.Load(cfg, "./...")
+	// pkgs is the funneled, "usable" view: nil on any of the three Go-free
+	// shapes (load error, empty slice, synthetic "no Go files" package —
+	// see usableGoPackages). Everything below that used to index the raw
+	// packages.Load result unconditionally now guards on len(pkgs) instead,
+	// since pkgs[0] is no longer safe to deref unconditionally.
+	pkgs := usableGoPackages(rawPkgs, loadErr)
+
+	// broken is the raw (not deduped) subset with type errors, kept
+	// un-deduped because callEdges' SSA walk needs to know per-variant
+	// (plain vs. in-package test) whether a package failed to type-check.
+	// dedupeVariants below is what symbol rows are emitted for — broken or
+	// clean, because symbols are AST-derived and a body-local type error
+	// never invalidates the AST. Ranging over pkgs is safe when pkgs is nil
+	// (zero iterations), so broken is naturally empty on a Go-free tree.
+	var broken []*packages.Package
 	for _, p := range pkgs {
 		if len(p.Errors) > 0 {
-			return fmt.Errorf("repo does not type-check: %w", p.Errors[0])
+			broken = append(broken, p)
 		}
 	}
 
-	module := ""
-	if pkgs[0].Module != nil {
-		module = pkgs[0].Module.Path
+	// Mapper-tier discovery + conversion is independent of the Go tier's
+	// health — it never inspects go/packages output at all — so it runs
+	// unconditionally and early, before both the both-tiers-empty check
+	// (C.10) and the majority-broken cap (C.11) decide anything. Best-effort:
+	// a mapperFiles walk failure (root WalkDir error only) folds to zero
+	// mapper symbols rather than failing the whole build — the Go tier can
+	// still stand on its own.
+	//
+	// mapperCarry (PR-E, design D6) runs BEFORE C.10's both-tiers-empty check:
+	// a file whose fresh parse is too broken to trust may otherwise leave
+	// mapperSyms empty even though its previous build has rows to carry —
+	// running carry-substitution first is what makes those rows count toward
+	// "not empty". dbPath still holds the previous build's graph.db here;
+	// writeGraphDB below is what replaces it.
+	var mapperFileList []mapperFile
+	var mapperSyms []mapperSym
+	var mapperCarriedUnits []string
+	if mFiles, _, mErr := mapperFiles(repo); mErr == nil {
+		mapperFileList = mFiles
+		freshMapperSyms, _ := mapperSymbols(mFiles)
+		mapperSyms, mapperCarriedUnits = mapperCarry(dbPath, mFiles, freshMapperSyms)
 	}
 
-	fset := pkgs[0].Fset
+	// Mapper-tier imports (Python via gts.ExtractImports, the JS family via
+	// tsImportsQuery — see mapper_imports.go's package doc comment):
+	// independent of both mapper symbols and carry-forward, so it
+	// runs unconditionally off the same discovered file list. Best-effort, same
+	// policy as the symbols/calls passes: a failure here never fails the build.
+	mapperImportRows, mapperBindings, _ := mapperImports(mapperFileList)
+
+	// C.10: a repo with neither a usable Go package nor a single mapper-tier
+	// symbol has nothing to build from at all.
+	if len(pkgs) == 0 && len(mapperSyms) == 0 {
+		return fmt.Errorf("repo has no indexable Go packages or mapper-tier files: %s", repo)
+	}
+
+	// Greater-than-50%-broken safety cap: past this point the fresh Go
+	// symbols and edges would be built mostly from stubs, so the previous
+	// whole graph is a better answer than a fresh one that is mostly
+	// carried-forward guesswork. Checked before any Go symbol/SSA work — no
+	// point paying for it on a doomed build. Computed over the funneled
+	// pkgs, not the raw packages.Load result: a Go-free tree's single
+	// synthetic "no Go files" package would otherwise count as 100% broken
+	// and re-trigger this exact hard error on every Go-free tree, undoing
+	// the tolerance usableGoPackages exists to provide. On an empty pkgs,
+	// broken is also empty, so this never fires (0*2 > 0 is false) — no
+	// extra guard needed.
+	//
+	// C.11: when mapper symbols ARE available, the cap suppresses the Go
+	// tier only instead of aborting the whole build — mapper content has
+	// nothing to do with Go's brokenness, and discarding it too would be a
+	// needless regression. Suppression reuses the exact len(pkgs) > 0 guards
+	// the Go-free path (D2) already relies on, by zeroing pkgs/broken here.
+	// The previous graph's Go symbols/edges are NOT preserved in this path —
+	// a real, disclosed trade-off (meta.empty_reason below), not silent data
+	// loss. A Go-only repo with no mapper content to compensate keeps the
+	// exact pre-C.11 hard-error behavior: this cap's existing protection is
+	// not weakened where it already applied.
+	goSuppressed := false
+	if len(broken)*2 > len(pkgs) {
+		if len(mapperSyms) == 0 {
+			return fmt.Errorf("repo does not type-check: %d of %d packages broken (majority), serving previous graph", len(broken), len(pkgs))
+		}
+		goSuppressed = true
+		pkgs = nil
+		broken = nil
+	}
+
+	module := ""
+	var fset *token.FileSet
+	if len(pkgs) > 0 {
+		if pkgs[0].Module != nil {
+			module = pkgs[0].Module.Path
+		}
+		fset = pkgs[0].Fset
+	}
+
 	files := map[string][]byte{}
 	readFile := func(name string) []byte {
 		if b, ok := files[name]; ok {
@@ -85,9 +219,131 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 		return b
 	}
 
+	// symbols/byPos start from the Go tier (empty when pkgs is nil, e.g. a
+	// Go-free tree or a suppressed majority-broken build). Mapper rows are
+	// appended BEFORE positional ID assignment (C.2) — symbol IDs are
+	// positional, so landing them after that loop would collide with id 0.
+	symbols, byPos := goSymbols(pkgs, module, fset, readFile, repo)
+	for _, ms := range mapperSyms {
+		symbols = append(symbols, ms.row)
+	}
+	for i, s := range symbols {
+		s.id = int64(i + 1)
+	}
+
+	// byQName is built from ALL symbols (Go + mapper) unconditionally, not
+	// just when broken packages exist — mapper qnames can collide with each
+	// other regardless of the Go tier's health (T4 part 1), and PR-E's
+	// carried-edge remap needs the collision set from every build, not only
+	// ones with a broken Go package.
+	byQName, collidedQNames := buildByQName(symbols)
+	mapperQNameCollisions.Add(uint64(len(collidedQNames)))
+
+	// callEdges/implementsEdges both deref pkgs[0] (ssa.NewProgram's Fset,
+	// implementsEdges' Fset), so they are gated behind len(pkgs) > 0 rather
+	// than guarded internally — buildIndex is their only caller.
+	edges := edgeSet{}
+	var impls map[[2]int64]bool
+	if len(pkgs) > 0 {
+		var err error
+		edges, err = callEdges(pkgs, broken, byPos)
+		if err != nil {
+			return err
+		}
+		impls = implementsEdges(pkgs, byPos)
+	}
+
+	// Mapper-tier call edges (PR-D): every mapper symbol's row.id is now
+	// final (set by the positional-ID loop above), so mapperEdges can build
+	// real (caller, callee) pairs. Merged via .add, never assigned outright —
+	// callEdges above may have already populated edges for the Go tier, and
+	// the two tiers' id spaces are disjoint by construction (D.7) so merging
+	// can never collide. fanoutCapped counts CALLSITES whose rung-5 candidate
+	// set exceeded fanoutCap (design D5/D6) — a build-level partiality fact,
+	// not a per-edge one, persisted below as meta.fanout_capped.
+	mapperEdgeSet, fanoutCapped := mapperEdges(mapperFileList, mapperSyms, mapperBindings)
+	for k, m := range mapperEdgeSet {
+		edges.add(k, m)
+	}
+
+	// Empty-graph / suppression hint: meta.empty_reason distinguishes a
+	// build failure from two legitimate non-failure outcomes that would
+	// otherwise ship a symbol-less or Go-less graph silently.
+	//   - "go_tier_suppressed_majority_broken" (C.11): mapper symbols exist,
+	//     but the Go tier was dropped by the majority-broken cap above.
+	//   - "no_indexable_symbols": a successful build that still indexed zero
+	//     symbols — e.g. a real Go package with no top-level declarations and
+	//     no mapper content (the only way this remains reachable after C.10).
+	emptyReason := ""
+	switch {
+	case goSuppressed:
+		emptyReason = "go_tier_suppressed_majority_broken"
+	case len(symbols) == 0:
+		emptyReason = "no_indexable_symbols"
+	}
+
+	// Carry-forward: a broken package's own functions have no SSA body, so
+	// callEdges can never freshly discover an edge whose CALLER is in that
+	// package (only its in-edges from clean callers survive, via the stub).
+	// dbPath still holds the previous build's graph.db at this point —
+	// writeGraphDB below is what replaces it. Best-effort: carriedEdges
+	// itself collapses any failure to zero edges, never an error here.
+	//
+	// carriedUnits is recorded unconditionally for every broken package, not
+	// just the ones carriedEdges actually recovered an edge for — its
+	// semantics are "this unit's edges are not freshly analyzed" (design.md),
+	// which holds even when carry-forward finds nothing to carry (e.g. the
+	// first-ever build on a broken tree).
+	var carriedUnits []string
+	if len(broken) > 0 {
+		brokenPkgNames := make(map[string]bool, len(broken))
+		for _, p := range broken {
+			brokenPkgNames[shortPkgPath(p.PkgPath, module)] = true
+		}
+		carriedUnits = slices.Sorted(maps.Keys(brokenPkgNames))
+
+		for k, m := range carriedEdges(dbPath, brokenPkgNames, byQName) {
+			edges.add(k, m)
+		}
+	}
+
+	// Mapper carry-forward edges (PR-E, design D6): a carried file's fresh
+	// (broken) parse has no usable byte ranges, so attributeMapperCalls can
+	// never attribute a callsite to it this build — only its own previous
+	// OUTGOING edges are missing without this, mirroring carriedEdges' exact
+	// asymmetry for the Go tier. Recovered by module path (mapperCarry's own
+	// key, matching symRow.pkg for a mapper row), and an edge whose callee
+	// qname collided at buildByQName time is dropped rather than remapped
+	// (T4 part 2) — collidedQNames is threaded straight through, no
+	// additional plumbing needed.
+	if len(mapperCarriedUnits) > 0 {
+		carriedModules := make(map[string]bool, len(mapperCarriedUnits))
+		for _, mp := range mapperCarriedUnits {
+			carriedModules[mp] = true
+		}
+		for k, m := range mapperCarriedEdges(dbPath, carriedModules, byQName, collidedQNames) {
+			edges.add(k, m)
+		}
+		carriedUnits = append(carriedUnits, mapperCarriedUnits...)
+	}
+	if len(carriedUnits) > 1 {
+		slices.Sort(carriedUnits)
+	}
+
+	return writeGraphDB(ctx, dbPath, repo, module, stampVal, symbols, edges, impls, carriedUnits, emptyReason, fanoutCapped, mapperImportRows)
+}
+
+// goSymbols extracts symbol rows from the type-checked Go packages,
+// populating byPos (declaration-position → row, used later to match SSA
+// functions back to rows) as a side effect. This is the ONLY place that ever
+// writes to byPos: mapperSymbols has no byPos parameter and structurally
+// cannot reach it, which is what keeps the mapper tier out of Go's
+// SSA-matching map by construction (tier disjointness, C.7). Safe when pkgs
+// is nil (zero iterations), matching the Go-free/suppressed-Go-tier paths.
+func goSymbols(pkgs []*packages.Package, module string, fset *token.FileSet, readFile func(string) []byte, repo string) ([]*symRow, map[string]*symRow) {
 	var symbols []*symRow
-	byPos := map[string]*symRow{} // "abs-file:line" → row, for SSA function matching
-	for _, p := range pkgs {
+	byPos := map[string]*symRow{}
+	for _, p := range dedupeVariants(pkgs) {
 		shortPkg := shortPkgPath(p.PkgPath, module)
 		for _, f := range p.Syntax {
 			for _, decl := range f.Decls {
@@ -95,17 +351,69 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 			}
 		}
 	}
-	for i, s := range symbols {
-		s.id = int64(i + 1)
-	}
+	return symbols, byPos
+}
 
-	edges, err := callEdges(pkgs, byPos)
-	if err != nil {
-		return err
+// buildByQName builds the qname→id lookup carriedEdges' remap uses, and
+// records every qname collision it observes along the way — never silently
+// last-wins with no trace (T4 part 1). Mapper-tier qnames are the realistic
+// source: Python's a/b/__init__.py and a/b.py both synthesize modulePath
+// "a.b" (mapper.go's modulePath), so their symbols' qnames can collide.
+// PR-E's carried-edge remap is what actually consumes the returned collided
+// set (dropping rather than remapping onto a possibly-wrong row) — this PR
+// only makes the collision visible.
+func buildByQName(symbols []*symRow) (map[string]int64, map[string]bool) {
+	byQName := make(map[string]int64, len(symbols))
+	var collided map[string]bool
+	for _, s := range symbols {
+		if _, exists := byQName[s.qname]; exists {
+			if collided == nil {
+				collided = map[string]bool{}
+			}
+			collided[s.qname] = true
+		}
+		byQName[s.qname] = s.id
 	}
-	impls := implementsEdges(pkgs, byPos)
+	return byQName, collided
+}
 
-	return writeGraphDB(ctx, dbPath, repo, module, stampVal, symbols, edges, impls)
+// dedupeVariants collapses packages.Load(Tests:true)'s multiple variants per
+// PkgPath into exactly one, for symbol-row emission only. Tests:true makes
+// packages.Load return up to four variants per tested package; the
+// in-package test variant (its p.ID contains " [") re-parses the SAME
+// production files as the plain variant under the SAME PkgPath. Emitting rows
+// for every variant would duplicate every production symbol — symbols.qname
+// has no UNIQUE constraint, so the duplicate insert succeeds silently and
+// findSymbol then reports every symbol in the package as ambiguous. The
+// in-package test variant is preferred when present because its p.Syntax
+// additionally covers the package's _test.go declarations; the synthesized
+// "<pkg>.test" main (external test binary) carries no symbols worth indexing
+// and is skipped outright. SSA is still built from the full, un-deduped pkgs
+// slice (see callEdges) — both variants' functions share identical
+// file:line positions, so their edges collapse onto the one retained row and
+// no edge is lost by deduping here.
+func dedupeVariants(pkgs []*packages.Package) []*packages.Package {
+	byPath := map[string]*packages.Package{}
+	var order []string
+	for _, p := range pkgs {
+		if strings.HasSuffix(p.PkgPath, ".test") {
+			continue // synthesized test-binary main, not repo source
+		}
+		existing, ok := byPath[p.PkgPath]
+		if !ok {
+			byPath[p.PkgPath] = p
+			order = append(order, p.PkgPath)
+			continue
+		}
+		if strings.Contains(p.ID, " [") && !strings.Contains(existing.ID, " [") {
+			byPath[p.PkgPath] = p // prefer the in-package test variant
+		}
+	}
+	out := make([]*packages.Package, 0, len(order))
+	for _, path := range order {
+		out = append(out, byPath[path])
+	}
+	return out
 }
 
 func shortPkgPath(pkgPath, module string) string {
@@ -231,15 +539,78 @@ func appendDeclSymbols(out []*symRow, byPos map[string]*symRow, fset *token.File
 	return out
 }
 
+// edgeMeta carries the two independent facts stored per edge: dispatch
+// ("static"/"interface", Go-only — "" for a mapper-tier edge, which has no
+// dispatch concept) and precision ("resolved"/"syntactic").
+type edgeMeta struct{ dispatch, precision string }
+
+// edgeSet maps a (caller id, callee id) pair to its edgeMeta. Both fields
+// merge independently via add: "static" wins a dispatch collision and
+// "resolved" wins a precision collision — each is the stronger reachability
+// claim for its axis. An empty incoming field never overwrites an
+// already-set field, so a weaker/unset observation can never erase a
+// stronger one already recorded for the same pair.
+type edgeSet map[[2]int64]edgeMeta
+
+// add merges m into the entry for k, field by field. A field wins over its
+// counterpart per the edgeSet doc comment; an empty incoming field is a
+// no-op for that field, never a clobber.
+func (es edgeSet) add(k [2]int64, m edgeMeta) {
+	existing, ok := es[k]
+	if !ok {
+		es[k] = m
+		return
+	}
+	if existing.dispatch != "static" && m.dispatch != "" {
+		existing.dispatch = m.dispatch
+	}
+	if existing.precision != "resolved" && m.precision != "" {
+		existing.precision = m.precision
+	}
+	es[k] = existing
+}
+
 // callEdges builds SSA and a CHA call graph, then maps functions back to
 // symbol rows by declaration position. CHA over-approximates interface
 // dispatch — the safe direction for "what breaks if I change X" — and needs
 // no main-function roots, so library repos index fully (RTA would not).
-func callEdges(pkgs []*packages.Package, byPos map[string]*symRow) (map[[2]int64]bool, error) {
-	prog, _ := ssautil.AllPackages(pkgs, ssa.InstantiateGenerics)
+//
+// SSA package creation is a manual packages.Visit walk, NOT
+// ssautil.AllPackages: AllPackages filters on p.IllTyped, which is
+// transitive, so a single body-local type error anywhere in the tree
+// collapses the whole call graph (measured: ~20% of edges survive). Instead
+// every package in the transitive import graph gets an ssa.Package —
+// type-checked packages get full syntax, packages in broken get a
+// types-only stub (prog.CreatePackage(p.Types, nil, nil, true)): its
+// types.Package is complete and walkable even though it has no function
+// bodies, so callers of its exported symbols still resolve.
+//
+// cg.DeleteSyntheticNodes() is deliberately NOT called: it deletes every
+// node with fn.Syntax() == nil, which includes every function in a broken
+// package's stub — splicing in→out through a deleted node drops every
+// in-edge into that package too. Clean-tree parity with the old
+// DeleteSyntheticNodes behavior is pinned by
+// TestCallEdges_MatchesCleanGoldenEdgeSet.
+func callEdges(pkgs []*packages.Package, broken []*packages.Package, byPos map[string]*symRow) (edgeSet, error) {
+	brokenSet := make(map[*packages.Package]bool, len(broken))
+	for _, p := range broken {
+		brokenSet[p] = true
+	}
+
+	prog := ssa.NewProgram(pkgs[0].Fset, ssa.InstantiateGenerics)
+	packages.Visit(pkgs, nil, func(p *packages.Package) {
+		if p.Types == nil {
+			return // unresolved dependency: nothing to build an ssa.Package from
+		}
+		if brokenSet[p] {
+			prog.CreatePackage(p.Types, nil, nil, true) // types-only stub, no bodies
+		} else {
+			prog.CreatePackage(p.Types, p.Syntax, p.TypesInfo, true)
+		}
+	})
+
 	prog.Build()
 	cg := cha.CallGraph(prog)
-	cg.DeleteSyntheticNodes()
 
 	resolve := func(fn *ssa.Function) (*symRow, bool) {
 		for fn.Parent() != nil { // attribute closures to their enclosing decl
@@ -256,7 +627,7 @@ func callEdges(pkgs []*packages.Package, byPos map[string]*symRow) (map[[2]int64
 		return row, ok
 	}
 
-	edges := map[[2]int64]bool{}
+	edges := edgeSet{}
 	err := callgraph.GraphVisitEdges(cg, func(e *callgraph.Edge) error {
 		// Drop edges whose RAW callee is a closure. CHA resolves a dynamic
 		// func()-typed call (defer cancel()) to every func()-shaped function in
@@ -279,7 +650,12 @@ func callEdges(pkgs []*packages.Package, byPos map[string]*symRow) (map[[2]int64
 		if !ok || caller == callee {
 			return nil
 		}
-		edges[[2]int64{caller.id, callee.id}] = true
+		dispatch := "static"
+		if e.Site != nil && e.Site.Common().IsInvoke() {
+			dispatch = "interface"
+		}
+		key := [2]int64{caller.id, callee.id}
+		edges.add(key, edgeMeta{dispatch: dispatch, precision: "resolved"})
 		return nil
 	})
 	if err != nil {
@@ -358,8 +734,23 @@ func implementsEdges(pkgs []*packages.Package, byPos map[string]*symRow) map[[2]
 }
 
 // writeGraphDB builds the new db at dbPath+".tmp" and renames it into place,
-// so readers never observe a half-built graph.
-func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges, impls map[[2]int64]bool) error {
+// so readers never observe a half-built graph. edges carries an edgeMeta
+// (dispatch + precision) per pair (callEdges/carriedEdges compute it),
+// persisted per-edge in the edges.dispatch and edges.precision columns.
+// carriedUnits lists the short package names whose edges are not freshly
+// analyzed this build (broken packages, carried forward from the previous
+// graph.db where possible) — stored wholesale as meta.carried_units,
+// newline-joined (package names never contain a newline, so no escaping is
+// needed). emptyReason is "no_indexable_symbols" when the build indexed zero
+// symbols (a healthy, not a failed, outcome), or "" otherwise — stored as
+// meta.empty_reason. fanoutCapped is the count of mapper-tier CALLSITES
+// whose rung-5 candidate set exceeded fanoutCap (design D5/D6) — stored as
+// meta.fanout_capped, always written (even "0") so its absence never has to
+// be interpreted as "unknown" vs "none". imports is the mapper tier's
+// import rows (mapper_imports.go — Python and the JS family), each
+// carrying its own explicit precision (the imports.precision column has no
+// DDL default, unlike edges/implements).
+func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string, emptyReason string, fanoutCapped int, imports []importRow) error {
 	if err := ctx.Err(); err != nil {
 		return err // cancelled before work started
 	}
@@ -401,24 +792,34 @@ func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, sy
 				return fmt.Errorf("insert symbol %s: %w", s.qname, err)
 			}
 		}
-		edgeIns, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO edges (caller, callee) VALUES (?,?)`)
+		edgeIns, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO edges (caller, callee, dispatch, precision) VALUES (?,?,?,?)`)
 		if err != nil {
 			return err
 		}
 		defer edgeIns.Close()
-		for e := range edges {
-			if _, err := edgeIns.ExecContext(ctx, e[0], e[1]); err != nil {
+		for e, m := range edges {
+			if _, err := edgeIns.ExecContext(ctx, e[0], e[1], m.dispatch, m.precision); err != nil {
 				return err
 			}
 		}
-		implIns, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO implements (iface, impl) VALUES (?,?)`)
+		implIns, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO implements (iface, impl, precision) VALUES (?,?,?)`)
 		if err != nil {
 			return err
 		}
 		defer implIns.Close()
 		for e := range impls {
-			if _, err := implIns.ExecContext(ctx, e[0], e[1]); err != nil {
+			if _, err := implIns.ExecContext(ctx, e[0], e[1], "resolved"); err != nil {
 				return err
+			}
+		}
+		impIns, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO imports (importer_file, imported_module, precision) VALUES (?,?,?)`)
+		if err != nil {
+			return err
+		}
+		defer impIns.Close()
+		for _, r := range imports {
+			if _, err := impIns.ExecContext(ctx, r.importerFile, r.importedModule, r.precision); err != nil {
+				return fmt.Errorf("insert import %s -> %s: %w", r.importerFile, r.importedModule, err)
 			}
 		}
 		// FTS mirror for the search fallback; rowid == symbols.id for the join back.
@@ -428,6 +829,9 @@ func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, sy
 		}
 		for k, v := range map[string]string{
 			"stamp": stampVal, "repo": repo, "module": module, "indexed_at": nowUTC(),
+			"carried_units": strings.Join(carriedUnits, "\n"),
+			"empty_reason":  emptyReason,
+			"fanout_capped": strconv.Itoa(fanoutCapped),
 		} {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO meta (key, value) VALUES (?,?)`, k, v); err != nil {
 				return err

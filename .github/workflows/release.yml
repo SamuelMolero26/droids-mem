@@ -81,7 +81,7 @@ jobs:
         run: |
           mkdir -p dist
           OUT="dist/droids-mem-$TAG-$GOOS-$GOARCH"
-          go build -trimpath -ldflags "-s -w -X main.version=$TAG" -o "$OUT" ./cmd/droids-mem
+          go build -trimpath -ldflags "-s -w -X main.version=$TAG" -tags "grammar_subset,grammar_subset_typescript,grammar_subset_tsx,grammar_subset_javascript,grammar_subset_python" -o "$OUT" ./cmd/droids-mem
           (cd dist && sha256sum "$(basename "$OUT")" > "$(basename "$OUT").sha256")
           ls -lh dist/
 
@@ -170,7 +170,6 @@ jobs:
             echo
             echo '```'
             echo "brew tap samuelmolero26/tap && brew install droids-mem"
-            echo "go install github.com/samuelmolero26/droids-mem/cmd/droids-mem@$TAG"
             echo '```'
             echo
             echo "Or download a prebuilt binary below."

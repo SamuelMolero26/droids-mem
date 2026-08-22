@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,8 +47,10 @@ CREATE INDEX idx_symbols_qname   ON symbols(qname);
 CREATE INDEX idx_symbols_name    ON symbols(name);
 CREATE INDEX idx_symbols_package ON symbols(package);
 CREATE TABLE edges (
-  caller INTEGER NOT NULL,
-  callee INTEGER NOT NULL,
+  caller    INTEGER NOT NULL,
+  callee    INTEGER NOT NULL,
+  dispatch  TEXT NOT NULL DEFAULT 'static',
+  precision TEXT NOT NULL DEFAULT 'resolved',
   PRIMARY KEY (caller, callee)
 ) WITHOUT ROWID;
 CREATE INDEX idx_edges_callee ON edges(callee);
@@ -55,11 +59,23 @@ CREATE INDEX idx_edges_callee ON edges(callee);
 -- symbols.id, mirroring edges. Reverse index serves the "what does X satisfy"
 -- direction (satisfies) the same way idx_edges_callee serves callers.
 CREATE TABLE implements (
-  iface INTEGER NOT NULL,
-  impl  INTEGER NOT NULL,
+  iface     INTEGER NOT NULL,
+  impl      INTEGER NOT NULL,
+  precision TEXT NOT NULL DEFAULT 'resolved',
   PRIMARY KEY (iface, impl)
 ) WITHOUT ROWID;
 CREATE INDEX idx_implements_impl ON implements(impl);
+-- Import edges: endpoints are module-text, not symbol
+-- ids, because an imported module usually has no symbol row at all (import
+-- axios from "axios" — the imported module is not in the repo). Populated by
+-- the mapper tier; nothing writes it yet. No FTS index —
+-- imports are looked up by importer_file/imported_module, never searched.
+CREATE TABLE imports (
+  importer_file   TEXT NOT NULL,
+  imported_module TEXT NOT NULL,
+  precision       TEXT NOT NULL,
+  PRIMARY KEY (importer_file, imported_module)
+) WITHOUT ROWID;
 -- Ranks symbols by relevance to a free-text task phrase (the graph_symbol
 -- search fallback). rowid == symbols.id, so a MATCH joins straight back.
 -- Populated wholesale in writeGraphDB — the graph never updates in place, so
@@ -72,15 +88,46 @@ CREATE VIRTUAL TABLE symbols_fts USING fts5(
 // ErrNotFound reports a symbol or package with no match in the graph.
 var ErrNotFound = errors.New("not found")
 
+// staleUnitsCap bounds how many carried-unit names Freshness inlines. An
+// unbounded list is the one measured unbounded field in the design (a
+// zod-sized TS repo would inject ~12 KB into every response, larger than a
+// whole 5 KB response) — StaleUnitsTotal always carries the true count.
+const staleUnitsCap = 5
+
 // Freshness is attached to every response so the agent can tell a fresh graph
 // from a stale one (ADR-0020: go/packages needs compiling code, so a mid-edit
-// repo serves the last good graph, marked stale).
+// repo serves the last good graph, marked stale). Stale is reserved for
+// genuine build failures (I/O errors, corrupt cache, or a graph currently
+// being rebuilt) — a partial build that itself succeeded is not stale, even
+// though some of its units carry forward edges (StaleUnits/StaleUnitsTotal).
 type Freshness struct {
 	Stamp      string `json:"stamp"`
 	IndexedAt  string `json:"indexed_at"`
 	Stale      bool   `json:"stale,omitempty"`
 	Rebuilding bool   `json:"rebuilding,omitempty"`
 	IndexError string `json:"index_error,omitempty"`
+	// StaleUnits lists the first staleUnitsCap package names riding on
+	// carried-forward edges from a previous build; StaleUnitsTotal is the
+	// true count even when the list is capped.
+	StaleUnits      []string `json:"stale_units,omitempty"`
+	StaleUnitsTotal int      `json:"stale_units_total,omitempty"`
+	// EmptyReason distinguishes two legitimate non-failure outcomes from a
+	// build failure, so neither is ever confused with Stale/IndexError:
+	// "no_indexable_symbols" (a successful build that still indexed zero
+	// symbols) and "go_tier_suppressed_majority_broken" (mapper symbols
+	// exist, but the majority-broken cap dropped the Go tier — C.11). Only
+	// meaningful when the graph is NOT Stale — a stale graph's failure state
+	// is already distinguishable via IndexError (see writeFreshness).
+	EmptyReason string `json:"empty_reason,omitempty"`
+	// FanoutCapped is the count of mapper-tier CALLSITES whose rung-5
+	// candidate set exceeded fanoutCap (design D5/D6) — a build-level
+	// partiality fact, not a per-edge one. Zero (the JSON-omitted default)
+	// means no callsite in this build hit the cap.
+	FanoutCapped int `json:"fanout_capped,omitempty"`
+	// carriedUnits is the FULL list (unexported, never serialized) backing the
+	// per-symbol Carried flag (query.go) — membership can fall outside the
+	// capped StaleUnits list above.
+	carriedUnits []string
 }
 
 // stampTTL controls how long a stamp() result is cached per repo. The stamp
@@ -359,24 +406,42 @@ func canonicalRepo(repo string) (string, error) {
 	return moduleRoot(abs), nil
 }
 
-// moduleRoot walks up from dir to the nearest ancestor holding a go.mod, which
-// is exactly the scope buildIndex loads (`packages.Load(Dir: repo, "./...")`).
-// Without it, an agent naming a subdirectory keys a SECOND cache built from
-// only that subtree while meta.module still names the whole module — a graph
-// whose callers and transitive_callers are silently incomplete.
+// moduleRoot walks up from dir to the repository scope that should own the
+// cache entry. Without it, an agent naming a subdirectory keys a SECOND cache
+// built from only that subtree while meta.module still names the whole module
+// — a graph whose callers and transitive_callers are silently incomplete.
 //
-// Stops at the first go.mod so a nested module resolves to itself, not its
-// parent. Returns dir unchanged when no go.mod exists anywhere above (a
-// GOPATH-style tree, or simply not Go), preserving the previous behaviour so
-// buildIndex still reports its own "no Go packages found".
+// go.mod wins, because it is exactly the scope buildIndex loads
+// (`packages.Load(Dir: repo, "./...")`), and the walk stops at the FIRST one so
+// a nested module resolves to itself rather than its parent.
+//
+// A checkout with no go.mod above it falls back to the nearest ancestor .git,
+// the language-neutral equivalent: a repository is a repository whether or not
+// it holds Go. Without that fallback the split-cache bug is merely moved rather
+// than fixed — it reappears for every non-Go tree, where nothing anchors the
+// walk at all.
+//
+// Returns dir unchanged when neither exists (a bare directory, or a GOPATH-style
+// tree), preserving the previous behaviour so buildIndex still reports its own
+// "no Go packages found".
 func moduleRoot(dir string) string {
+	for _, anchor := range []string{"go.mod", ".git"} {
+		if root, ok := walkUpFor(dir, anchor); ok {
+			return root
+		}
+	}
+	return dir
+}
+
+// walkUpFor returns the nearest ancestor of dir (inclusive) containing name.
+func walkUpFor(dir, name string) (string, bool) {
 	for cur := dir; ; {
-		if _, err := os.Stat(filepath.Join(cur, "go.mod")); err == nil {
-			return cur
+		if _, err := os.Stat(filepath.Join(cur, name)); err == nil {
+			return cur, true
 		}
 		parent := filepath.Dir(cur)
 		if parent == cur { // filesystem root
-			return dir
+			return "", false
 		}
 		cur = parent
 	}
@@ -726,7 +791,7 @@ func (m *Manager) open(path string) (*sql.DB, func(), Freshness, error) {
 	// through freshnessNow and its callers for a two-row read off an
 	// already-cached local handle. The cancellation that matters is on the
 	// walks and the build, both of which are context-bound.
-	rows, err := entry.db.Query(`SELECT key, value FROM meta WHERE key IN ('stamp','indexed_at')`) //nolint:noctx // see above
+	rows, err := entry.db.Query(`SELECT key, value FROM meta WHERE key IN ('stamp','indexed_at','carried_units','empty_reason','fanout_capped')`) //nolint:noctx // see above
 	if err != nil {
 		release()
 		return nil, noopRelease, Freshness{}, fmt.Errorf("read graph meta: %w", err)
@@ -743,6 +808,22 @@ func (m *Manager) open(path string) (*sql.DB, func(), Freshness, error) {
 			fresh.Stamp = v
 		case "indexed_at":
 			fresh.IndexedAt = v
+		case "carried_units":
+			if v != "" {
+				units := strings.Split(v, "\n")
+				fresh.carriedUnits = units
+				fresh.StaleUnitsTotal = len(units)
+				fresh.StaleUnits = units[:min(len(units), staleUnitsCap)]
+			}
+		case "empty_reason":
+			fresh.EmptyReason = v
+		case "fanout_capped":
+			// Best-effort: an unparsable value (e.g. a pre-PR-D graph.db with no
+			// such row, v=="") behaves the same as "not truncated" — 0 — rather
+			// than an error, since a missing/empty row is not a build failure.
+			if n, err := strconv.Atoi(v); err == nil {
+				fresh.FanoutCapped = n
+			}
 		}
 	}
 	if err := rows.Err(); err != nil {
