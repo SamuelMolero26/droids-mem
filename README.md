@@ -40,13 +40,22 @@ brew install droids-mem
 
 If Homebrew refuses the tap as untrusted: `brew trust samuelmolero26/tap`.
 
-### Go toolchain
+### Install script (macOS / Linux)
 
 ```shell
-go install github.com/samuelmolero26/droids-mem/cmd/droids-mem@latest
+curl -fsSL https://raw.githubusercontent.com/SamuelMolero26/droids-mem/main/install.sh | sh
 ```
 
-Requires Go 1.25+. Pure-Go (`modernc.org/sqlite`) — builds without CGO.
+Downloads the release binary for your platform, verifies it against the
+published `.sha256`, and installs it to `/usr/local/bin` — or `~/.local/bin`
+when that is not writable. Set `DROIDS_MEM_PREFIX` to choose a directory, or
+`DROIDS_MEM_VERSION` to pin a tag.
+
+Every release asset also carries a SLSA provenance attestation:
+
+```shell
+gh attestation verify "$(command -v droids-mem)" --repo SamuelMolero26/droids-mem
+```
 
 ### Prebuilt binary
 
@@ -54,6 +63,8 @@ Grab one for `linux/{amd64,arm64}` or `darwin/{amd64,arm64}` from the
 [Releases page](https://github.com/SamuelMolero26/droids-mem/releases).
 
 ### From source
+
+Requires Go 1.25+. Pure-Go (`modernc.org/sqlite`) — builds without CGO.
 
 ```shell
 git clone https://github.com/SamuelMolero26/droids-mem
