@@ -219,6 +219,12 @@ func weakestPrecision(precisions []string) string {
 
 // Symbol resolves and answers a symbol-anchored query against repo's graph.
 func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolResponse, error) {
+	if strings.TrimSpace(req.Repo) == "" {
+		return nil, fmt.Errorf("repo is required: %w", ErrInvalidArgument)
+	}
+	if strings.TrimSpace(req.Symbol) == "" {
+		return nil, fmt.Errorf("symbol is required: %w", ErrInvalidArgument)
+	}
 	conn, release, fresh, err := m.ensureFresh(ctx, req.Repo)
 	if err != nil {
 		return nil, err
@@ -750,22 +756,26 @@ type PackageResponse struct {
 	Hint       string          `json:"hint,omitempty"`
 }
 
-// Package returns the exported surface of one package: signatures + first
-// doc line per symbol, never bodies.
 // resolvePackage maps a user-supplied package name onto a real `package`
 // value, accepting both shapes the MCP schema documents ("internal/store" or
 // just "store"). The Go tier stores slash-separated paths but the mapper
-// stores Python modules dotted (decision 7), so a slash-anchored suffix alone
-// answers not_found for every documented form on a Python repo except the
-// exact dotted path. Two rungs, most literal first: the name as typed, then
-// with '/' rewritten to '.'. Shortest match wins per rung — the old tie-break.
+// stores Python modules dotted, so a slash-anchored suffix alone answers
+// not_found for every documented form on a Python repo except the exact dotted
+// path. Two rungs, most literal first: the name as typed, then with '/'
+// rewritten to '.'. Shortest match wins per rung — the old tie-break.
 func resolvePackage(ctx context.Context, conn *sql.DB, name string) (string, error) {
 	const q = `SELECT package FROM symbols
 		WHERE package = ? OR package LIKE ? OR package LIKE ?
 		ORDER BY length(package) LIMIT 1`
 
-	pkg := strings.Trim(name, "/")
+	pkg := strings.Trim(strings.TrimSpace(name), "/")
+	if pkg == "" {
+		return "", fmt.Errorf("package %q: %w", name, ErrInvalidArgument)
+	}
 	for _, cand := range []string{pkg, strings.ReplaceAll(pkg, "/", ".")} {
+		if cand == "" {
+			continue
+		}
 		var resolved string
 		switch err := conn.QueryRowContext(ctx, q, cand, "%/"+cand, "%."+cand).Scan(&resolved); {
 		case err == nil:
@@ -777,20 +787,130 @@ func resolvePackage(ctx context.Context, conn *sql.DB, name string) (string, err
 	return "", fmt.Errorf("package %q: %w", name, ErrNotFound)
 }
 
+// packageDirWhere builds a WHERE clause that matches directory-level packages
+// for JS/TS (slash) and Python (dot) mapper modules. A query for a directory
+// like "app/components/ui" has no symbol with package exactly that string —
+// children live at "app/components/ui/button", "app/components/ui/input", etc.
+// The clause matches:
+//
+//	package = dir
+//	package LIKE dir || '/%'          (prefix: dir is ancestor)
+//	package LIKE '%/' || dir           (suffix: bare leaf)
+//	package LIKE '%/' || dir || '/%'   (infix: qualified mid-path)
+//
+// plus the same three with '.' for Python. This lets "ui", "components/ui",
+// and "app/components/ui" all find "app/components/ui/button".
+func packageDirWhere(pkg string) (string, []any) {
+	pkg = strings.Trim(strings.TrimSpace(pkg), "/")
+	candidates := []string{pkg}
+	if dotted := strings.ReplaceAll(pkg, "/", "."); dotted != pkg {
+		candidates = append(candidates, dotted)
+	}
+	var usable []string
+	for _, c := range candidates {
+		if c != "" {
+			usable = append(usable, c)
+		}
+	}
+	if len(usable) == 0 {
+		return "1=0", nil
+	}
+	var clauses []string
+	var args []any
+	for _, cand := range usable {
+		clauses = append(clauses, "package = ?")
+		args = append(args, cand)
+		clauses = append(clauses, "package LIKE ? || '/%'")
+		args = append(args, cand)
+		clauses = append(clauses, "package LIKE '%/' || ?")
+		args = append(args, cand)
+		clauses = append(clauses, "package LIKE '%/' || ? || '/%'")
+		args = append(args, cand)
+		clauses = append(clauses, "package LIKE ? || '.%'")
+		args = append(args, cand)
+		clauses = append(clauses, "package LIKE '%.' || ?")
+		args = append(args, cand)
+		clauses = append(clauses, "package LIKE '%.' || ? || '.%'")
+		args = append(args, cand)
+	}
+	return "(" + strings.Join(clauses, " OR ") + ")", args
+}
+
+// Package returns the exported surface of one package: signatures + first
+// doc line per symbol, never bodies.
 func (m *Manager) Package(ctx context.Context, req PackageRequest) (*PackageResponse, error) {
+	if strings.TrimSpace(req.Repo) == "" {
+		return nil, fmt.Errorf("repo is required: %w", ErrInvalidArgument)
+	}
+	if strings.TrimSpace(req.Package) == "" {
+		return nil, fmt.Errorf("package is required: %w", ErrInvalidArgument)
+	}
 	conn, release, fresh, err := m.ensureFresh(ctx, req.Repo)
 	if err != nil {
 		return nil, err
 	}
 	defer release() // hold the handle for every statement below, not just the first
 	m.bump(req.Repo, "package")
-	resolved, err := resolvePackage(ctx, conn, req.Package)
-	if err != nil {
+
+	// First tier: exact or suffix (preserves Go and Python leaf behavior).
+	if resolved, err := resolvePackage(ctx, conn, req.Package); err == nil {
+		resp := &PackageResponse{Repo: req.Repo, Freshness: fresh, Package: resolved, Hint: pkgSymbolsLimit}
+		var hints []string
+		if fresh.Stale {
+			hints = append(hints, staleGraphHint)
+		}
+		if fresh.Rebuilding {
+			hints = append(hints, rebuildingHint)
+		}
+		if len(hints) > 0 {
+			hints = append(hints, pkgSymbolsLimit)
+			resp.Hint = strings.Join(hints, "; ")
+		}
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM symbols WHERE package = ? AND exported = 0`,
+			resolved).Scan(&resp.Unexported); err != nil {
+			return nil, err
+		}
+		rows, err := conn.QueryContext(ctx, `SELECT qname, kind, signature, doc, file, line FROM symbols
+			WHERE package = ? AND exported = 1 ORDER BY file, line LIMIT ?`,
+			resolved, maxPkgSymbols+1)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var s PackageSymbol
+			var doc string
+			if err := rows.Scan(&s.QName, &s.Kind, &s.Signature, &doc, &s.File, &s.Line); err != nil {
+				return nil, err
+			}
+			s.Doc = firstLine(doc)
+			resp.Symbols = append(resp.Symbols, s)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		if len(resp.Symbols) > maxPkgSymbols {
+			resp.Symbols = resp.Symbols[:maxPkgSymbols]
+			resp.Truncated = true
+		}
+		return resp, nil
+	} else if !errors.Is(err, ErrNotFound) {
 		return nil, err
 	}
 
-	resp := &PackageResponse{Repo: req.Repo, Freshness: fresh, Package: resolved, Hint: pkgSymbolsLimit}
-
+	// Second tier: directory-level prefix aggregation for JS/TS (and Python dirs).
+	// No exact/suffix package exists — treat the query as a directory path and
+	// aggregate symbols from all descendant modules.
+	pkgNorm := strings.Trim(strings.TrimSpace(req.Package), "/")
+	where, args := packageDirWhere(pkgNorm)
+	var total int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM symbols WHERE `+where, args...).Scan(&total); err != nil { // #nosec G202 -- where is built from placeholder ORs, not user string concatenation
+		return nil, err
+	}
+	if total == 0 {
+		return nil, fmt.Errorf("package %q: %w", req.Package, ErrNotFound)
+	}
+	resp := &PackageResponse{Repo: req.Repo, Freshness: fresh, Package: pkgNorm, Hint: pkgSymbolsLimit}
 	var hints []string
 	if fresh.Stale {
 		hints = append(hints, staleGraphHint)
@@ -802,13 +922,14 @@ func (m *Manager) Package(ctx context.Context, req PackageRequest) (*PackageResp
 		hints = append(hints, pkgSymbolsLimit)
 		resp.Hint = strings.Join(hints, "; ")
 	}
-	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM symbols WHERE package = ? AND exported = 0`,
-		resolved).Scan(&resp.Unexported); err != nil {
+	// Unexported count across the aggregated directory.
+	uq := `SELECT COUNT(*) FROM symbols WHERE ` + where + ` AND exported = 0` // #nosec G202 -- see above
+	if err := conn.QueryRowContext(ctx, uq, args...).Scan(&resp.Unexported); err != nil {
 		return nil, err
 	}
-	rows, err := conn.QueryContext(ctx, `SELECT qname, kind, signature, doc, file, line FROM symbols
-		WHERE package = ? AND exported = 1 ORDER BY file, line LIMIT ?`,
-		resolved, maxPkgSymbols+1)
+	sq := `SELECT qname, kind, signature, doc, file, line FROM symbols WHERE ` + where + ` AND exported = 1 ORDER BY file, line LIMIT ?` // #nosec G202 -- see above
+	sargs := append(append([]any{}, args...), maxPkgSymbols+1)
+	rows, err := conn.QueryContext(ctx, sq, sargs...)
 	if err != nil {
 		return nil, err
 	}
