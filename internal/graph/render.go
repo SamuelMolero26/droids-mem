@@ -2,8 +2,11 @@ package graph
 
 import (
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/odvcencio/gotreesitter/grammars"
 )
 
 // TOON rendering of graph responses (ADR-0027). The code-graph surface answers
@@ -14,8 +17,9 @@ import (
 //
 // The render is hybrid, not a pure TOON document: scalars are `key: value`
 // lines, uniform arrays are TOON tables, and the multiline `source` body is a
-// fenced code block — an agent reads real Go, not a \n-escaped string, which is
-// both fewer tokens and more readable than the old JSON.
+// fenced code block, tagged with the symbol's own language — an agent reads
+// real source, not a \n-escaped string, which is both fewer tokens and more
+// readable than the old JSON.
 
 // RenderSymbol encodes a symbol-anchored response.
 func RenderSymbol(r *SymbolResponse) string {
@@ -31,7 +35,7 @@ func RenderSymbol(r *SymbolResponse) string {
 			fmt.Fprintf(&b, "doc: %s\n", s.Doc)
 		}
 		if s.Source != "" {
-			fmt.Fprintf(&b, "source:\n%s\n", fence(s.Source))
+			fmt.Fprintf(&b, "source:\n%s\n", fence(s.Source, s.File))
 		}
 	}
 
@@ -185,11 +189,27 @@ func loc(file string, line int) string {
 	return file + ":" + strconv.Itoa(line)
 }
 
-// fence wraps a Go source body in a ```go code block. The fence length adapts
-// to the longest backtick run inside the body (Go raw-string literals contain
-// backticks), so a body containing a raw-string regex still closes cleanly
-// instead of terminating the fence early.
-func fence(src string) string {
+// fenceTag names the code-fence language for a symbol's source file, reusing
+// the indexer's own detection and allowlist so the tag can never claim a
+// language the graph did not parse. Go is answered directly: the semantic tier
+// owns it, so it is deliberately absent from mapperLanguages (ADR-0034
+// decision 8). Unknown extension: untagged fence, never a wrong one.
+func fenceTag(file string) string {
+	if filepath.Ext(file) == ".go" {
+		return "go"
+	}
+	if e := grammars.DetectLanguage(filepath.Base(file)); e != nil && mapperLanguages[e.Name] {
+		return e.Name
+	}
+	return ""
+}
+
+// fence wraps a source body in a code block tagged with the file's language.
+// The fence length adapts to the longest backtick run inside the body (Go
+// raw-string literals contain backticks, and so do JS/TS template literals),
+// so a body containing one still closes cleanly instead of terminating the
+// fence early.
+func fence(src, file string) string {
 	longest, run := 0, 0
 	for _, c := range src {
 		if c == '`' {
@@ -202,5 +222,5 @@ func fence(src string) string {
 		}
 	}
 	ticks := strings.Repeat("`", max(3, longest+1))
-	return ticks + "go\n" + src + "\n" + ticks
+	return ticks + fenceTag(file) + "\n" + src + "\n" + ticks
 }

@@ -46,7 +46,7 @@ func TestRenderSymbol_TableAndFence(t *testing.T) {
 	// The fence must be at least 3 backticks and strictly longer than the
 	// longest backtick run in the body (here 1), and must close.
 	src := r.Symbol.Source
-	fenced := fence(src)
+	fenced := fence(src, r.Symbol.File)
 	openLen := len(fenced) - len(strings.TrimLeft(fenced, "`"))
 	if openLen < 3 {
 		t.Errorf("fence shorter than 3 backticks: %d", openLen)
