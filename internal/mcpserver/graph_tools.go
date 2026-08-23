@@ -165,5 +165,8 @@ func graphToolErr(err error) *mcp.CallToolResult {
 	if errors.Is(err, graph.ErrNotFound) {
 		return mcp.NewToolResultError(fmt.Sprintf(`{"status":"error","error":"not_found","message":%q,"retryable":true,"suggestion":"check spelling, or query graph_package first to list symbols"}`, err.Error()))
 	}
+	if errors.Is(err, graph.ErrInvalidArgument) {
+		return mcp.NewToolResultError(fmt.Sprintf(`{"status":"error","error":"invalid_argument","message":%q,"retryable":false,"suggestion":"provide a valid repo and package"}`, err.Error()))
+	}
 	return mcp.NewToolResultError(err.Error())
 }
