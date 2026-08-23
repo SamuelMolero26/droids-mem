@@ -419,14 +419,24 @@ func callerSplit(ctx context.Context, conn *sql.DB, id int64) (total, inTests, v
 
 // findSymbol resolves a name to symbol stubs: exact qname first, then short
 // name, then qname suffix (e.g. "Store.Save" or "store.Save").
+//
+// The suffix rung tries both separators the two tiers use: the Go tier joins
+// with '.' ("internal/store.Store.Save"), the mapper with ':' (modulePath +
+// ":" + container + "." + name, mapper_symbols.go). A dot-anchored LIKE alone
+// therefore never matches the receiver-qualified form the MCP schema
+// documents, on any mapper language — and missing here does not surface as an
+// error: the caller drops to the BM25 search fallback and answers with a menu
+// instead of the symbol's body, callers, and callees.
 func findSymbol(ctx context.Context, conn *sql.DB, name string) ([]Neighbor, error) {
+	suffix := strings.TrimPrefix(name, ".")
 	queries := []struct {
 		where string
 		arg   string
 	}{
 		{"qname = ?", name},
 		{"name = ?", name},
-		{"qname LIKE ?", "%." + strings.TrimPrefix(name, ".")},
+		{"qname LIKE ?", "%." + suffix},
+		{"qname LIKE ?", "%:" + suffix},
 	}
 	for _, q := range queries {
 		rows, err := conn.QueryContext(ctx, `SELECT qname, signature, file, line FROM symbols
@@ -742,6 +752,31 @@ type PackageResponse struct {
 
 // Package returns the exported surface of one package: signatures + first
 // doc line per symbol, never bodies.
+// resolvePackage maps a user-supplied package name onto a real `package`
+// value, accepting both shapes the MCP schema documents ("internal/store" or
+// just "store"). The Go tier stores slash-separated paths but the mapper
+// stores Python modules dotted (decision 7), so a slash-anchored suffix alone
+// answers not_found for every documented form on a Python repo except the
+// exact dotted path. Two rungs, most literal first: the name as typed, then
+// with '/' rewritten to '.'. Shortest match wins per rung — the old tie-break.
+func resolvePackage(ctx context.Context, conn *sql.DB, name string) (string, error) {
+	const q = `SELECT package FROM symbols
+		WHERE package = ? OR package LIKE ? OR package LIKE ?
+		ORDER BY length(package) LIMIT 1`
+
+	pkg := strings.Trim(name, "/")
+	for _, cand := range []string{pkg, strings.ReplaceAll(pkg, "/", ".")} {
+		var resolved string
+		switch err := conn.QueryRowContext(ctx, q, cand, "%/"+cand, "%."+cand).Scan(&resolved); {
+		case err == nil:
+			return resolved, nil
+		case !errors.Is(err, sql.ErrNoRows):
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("package %q: %w", name, ErrNotFound)
+}
+
 func (m *Manager) Package(ctx context.Context, req PackageRequest) (*PackageResponse, error) {
 	conn, release, fresh, err := m.ensureFresh(ctx, req.Repo)
 	if err != nil {
@@ -749,14 +784,7 @@ func (m *Manager) Package(ctx context.Context, req PackageRequest) (*PackageResp
 	}
 	defer release() // hold the handle for every statement below, not just the first
 	m.bump(req.Repo, "package")
-	pkg := strings.Trim(req.Package, "/")
-	var resolved string
-	err = conn.QueryRowContext(ctx, `SELECT package FROM symbols
-		WHERE package = ? OR package LIKE ? ORDER BY length(package) LIMIT 1`,
-		pkg, "%/"+pkg).Scan(&resolved)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("package %q: %w", req.Package, ErrNotFound)
-	}
+	resolved, err := resolvePackage(ctx, conn, req.Package)
 	if err != nil {
 		return nil, err
 	}
