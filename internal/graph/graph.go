@@ -88,6 +88,9 @@ CREATE VIRTUAL TABLE symbols_fts USING fts5(
 // ErrNotFound reports a symbol or package with no match in the graph.
 var ErrNotFound = errors.New("not found")
 
+// ErrInvalidArgument reports a bad request (missing repo or package).
+var ErrInvalidArgument = errors.New("invalid argument")
+
 // staleUnitsCap bounds how many carried-unit names Freshness inlines. An
 // unbounded list is the one measured unbounded field in the design (a
 // zod-sized TS repo would inject ~12 KB into every response, larger than a

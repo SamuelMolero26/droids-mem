@@ -194,6 +194,10 @@ func writeGraphErr(err error) {
 			withSuggestion("check spelling, or run `graph package <pkg>` to list symbols"))
 		exitWith(ExitNotFound)
 	}
+	if errors.Is(err, graph.ErrInvalidArgument) {
+		writeError("invalid_argument", err.Error(), false)
+		exitWith(ExitUsage)
+	}
 	writeError("graph_query_failed", err.Error(), false)
 	exitWith(ExitError)
 }
