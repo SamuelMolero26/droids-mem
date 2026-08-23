@@ -61,7 +61,26 @@ func collectMapperCalls(files []mapperFile) ([]mapperFileCalls, mapperStats) {
 			continue
 		}
 
-		if refs := extractMapperCalls(eng, src, &stats); len(refs) > 0 {
+		tree, err := eng.parsers.Parse(src) // pooled: see mapperEngine.parsers
+		if err != nil {
+			stats.parseErr++
+			continue // unparsable file is skip-and-continue, not fatal
+		}
+
+		var refs []gts.CallRef
+		if eng.calls != nil {
+			refs = eng.calls.Extract(tree).Calls
+		} else {
+			stats.outlineDecline++ // FactProgram failed to compile for this language
+		}
+		if jsFamilyLanguages[f.entry.Name] {
+			if jsx := jsxCallRefs(tree, eng.lang, f.entry.Name, src); len(jsx) > 0 {
+				refs = append(refs, jsx...)
+			}
+		}
+		tree.Release()
+
+		if len(refs) > 0 {
 			out = append(out, mapperFileCalls{file: f.rel, lang: f.entry.Name, refs: refs})
 		}
 	}
@@ -89,6 +108,86 @@ func extractMapperCalls(eng *mapperEngine, src []byte, stats *mapperStats) []gts
 		return nil
 	}
 	return eng.calls.Extract(tree).Calls
+}
+
+var _ = extractMapperCalls // keep used: direct FactCalls testing even though collectMapperCalls now parses inline for JSX co-extraction
+
+// jsxCallRefs walks tree for JSX component uses — jsx_opening_element and
+// jsx_self_closing_element — and emits a CallRef per use so the existing
+// containment attribution (innermostContainer) and resolution ladder apply
+// unchanged. FactCalls only sees call_expression, so <FadeIn /> etc never
+// produced a callsite before.
+//
+// Each JSX tag yields Name = last dotted segment, Receiver = prefix before
+// the last dot ("" for <Button />). Lowercase html tags (div, span) are
+// skipped — they would never resolve to a component symbol and would only
+// add noise. Namespaced tags (Foo:Bar) are skipped for now.
+func jsxCallRefs(tree *gts.Tree, lang *gts.Language, langName string, src []byte) []gts.CallRef {
+	root := tree.RootNode()
+	if root == nil {
+		return nil
+	}
+	var out []gts.CallRef
+	stack := []*gts.Node{root}
+	for len(stack) > 0 {
+		n := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		t := n.Type(lang)
+		if t == "jsx_opening_element" || t == "jsx_self_closing_element" {
+			if ref, ok := jsxTagCallRef(n, lang, langName, src, t); ok {
+				out = append(out, ref)
+			}
+		}
+		for i := n.ChildCount() - 1; i >= 0; i-- {
+			if c := n.Child(i); c != nil {
+				stack = append(stack, c)
+			}
+		}
+	}
+	return out
+}
+
+func jsxTagCallRef(n *gts.Node, lang *gts.Language, langName string, src []byte, nodeType string) (gts.CallRef, bool) {
+	nameNode := n.ChildByFieldName("name", lang)
+	if nameNode == nil {
+		return gts.CallRef{}, false
+	}
+	full := strings.TrimSpace(nameNode.Text(src))
+	if full == "" || strings.Contains(full, ":") {
+		return gts.CallRef{}, false
+	}
+	if full[0] < 'A' || full[0] > 'Z' {
+		return gts.CallRef{}, false
+	}
+	parts := strings.Split(full, ".")
+	name := parts[len(parts)-1]
+	if name == "" || name[0] < 'A' || name[0] > 'Z' {
+		return gts.CallRef{}, false
+	}
+	receiver := ""
+	if len(parts) > 1 {
+		receiver = strings.Join(parts[:len(parts)-1], ".")
+	}
+	idx := strings.LastIndex(full, name)
+	var nameStart, nameEnd uint32
+	if idx >= 0 {
+		nameStart = nameNode.StartByte() + uint32(idx) //nolint:gosec // G115: idx < 2<<20 (maxMapperFileBytes)
+		nameEnd = nameStart + uint32(len(name))        //nolint:gosec // G115: len(name) < file size
+	} else {
+		nameStart = nameNode.StartByte()
+		nameEnd = nameNode.EndByte()
+	}
+	return gts.CallRef{
+		Lang:          langName,
+		Kind:          "call",
+		Name:          name,
+		Receiver:      receiver,
+		NodeType:      nodeType,
+		StartByte:     n.StartByte(),
+		EndByte:       n.EndByte(),
+		NameStartByte: nameStart,
+		NameEndByte:   nameEnd,
+	}, true
 }
 
 // mapperCallsite is one attributed call, in exactly the shape the ladder
