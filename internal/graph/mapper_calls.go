@@ -60,9 +60,8 @@ func collectMapperCalls(files []mapperFile) ([]mapperFileCalls, mapperStats) {
 			stats.parseErr++
 			continue
 		}
-
-		refs := callsFromMapperFile(eng, f, src, &stats)
-		if len(refs) > 0 {
+		
+		if refs := callsFromMapperFile(eng, f, src, &stats);  len(refs) > 0 {
 			out = append(out, mapperFileCalls{file: f.rel, lang: f.entry.Name, refs: refs})
 		}
 	}
