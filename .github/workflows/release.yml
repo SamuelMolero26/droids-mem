@@ -85,16 +85,20 @@ jobs:
           (cd dist && sha256sum "$(basename "$OUT")" > "$(basename "$OUT").sha256")
           ls -lh dist/
 
-      - name: Verify binary size (< 20 MB)
+      - name: Verify binary size (< 32 MB)
         env:
           TAG: ${{ steps.version.outputs.tag }}
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+        # The cap catches an accidentally fat build -- chiefly a build that lost
+        # the grammar_subset_* tags, which embeds all 206 tree-sitter grammars
+        # and lands around 42 MB. It is not a budget the binary is expected to
+        # sit near: linux/amd64 measures ~23.5 MB once the mapper tier is in.
         run: |
           SIZE=$(stat -c %s dist/droids-mem-$TAG-$GOOS-$GOARCH)
-          MAX=$((20 * 1024 * 1024))
+          MAX=$((32 * 1024 * 1024))
           if [ "$SIZE" -gt "$MAX" ]; then
-            echo "Binary size $SIZE exceeds 20 MB limit"
+            echo "Binary size $SIZE exceeds 32 MB limit"
             exit 1
           fi
           echo "Binary size: $SIZE bytes (limit: $MAX)"
