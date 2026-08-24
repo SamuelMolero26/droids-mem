@@ -59,8 +59,7 @@ migrate only rewrites rows (--rescrub) and stamps the sentinel.`,
 			if err != nil {
 				// A re-fingerprint collision is an operator decision, not a
 				// retryable runtime failure: exit 5 (conflict/duplicate class).
-				var coll *store.FingerprintCollisionError
-				if errors.As(err, &coll) {
+				if _, ok := errors.AsType[*store.FingerprintCollisionError](err); ok {
 					// On a pre-baseline DB the gate is still closed and `prune`
 					// — the only way to delete the row — does not bypass it, so
 					// a bare "deduplicate then re-run" is unexecutable. Name the

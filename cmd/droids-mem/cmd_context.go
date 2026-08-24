@@ -36,8 +36,7 @@ deep-read any browse-tier item.`,
 				Mode:     store.ContextMode(mode),
 			})
 			if err != nil {
-				var ve *store.ValidationError
-				if errors.As(err, &ve) {
+				if ve, ok := errors.AsType[*store.ValidationError](err); ok {
 					suggestion := ve.Suggestion
 					if suggestion == "" {
 						suggestion = "provide --" + ve.Field
