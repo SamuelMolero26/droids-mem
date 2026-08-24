@@ -94,6 +94,11 @@ jobs:
         # the grammar_subset_* tags, which embeds all 206 tree-sitter grammars
         # and lands around 42 MB. It is not a budget the binary is expected to
         # sit near: linux/amd64 measures ~23.5 MB once the mapper tier is in.
+        #
+        # Headroom is sized for the roadmap. Every language's normalization code
+        # is already linked regardless of the subset tags, so adding a language
+        # costs only its grammar blob -- about 91 kB averaged over the 202 that
+        # the subset tags exclude. 32 MB leaves room for many more languages.
         run: |
           SIZE=$(stat -c %s dist/droids-mem-$TAG-$GOOS-$GOARCH)
           MAX=$((32 * 1024 * 1024))
