@@ -31,8 +31,7 @@ func newListCmd(a *app) *cobra.Command {
 				Limit:    limit,
 			})
 			if err != nil {
-				var ve *store.ValidationError
-				if errors.As(err, &ve) {
+				if ve, ok := errors.AsType[*store.ValidationError](err); ok {
 					writeError("validation_failed", ve.Message, false,
 						withField(ve.Field),
 						withSuggestion("check --"+ve.Field+" value"),

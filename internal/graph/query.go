@@ -209,10 +209,8 @@ func symbolPrecision(file string) string {
 // per-edge `SELECT precision FROM edges WHERE ...` fed through this same
 // function. An empty/all-resolved input returns "resolved".
 func weakestPrecision(precisions []string) string {
-	for _, p := range precisions {
-		if p == precisionSyntactic {
-			return precisionSyntactic
-		}
+	if slices.Contains(precisions, precisionSyntactic) {
+		return precisionSyntactic
 	}
 	return precisionResolved
 }

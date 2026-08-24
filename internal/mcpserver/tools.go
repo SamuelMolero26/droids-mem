@@ -316,8 +316,7 @@ func toolJSON(v any) (*mcp.CallToolResult, error) {
 // agent sees code/field/message/retryable/suggestion + optional metadata
 // (offending_tags, matched_patterns, scrub) without parsing prose.
 func toolErr(err error) *mcp.CallToolResult {
-	var ve *store.ValidationError
-	if errors.As(err, &ve) {
+	if ve, ok := errors.AsType[*store.ValidationError](err); ok {
 		payload := struct {
 			Status          string             `json:"status"`
 			Error           string             `json:"error"`

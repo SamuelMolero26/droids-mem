@@ -130,18 +130,34 @@ func mapperCarriedFile(dbPath, rel string) []*symRow {
 // The DB read (mapperCarriedFile) only runs for a file that already has an
 // ERROR node — the common case (a clean file) never pays for it.
 func mapperCarry(dbPath string, files []mapperFile, freshSyms []mapperSym) ([]mapperSym, []string) {
+	engines := mapperEngines{}
+	hasError := make(map[string]bool, len(files))
+	for _, f := range files {
+		if mapperFileHasError(engines, f) {
+			hasError[f.rel] = true
+		}
+	}
+	return mapperCarryScanned(dbPath, files, freshSyms, hasError)
+}
+
+// mapperCarryScanned is mapperCarry's decision half, taking the per-file
+// ERROR-node verdict as data instead of re-parsing to get it. buildIndex feeds
+// it scanMapperFiles' hasError map, which is read off the SAME tree that
+// produced the fresh symbols — so the build pays for that probe zero extra
+// times. mapperCarry above keeps the standalone probing behaviour for its own
+// tests.
+func mapperCarryScanned(dbPath string, files []mapperFile, freshSyms []mapperSym, hasError map[string]bool) ([]mapperSym, []string) {
 	freshByFile := map[string][]mapperSym{}
 	for _, ms := range freshSyms {
 		freshByFile[ms.row.file] = append(freshByFile[ms.row.file], ms)
 	}
 
-	engines := mapperEngines{}
 	var carriedUnits []string
 	out := make([]mapperSym, 0, len(freshSyms))
 
 	for _, f := range files {
 		fresh := freshByFile[f.rel]
-		if !mapperFileHasError(engines, f) {
+		if !hasError[f.rel] {
 			out = append(out, fresh...)
 			continue
 		}
