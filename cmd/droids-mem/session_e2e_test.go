@@ -19,8 +19,7 @@ func sess(t *testing.T, home, dbPath string, args ...string) []byte {
 	cmd.Env = append(os.Environ(), "DROIDS_MEM_DB="+dbPath, "DROIDS_MEM_HOME="+home)
 	out, err := cmd.Output()
 	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
+		if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 			t.Fatalf("session %v exited %d (stderr: %s)", args, ee.ExitCode(), ee.Stderr)
 		}
 		t.Fatalf("session %v: %v", args, err)

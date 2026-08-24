@@ -26,8 +26,7 @@ func runInstall(t *testing.T, home string, args ...string) []byte {
 	cmd.Env = env
 	out, err := cmd.Output()
 	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
+		if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 			t.Fatalf("install %v exited %d (stderr: %s)", args, ee.ExitCode(), ee.Stderr)
 		}
 		t.Fatalf("install %v: %v", args, err)

@@ -165,15 +165,13 @@ start of each run — all via a local binary with zero external dependencies.`,
 	defer stop()
 
 	if err := root.ExecuteContext(ctx); err != nil {
-		var initErr *dbInitError
-		if errors.As(err, &initErr) {
+		if initErr, ok := errors.AsType[*dbInitError](err); ok {
 			writeError("db_init_failed", initErr.Error(), false,
 				withSuggestion("check DROIDS_MEM_DB env var or ensure ~/.droids-mem/ is writable"),
 			)
 			os.Exit(ExitError)
 		}
-		var bg *db.BootGateError
-		if errors.As(err, &bg) {
+		if bg, ok := errors.AsType[*db.BootGateError](err); ok {
 			writeError("boot_gate", bg.Reason, false,
 				withSuggestion(bg.Migration),
 			)

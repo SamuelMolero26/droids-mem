@@ -60,8 +60,7 @@ func newSaveCmd(a *app) *cobra.Command {
 
 			resp, err := s.Save(cmd.Context(), req)
 			if err != nil {
-				var ve *store.ValidationError
-				if errors.As(err, &ve) {
+				if ve, ok := errors.AsType[*store.ValidationError](err); ok {
 					fieldVals := map[string]string{
 						"session_id": sessionID, "task_type": taskType,
 						"kind": kind, "title": title, "what": what,
@@ -114,8 +113,7 @@ func previewSave(cmd *cobra.Command, s *store.Store, req store.SaveRequest) erro
 	req.DryRun = true
 	resp, err := s.Save(cmd.Context(), req)
 	if err != nil {
-		var ve *store.ValidationError
-		if errors.As(err, &ve) {
+		if ve, ok := errors.AsType[*store.ValidationError](err); ok {
 			writeError("validation_failed", ve.Message, false, withField(ve.Field))
 			exitWith(ExitUsage)
 		}

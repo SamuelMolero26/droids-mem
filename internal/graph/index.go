@@ -146,10 +146,14 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	var mapperFileList []mapperFile
 	var mapperSyms []mapperSym
 	var mapperCarriedUnits []string
+	// One scan produces the symbols, calls, imports and ERROR-node verdicts
+	// that used to cost four separate read-and-parse passes over the same
+	// files — see mapper_scan.go for the profile that motivated it.
+	var mapperScan mapperScanResult
 	if mFiles, _, mErr := mapperFiles(repo); mErr == nil {
 		mapperFileList = mFiles
-		freshMapperSyms, _ := mapperSymbols(mFiles)
-		mapperSyms, mapperCarriedUnits = mapperCarry(dbPath, mFiles, freshMapperSyms)
+		mapperScan = scanMapperFiles(mFiles)
+		mapperSyms, mapperCarriedUnits = mapperCarryScanned(dbPath, mFiles, mapperScan.syms, mapperScan.hasError)
 	}
 
 	// Mapper-tier imports (Python via gts.ExtractImports, the JS family via
@@ -157,7 +161,7 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	// independent of both mapper symbols and carry-forward, so it
 	// runs unconditionally off the same discovered file list. Best-effort, same
 	// policy as the symbols/calls passes: a failure here never fails the build.
-	mapperImportRows, mapperBindings, _ := mapperImports(mapperFileList)
+	mapperImportRows, mapperBindings := mapperScan.importRows, mapperScan.bindings
 
 	// C.10: a repo with neither a usable Go package nor a single mapper-tier
 	// symbol has nothing to build from at all.
@@ -261,7 +265,7 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	// can never collide. fanoutCapped counts CALLSITES whose rung-5 candidate
 	// set exceeded fanoutCap (design D5/D6) — a build-level partiality fact,
 	// not a per-edge one, persisted below as meta.fanout_capped.
-	mapperEdgeSet, fanoutCapped := mapperEdges(mapperFileList, mapperSyms, mapperBindings)
+	mapperEdgeSet, fanoutCapped := mapperEdges(mapperFileList, mapperSyms, mapperBindings, mapperScan.fileCalls)
 	for k, m := range mapperEdgeSet {
 		edges.add(k, m)
 	}
