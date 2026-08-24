@@ -33,6 +33,9 @@ func (m Model) logoText() string {
 func (m Model) headerView() string {
 	left := m.logoText()
 	right := headerCount.Render(fmt.Sprintf("%d memories", m.total)) + " " + kbdBadge.Render("⌘K")
+	if m.newVersion != "" {
+		right = shareBtn.Render(fmt.Sprintf("↑ v%s — run `droids-mem upgrade`", m.newVersion)) + " " + right
+	}
 	gap := max(1, m.width-lipgloss.Width(left)-lipgloss.Width(right))
 	return chromeRow(m.width).Render(left + strings.Repeat(" ", gap) + right)
 }
