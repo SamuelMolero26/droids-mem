@@ -61,25 +61,7 @@ func collectMapperCalls(files []mapperFile) ([]mapperFileCalls, mapperStats) {
 			continue
 		}
 
-		tree, err := eng.parsers.Parse(src) // pooled: see mapperEngine.parsers
-		if err != nil {
-			stats.parseErr++
-			continue // unparsable file is skip-and-continue, not fatal
-		}
-
-		var refs []gts.CallRef
-		if eng.calls != nil {
-			refs = eng.calls.Extract(tree).Calls
-		} else {
-			stats.outlineDecline++ // FactProgram failed to compile for this language
-		}
-		if jsFamilyLanguages[f.entry.Name] {
-			if jsx := jsxCallRefs(tree, eng.lang, f.entry.Name, src); len(jsx) > 0 {
-				refs = append(refs, jsx...)
-			}
-		}
-		tree.Release()
-
+		refs := callsFromMapperFile(eng, f, src, &stats)
 		if len(refs) > 0 {
 			out = append(out, mapperFileCalls{file: f.rel, lang: f.entry.Name, refs: refs})
 		}
@@ -111,6 +93,54 @@ func extractMapperCalls(eng *mapperEngine, src []byte, stats *mapperStats) []gts
 }
 
 var _ = extractMapperCalls // keep used: direct FactCalls testing even though collectMapperCalls now parses inline for JSX co-extraction
+
+// callsFromMapperFile is one file's parse-and-extract, scoped so
+// `defer tree.Release()` runs on every exit path — the same reason
+// outlineMapperFile and importsFromMapperFile are shaped this way.
+func callsFromMapperFile(eng *mapperEngine, f mapperFile, src []byte, stats *mapperStats) []gts.CallRef {
+	tree, err := eng.parsers.Parse(src) // pooled: see mapperEngine.parsers
+	if err != nil {
+		stats.parseErr++
+		return nil // unparsable file is skip-and-continue, not fatal
+	}
+	defer tree.Release()
+	return callsFromMapperTree(eng, f, src, tree, stats)
+}
+
+// callsFromMapperTree is the call extraction itself, over a tree the CALLER
+// owns and releases (see outlineMapperTree). Releasing while the returned
+// refs live on is safe: gts.CallRef is a pure value struct whose Name and
+// Receiver come from Node.Text, which is `string(source[a:b])` — a fresh copy
+// off the caller's own buffer, never arena memory. No *gts.Node escapes.
+func callsFromMapperTree(eng *mapperEngine, f mapperFile, src []byte, tree *gts.Tree, stats *mapperStats) []gts.CallRef {
+	var refs []gts.CallRef
+	if eng.calls != nil {
+		refs = eng.calls.Extract(tree).Calls
+	} else {
+		stats.outlineDecline++ // FactProgram failed to compile for this language
+	}
+	if jsxCapableLanguages[f.entry.Name] {
+		if jsx := jsxCallRefs(tree, eng.lang, f.entry.Name, src); len(jsx) > 0 {
+			refs = append(refs, jsx...)
+		}
+	}
+	return refs
+}
+
+// jsxCapableLanguages is the subset of jsFamilyLanguages whose grammar can
+// actually produce JSX nodes, and it is deliberately NOT jsFamilyLanguages.
+// The non-tsx `typescript` grammar cannot: in a .ts file `<Foo />` is a type
+// assertion, and parsing it yields ERROR nodes, never jsx_opening_element or
+// jsx_self_closing_element (probed against gotreesitter v0.49.0 — .ts gives
+// jsx=0/ERROR=2, .tsx and .js both give jsx=2/ERROR=0). Walking a .ts tree
+// for JSX is therefore provably dead work, and a pure-.ts repo is the common
+// case: gating on the full JS family cost +2.66% on a 200-file cold build
+// (p=0.005, n=10 interleaved) to find nothing. .js stays in — real-world
+// React ships JSX in .js constantly, and the javascript grammar parses it.
+var jsxCapableLanguages = map[string]bool{
+	"tsx":        true,
+	"javascript": true,
+}
 
 // jsxCallRefs walks tree for JSX component uses — jsx_opening_element and
 // jsx_self_closing_element — and emits a CallRef per use so the existing
@@ -494,8 +524,10 @@ func (ix *mapperLadderIndex) resolve(c mapperCallsite) (hits []int, total int) {
 // (index.go). fanoutCapped counts CALLSITES (not edges) whose rung-5
 // candidate set exceeded fanoutCap — a build-level partiality fact, feeding
 // meta.fanout_capped, not a per-edge one.
-func mapperEdges(files []mapperFile, mapperSyms []mapperSym, bindings mapperImportBindings) (edgeSet, int) {
-	fileCalls, _ := collectMapperCalls(files)
+// fileCalls comes from the caller rather than a collectMapperCalls call here:
+// buildIndex takes it from scanMapperFiles, which extracted it from the same
+// parse that produced mapperSyms.
+func mapperEdges(files []mapperFile, mapperSyms []mapperSym, bindings mapperImportBindings, fileCalls []mapperFileCalls) (edgeSet, int) {
 	callsites := attributeMapperCalls(mapperSyms, fileCalls)
 	idx := buildMapperLadderIndex(mapperSyms, resolveBindings(files, bindings))
 

@@ -180,7 +180,15 @@ func importsFromMapperFile(eng *mapperEngine, f mapperFile, src []byte, isPython
 		return // unparsable file is skip-and-continue, not fatal
 	}
 	defer tree.Release()
+	importsFromMapperTree(eng, f, src, tree, isPython, out, bindings, stats)
+}
 
+// importsFromMapperTree is the import extraction itself, over a tree the
+// CALLER owns and releases (see outlineMapperTree for why the scan driver can
+// hold it). The *gts.Node caution in importsFromMapperFile's comment is
+// unchanged and still load-bearing: every capture is consumed inside the loop
+// that produced it, so no node outlives this call either.
+func importsFromMapperTree(eng *mapperEngine, f mapperFile, src []byte, tree *gts.Tree, isPython bool, out *[]importRow, bindings mapperImportBindings, stats *mapperStats) {
 	if !isPython {
 		if eng.imports == nil {
 			stats.parseErr++ // the query failed to compile for this grammar

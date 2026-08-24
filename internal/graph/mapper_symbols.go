@@ -161,7 +161,19 @@ func outlineMapperFile(eng *mapperEngine, f mapperFile, src []byte, stats *mappe
 		return nil // unparsable file is skip-and-continue, not fatal
 	}
 	defer tree.Release()
+	return outlineMapperTree(eng, f, src, tree, stats)
+}
 
+// outlineMapperTree is the outline extraction itself, over a tree the CALLER
+// owns and releases. scanMapperFiles (mapper_scan.go) drives it directly so a
+// single parse feeds all four mapper passes; outlineMapperFile above stays the
+// one-pass entry that parses its own tree, and is what the per-pass tests and
+// benchmarks still exercise.
+//
+// The release-safety argument in outlineMapperFile's comment is what lets the
+// tree outlive this call in the scan driver too: nothing returned here is
+// arena-backed.
+func outlineMapperTree(eng *mapperEngine, f mapperFile, src []byte, tree *gts.Tree, stats *mapperStats) []mapperSym {
 	if eng.outliner == nil {
 		stats.outlineDecline++
 		return nil
