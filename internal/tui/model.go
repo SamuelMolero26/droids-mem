@@ -147,13 +147,17 @@ type Model struct {
 
 	width, height int
 	ready         bool
+
+	version    string // running build version, for the update-check banner
+	newVersion string // set once checkUpdateCmd finds a newer release
 }
 
 type pushFunc func(ctx context.Context, repo string, s memStore, n int) error
 type pullFunc func(ctx context.Context, repo string, s memStore) (store.ImportResult, error)
 
-// New builds an inspector model over the given store.
-func New(s memStore) Model {
+// New builds an inspector model over the given store. version is the running
+// build version (main.version), used only for the update-check banner.
+func New(s memStore, version string) Model {
 	ti := textinput.New()
 	ti.Placeholder = "search memories… (≥3 chars)"
 	ti.Prompt = "/ "
@@ -184,6 +188,7 @@ func New(s memStore) Model {
 		repoInput: ri,
 		counts:    map[string]int{},
 		selected:  selected,
+		version:   version,
 		// memStore is a superset of share.Store, so the wrappers just adapt the
 		// param type; the git transport lives in internal/share (ADR-0029 §5).
 		push: func(ctx context.Context, repo string, s memStore, n int) error {
@@ -197,8 +202,8 @@ func New(s memStore) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	// gen 0 initial list load + one-shot census.
-	return tea.Batch(m.loadCmd(m.gen, m.query), m.countsCmd())
+	// gen 0 initial list load + one-shot census, plus a courtesy update check.
+	return tea.Batch(m.loadCmd(m.gen, m.query), m.countsCmd(), checkUpdateCmd(m.version))
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -207,6 +212,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.layout()
 		m.ready = true
+		return m, nil
+
+	case updateMsg:
+		m.newVersion = msg.latest
 		return m, nil
 
 	case itemsMsg:
