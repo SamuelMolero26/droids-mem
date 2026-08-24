@@ -8,6 +8,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`droids-mem upgrade`** downloads and installs the latest GitHub release in
+  place: fetches the matching `droids-mem-<tag>-<goos>-<goarch>` asset,
+  verifies it against the release's published SHA256 sidecar, and atomically
+  replaces the running binary. Shows a progress bar on stderr while
+  downloading. Refuses to touch a Homebrew-managed install (Cellar path) and
+  points at `brew upgrade droids-mem` instead.
+- **The TUI now checks for updates on startup.** `droids-mem tui` compares its
+  build version against the latest GitHub release (cached 24h in
+  `~/.droids-mem/update_check` so repeat launches skip the network call) and
+  shows a header banner naming the new version and the `droids-mem upgrade`
+  command when one is available.
 - **The code graph now covers TypeScript, TSX, JavaScript and Python, not just
   Go.** `graph_symbol` and `graph_package` answer for those languages through a
   new mapper tier built on tree-sitter, running alongside the Go tier rather
