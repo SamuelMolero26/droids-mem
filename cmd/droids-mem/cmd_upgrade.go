@@ -85,7 +85,8 @@ refuses to touch a Homebrew-managed install.`,
 				exitWith(ExitError)
 			}
 
-			if err := os.Chmod(tmp, 0o755); err != nil { //nolint:gosec // executable binary, matches release build perms
+			// #nosec G302 -- this replaces the running executable, it must stay executable.
+			if err := os.Chmod(tmp, 0o755); err != nil {
 				writeError("upgrade_failed", "chmod: "+err.Error(), true)
 				exitWith(ExitError)
 			}
