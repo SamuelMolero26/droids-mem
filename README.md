@@ -130,9 +130,9 @@ On load, droids-mem assembles a **two-tier context bundle** for the agent:
 always-tier (last session summary + standing user rules, full body) and
 browse-tier (relevant error resolutions and task patterns, ranked by BM25).
 
-### Code graph (Go repos)
+### Code graph (Go, Python, TypeScript, JavaScript)
 
-For Go projects, droids-mem builds a per-repo index of symbols and call edges
+For Go, Python, TypeScript, and JavaScript projects, droids-mem builds a per-repo index of symbols and call edges
 (interface dispatch resolved, over-approximate). Instead of grep to find "what
 calls X", you get:
 
@@ -142,7 +142,7 @@ droids-mem graph symbol Store.Save --repo /path/to/project --direction up --dept
 ```
 
 Pre-built, signatures-first, agent-cheap. Auto-rebuilds on repo change; a repo
-that stops type-checking serves the last good graph flagged `stale`.
+that stops type-checking serves the last good graph flagged `stale`. Go = resolved (precise), Python/TS/JS = syntactic (heuristic, see precision/hint); slash/bare/dotted packages and Class.method all accepted.
 
 ### TUI
 

@@ -83,7 +83,7 @@ Save only a genuinely reusable lesson, not routine steps. Re-saving the same les
 
 AFTER EVERY TOOL CALL, state briefly what you learned and how it affects your approach. For example: "mem_search found a prior fix for HTTP 429 retries — reusing that approach" or "graph_symbol shows Store.Save has 15 transitive callers — preserving the interface". This is the only way the user sees that your decisions come from memory and graph data, not just reasoning. A one-liner after the tool result is enough.
 
-FOR CODE QUESTIONS in a Go repo, prefer the graph tools over grep and file reading — they answer from a pre-built call graph in one call. graph_package orients you in an area (exported surface, signatures only); graph_symbol shows one symbol's source plus callers/callees as signature stubs, blast radius via direction=up depth>1, call paths via 'to'. Expand a stub by re-querying its exact qname. Pass your project root as 'repo'.
+FOR CODE QUESTIONS in a Go, Python, TypeScript, or JavaScript repo, prefer the graph tools over grep and file reading — they answer from a pre-built call graph in one call. graph_package orients you in an area (exported surface, signatures only); graph_symbol shows one symbol's source plus callers/callees as signature stubs, blast radius via direction=up depth>1, call paths via 'to'. Expand a stub by re-querying its exact qname. Pass your project root as 'repo'.
 `
 
 const summaryPolicyHTTP = `Do NOT save session summaries here — your host may record those automatically at session end; saving one yourself would duplicate it.`
@@ -94,7 +94,7 @@ const instructionsTail = `Never put secrets, tokens, or keys in any field; the s
 
 BEFORE EDITING a function, call graph_symbol with direction=up depth=3 to check its blast radius. The transitive_callers count tells you how many symbols depend on it. Mention this count when you state what you learned — it is the single most useful signal the graph gives you.
 
-When a graph response includes freshness.stale: true, a genuine build failure means the whole previous index is being served. A single package that does not type-check degrades alone instead: carried: true on a symbol, and freshness.stale_units naming the packages riding on the previous build's edges. Verify critical findings against actual source files before acting on either.`
+When a graph response includes freshness.stale: true, a genuine build failure means the whole previous index is being served. A single package that does not type-check degrades alone instead: carried: true on a symbol, and freshness.stale_units naming the packages riding on the previous build's edges. Verify critical findings against actual source files before acting on either. When precision is 'syntactic' (Python/TS/JS), callers/callees are heuristic — treat as approximate and cross-check with grep for constants/tests/notebooks.`
 
 // instructions assembles the transport-appropriate protocol string. The HTTP
 // variant is byte-identical to the pre-split serverInstructions const.
