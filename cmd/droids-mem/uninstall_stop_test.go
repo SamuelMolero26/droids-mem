@@ -25,18 +25,6 @@ func stopServerEnv(t *testing.T) string {
 	return filepath.Join(home, state.PidFile)
 }
 
-// identityServer answers /identity with a valid HMAC proof for token, and
-// points DROIDS_MEM_MCP_ADDR at itself so stopServerStatus probes it.
-func identityServer(t *testing.T, token string) {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		nonce := r.URL.Query().Get("nonce")
-		fmt.Fprintf(w, `{"server":%q,"proof":%q}`, mcpserver.ServerName, mcpserver.IdentityProof(token, nonce))
-	}))
-	t.Cleanup(srv.Close)
-	t.Setenv("DROIDS_MEM_MCP_ADDR", strings.TrimPrefix(srv.URL, "http://"))
-}
-
 func TestStopServerStatus_NoPidfile(t *testing.T) {
 	stopServerEnv(t)
 
@@ -71,7 +59,14 @@ func TestStopServerStatus_RefusesUnverifiedPid(t *testing.T) {
 
 func TestStopServerStatus_StopsVerifiedServer(t *testing.T) {
 	pidPath := stopServerEnv(t)
-	identityServer(t, "tok_test")
+
+	// A listener that answers the identity challenge, so the stop is allowed.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nonce := r.URL.Query().Get("nonce")
+		fmt.Fprintf(w, `{"server":%q,"proof":%q}`, mcpserver.ServerName, mcpserver.IdentityProof("tok_test", nonce))
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("DROIDS_MEM_MCP_ADDR", strings.TrimPrefix(srv.URL, "http://"))
 
 	// A real, signallable stand-in for the daemon.
 	victim := exec.Command("sleep", "60")

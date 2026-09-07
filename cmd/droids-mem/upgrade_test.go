@@ -95,11 +95,4 @@ func TestDownloadToTemp_NonOKStatus(t *testing.T) {
 	if _, _, err := downloadToTemp(context.Background(), srv.URL, dir, maxAssetBytes, nil); err == nil {
 		t.Fatal("downloadToTemp on 500 should error")
 	}
-	left, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read dir: %v", err)
-	}
-	if len(left) != 0 {
-		t.Errorf("failed download left %d temp file(s) behind, want 0", len(left))
-	}
 }

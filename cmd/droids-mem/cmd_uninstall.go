@@ -233,16 +233,11 @@ func removeClaudeSnippetStatus(project bool) string {
 // stopServerStatus SIGTERMs the daemon recorded in mcp.pid (server does a
 // graceful Shutdown) and clears the pidfile. The symmetric counterpart of
 // ensure-server's spawn.
-//
-// A pidfile is only an integer a dead daemon may have left behind, and the OS
-// recycles PIDs — signalling it unconditionally can terminate an unrelated
-// process. So the same /identity challenge ensure-server uses against port
-// squatters gates the signal here: no proof that a droids-mem holding our
-// token is alive, no SIGTERM.
+// The OS recycles PIDs, so a stale pidfile can name an unrelated process:
+// ensure-server's /identity challenge gates the signal.
 //
 // ponytail: the probe proves a token holder is listening, not that it is this
-// exact PID. Closing that last gap needs a port→PID lookup (lsof/netstat),
-// which is platform-specific and buys little — the remaining failure mode
+// exact PID. Closing that gap needs a platform-specific port→PID lookup and
 // still requires an already-desynced pidfile.
 func stopServerStatus() string {
 	dir, err := state.Dir()
@@ -267,9 +262,8 @@ func stopServerStatus() string {
 	}
 	addr := envOr("DROIDS_MEM_MCP_ADDR", mcpserver.DefaultAddr)
 	if err := verifyServer(baseURL(addr), tok, 500*time.Millisecond); err != nil {
-		// Leave the pidfile: nothing was proven about that PID, and erasing
-		// its record would only hide the inconsistency from the user.
-		return fmt.Sprintf("not_verified: nothing on %s proved it is droids-mem, so pid %d was left alone — stop it yourself if it is ours (%v)", addr, pid, err)
+		// Keep the pidfile: erasing it would hide the inconsistency.
+		return fmt.Sprintf("not_verified: nothing on %s answered the identity challenge; pid %d left alone (%v)", addr, pid, err)
 	}
 	proc, err := os.FindProcess(pid)
 	if err != nil {

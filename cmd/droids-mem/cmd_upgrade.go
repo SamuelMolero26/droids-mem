@@ -17,16 +17,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// maxAssetBytes caps a release download. The checksum only rejects bad bytes
-// after they have already landed on disk, so this — not the checksum — is what
-// bounds disk use against a malfunctioning or hostile server. The release
-// workflow refuses to publish a binary over 32 MB; this is headroom, not a
-// budget the build is expected to approach.
+// maxAssetBytes bounds disk use during a download: the checksum only rejects
+// bad bytes once they have landed. Headroom over the workflow's 32 MB cap.
 const maxAssetBytes int64 = 64 << 20
 
-// downloadTimeout bounds the asset transfer. Generous next to release.FetchTimeout
-// (which covers only a JSON GET) because this moves tens of megabytes, but
-// still finite so a stalled connection ends in an error rather than a hang.
+// downloadTimeout bounds the asset transfer — tens of megabytes, so far looser
+// than release.FetchTimeout, but finite so a stalled connection still errors.
 const downloadTimeout = 5 * time.Minute
 
 func newUpgradeCmd() *cobra.Command {
