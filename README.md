@@ -132,17 +132,28 @@ browse-tier (relevant error resolutions and task patterns, ranked by BM25).
 
 ### Code graph (Go, Python, TypeScript, JavaScript)
 
-For Go, Python, TypeScript, and JavaScript projects, droids-mem builds a per-repo index of symbols and call edges
-(interface dispatch resolved, over-approximate). Instead of grep to find "what
-calls X", you get:
+For Go, Python, TypeScript, and JavaScript projects, droids-mem builds a
+per-repo index of symbols and call edges. Instead of grep to find "what calls
+X", you get:
 
 ```shell
 droids-mem graph symbol Store.Save --repo /path/to/project --direction up --depth 3
 # → source + callers as signature stubs + transitive_callers count
 ```
 
-Pre-built, signatures-first, agent-cheap. Auto-rebuilds on repo change; a repo
-that stops type-checking serves the last good graph flagged `stale`. Go = resolved (precise), Python/TS/JS = syntactic (heuristic, see precision/hint); slash/bare/dotted packages and Class.method all accepted.
+Pre-built, signatures-first, agent-cheap. Auto-rebuilds on repo change; a build
+that fails outright serves the last good graph flagged `stale`, while a single
+unit that stops parsing or type-checking degrades alone (`carried`).
+
+Two tiers, and every response names which one answered it:
+
+- **Go** — `precision: resolved`. Type-checker backed (`go/packages` + CHA), so
+  interface dispatch is resolved and `implements` edges are exact.
+- **Python, TypeScript, JavaScript** — `precision: syntactic`. Resolved by name
+  from a tree-sitter parse, so callers and callees are heuristic; cross-check
+  constants and tests with grep.
+
+Slash, bare and dotted package paths and `Class.method` symbols all accepted.
 
 ### TUI
 
@@ -218,10 +229,13 @@ servers):
 - `mem_corpus` — census of the corpus (task types, counts, recent summaries).
 
 **Code graph** (Go, Python, TypeScript, JavaScript)
-- `graph_symbol` — a symbol's source plus callers/callees (and interface↔concrete
-  `implements` edges) as signature stubs.
+- `graph_symbol` — a symbol's source plus callers/callees as signature stubs
+  (interface↔concrete `implements` edges on Go).
 - `graph_package` — a package's exported surface, signatures only.
 - `graph_build_wait` — block until the repo's graph index is fresh.
+
+Every graph response carries `precision`: `resolved` on Go, `syntactic` on the
+mapper languages. Treat a syntactic answer as approximate.
 
 Graph responses render as **TOON** (Token-Oriented Object Notation) — one shared
 header per neighbor array instead of repeating JSON keys on every row — to keep
@@ -252,7 +266,7 @@ Auth: `Authorization: Bearer <token>` on every `/mcp` request.
 | `list` | List recent memories |
 | `tui` | Interactive terminal browser |
 | `prune` | Delete memories or find duplicate clusters |
-| `graph` | Query a repo's code graph — Go, Python, TypeScript, JavaScript (index, symbol, package) |
+| `graph` | Query a repo's code graph (index, symbol, package) — Go, Python, TypeScript, JavaScript |
 | `statusline` | Print `droids-mem:<tool>` when a graph tool ran in the last 60 s (for a Claude Code status line) |
 | `recent-sessions` | List auto-saved session summaries |
 | `session` | Session-memory plumbing (stage, check, flush, recover, hook) |
