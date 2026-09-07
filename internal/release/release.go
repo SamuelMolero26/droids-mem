@@ -40,8 +40,14 @@ func (r Release) AssetURL(name string) (string, bool) {
 	return "", false
 }
 
-// Fetch retrieves the latest release from the GitHub API.
+// Fetch retrieves the latest release from the GitHub API. The deadline is
+// applied here rather than left to callers: this is a courtesy check on both
+// paths (banner and `upgrade`), and a caller that forgets the bound turns a
+// slow server into a hang.
 func Fetch(ctx context.Context) (Release, error) {
+	ctx, cancel := context.WithTimeout(ctx, FetchTimeout)
+	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, API, nil)
 	if err != nil {
 		return Release{}, err
@@ -63,11 +69,17 @@ func Fetch(ctx context.Context) (Release, error) {
 }
 
 // IsNewer reports whether latest is a valid, strictly-newer semver than
-// current. Both are bare (no "v" prefix); either being unparseable (e.g.
-// current == "dev") reports false rather than erroring — callers treat "no
-// update" and "can't tell" the same way.
+// current. Either side may carry a leading "v" or not: release builds inject
+// the git tag verbatim (`-X main.version=v1.2.1`) while Release.Version
+// strips it, so the two arguments routinely disagree on the prefix. Both are
+// normalized before comparing — prepending "v" to an already-prefixed string
+// yields "vv1.2.1", which is not valid semver and silently made every
+// released binary report "up to date". Unparseable input (e.g. current ==
+// "dev") reports false rather than erroring — callers treat "no update" and
+// "can't tell" the same way.
 func IsNewer(current, latest string) bool {
-	cv, lv := semver.Canonical("v"+current), semver.Canonical("v"+latest)
+	cv := semver.Canonical("v" + strings.TrimPrefix(current, "v"))
+	lv := semver.Canonical("v" + strings.TrimPrefix(latest, "v"))
 	return cv != "" && lv != "" && semver.Compare(lv, cv) > 0
 }
 
