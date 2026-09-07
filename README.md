@@ -217,7 +217,7 @@ servers):
 - `mem_get` — fetch one memory by ID.
 - `mem_corpus` — census of the corpus (task types, counts, recent summaries).
 
-**Code graph** (Go repos)
+**Code graph** (Go, Python, TypeScript, JavaScript)
 - `graph_symbol` — a symbol's source plus callers/callees (and interface↔concrete
   `implements` edges) as signature stubs.
 - `graph_package` — a package's exported surface, signatures only.
@@ -252,7 +252,7 @@ Auth: `Authorization: Bearer <token>` on every `/mcp` request.
 | `list` | List recent memories |
 | `tui` | Interactive terminal browser |
 | `prune` | Delete memories or find duplicate clusters |
-| `graph` | Query a Go repo's code graph (index, symbol, package) |
+| `graph` | Query a repo's code graph — Go, Python, TypeScript, JavaScript (index, symbol, package) |
 | `statusline` | Print `droids-mem:<tool>` when a graph tool ran in the last 60 s (for a Claude Code status line) |
 | `recent-sessions` | List auto-saved session summaries |
 | `session` | Session-memory plumbing (stage, check, flush, recover, hook) |
