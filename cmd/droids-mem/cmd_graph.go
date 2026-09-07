@@ -64,12 +64,17 @@ func newGraphCmd() *cobra.Command {
 	var repo string
 	cmd := &cobra.Command{
 		Use:   "graph",
-		Short: "Query the code graph of a Go repo (symbols, call edges)",
-		Long: `graph indexes a Go repo's symbols and call edges (interface dispatch
-resolved) and answers surgical code questions without file crawling.
+		Short: "Query a repo's code graph — Go, Python, TypeScript, JavaScript",
+		Long: `graph indexes a repo's symbols and call edges and answers surgical
+code questions without file crawling.
+
+Two tiers, and every response names which one answered it. Go is type-checker
+backed (precision: resolved), so interface dispatch is resolved and implements
+edges are exact. Python, TypeScript and JavaScript are parsed with tree-sitter
+(precision: syntactic) — treat those callers and callees as approximate.
 
 The graph is stored per repo under ~/.droids-mem/graphs/ and rebuilt
-automatically when the repo changes. See docs/adr/0020-native-code-graph.md.`,
+automatically when the repo changes.`,
 	}
 	// The code graph never touches mem.db — no boot gate, no store. Cobra
 	// annotations don't inherit, so each leaf carries the bypass itself.

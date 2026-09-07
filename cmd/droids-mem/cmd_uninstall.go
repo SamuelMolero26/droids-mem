@@ -9,9 +9,11 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/samuelmolero26/droids-mem/internal/mcpserver"
 	"github.com/samuelmolero26/droids-mem/internal/state"
 )
 
@@ -231,6 +233,12 @@ func removeClaudeSnippetStatus(project bool) string {
 // stopServerStatus SIGTERMs the daemon recorded in mcp.pid (server does a
 // graceful Shutdown) and clears the pidfile. The symmetric counterpart of
 // ensure-server's spawn.
+// The OS recycles PIDs, so a stale pidfile can name an unrelated process:
+// ensure-server's /identity challenge gates the signal.
+//
+// ponytail: the probe proves a token holder is listening, not that it is this
+// exact PID. Closing that gap needs a platform-specific port→PID lookup and
+// still requires an already-desynced pidfile.
 func stopServerStatus() string {
 	dir, err := state.Dir()
 	if err != nil {
@@ -247,6 +255,15 @@ func stopServerStatus() string {
 	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
 	if err != nil {
 		return "error: bad pidfile: " + err.Error()
+	}
+	tok, err := state.LoadOrCreateToken()
+	if err != nil {
+		return "error: load token: " + err.Error()
+	}
+	addr := envOr("DROIDS_MEM_MCP_ADDR", mcpserver.DefaultAddr)
+	if err := verifyServer(baseURL(addr), tok, 500*time.Millisecond); err != nil {
+		// Keep the pidfile: erasing it would hide the inconsistency.
+		return fmt.Sprintf("not_verified: nothing on %s answered the identity challenge; pid %d left alone (%v)", addr, pid, err)
 	}
 	proc, err := os.FindProcess(pid)
 	if err != nil {
