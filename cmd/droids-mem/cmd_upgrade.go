@@ -17,6 +17,18 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// maxAssetBytes caps a release download. The checksum only rejects bad bytes
+// after they have already landed on disk, so this — not the checksum — is what
+// bounds disk use against a malfunctioning or hostile server. The release
+// workflow refuses to publish a binary over 32 MB; this is headroom, not a
+// budget the build is expected to approach.
+const maxAssetBytes int64 = 64 << 20
+
+// downloadTimeout bounds the asset transfer. Generous next to release.FetchTimeout
+// (which covers only a JSON GET) because this moves tens of megabytes, but
+// still finite so a stalled connection ends in an error rather than a hang.
+const downloadTimeout = 5 * time.Minute
+
 func newUpgradeCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "upgrade",
@@ -74,7 +86,7 @@ refuses to touch a Homebrew-managed install.`,
 				writeError("upgrade_failed", "fetch checksum: "+err.Error(), true)
 				exitWith(ExitError)
 			}
-			tmp, gotSum, err := downloadToTemp(ctx, assetURL, filepath.Dir(exe), os.Stderr)
+			tmp, gotSum, err := downloadToTemp(ctx, assetURL, filepath.Dir(exe), maxAssetBytes, os.Stderr)
 			if err != nil {
 				writeError("upgrade_failed", "download: "+err.Error(), true)
 				exitWith(ExitError)
@@ -117,8 +129,12 @@ func selfPath() (string, error) {
 }
 
 // fetchChecksum GETs a release's ".sha256" sidecar and returns the hex digest
-// (the sidecar is `sha256sum` output: "<hex>  <filename>\n").
+// (the sidecar is `sha256sum` output: "<hex>  <filename>\n"). Bounded by the
+// same deadline as the metadata call — it is a sub-kilobyte GET.
 func fetchChecksum(ctx context.Context, url string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, release.FetchTimeout)
+	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
@@ -141,9 +157,14 @@ func fetchChecksum(ctx context.Context, url string) (string, error) {
 
 // downloadToTemp streams url into a new file alongside dir (so the later
 // os.Rename onto the running executable is same-filesystem and atomic),
-// hashing as it writes. progress (nil-able) receives a "\r"-updated status
-// line as bytes arrive. The caller removes the temp file on any failure path.
-func downloadToTemp(ctx context.Context, url, dir string, progress io.Writer) (path, sha256Hex string, err error) {
+// hashing as it writes. Reads stop at maxBytes so an oversized response is an
+// error instead of an unbounded write. progress (nil-able) receives a
+// "\r"-updated status line as bytes arrive. The temp file is removed on every
+// failure path; on success the caller owns it.
+func downloadToTemp(ctx context.Context, url, dir string, maxBytes int64, progress io.Writer) (path, sha256Hex string, err error) {
+	ctx, cancel := context.WithTimeout(ctx, downloadTimeout)
+	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", "", err
@@ -170,9 +191,16 @@ func downloadToTemp(ctx context.Context, url, dir string, progress io.Writer) (p
 		defer bar.done()
 		dst = io.MultiWriter(f, h, bar)
 	}
-	if _, err := io.Copy(dst, resp.Body); err != nil {
+	// Read one byte past the cap so "exactly at the cap" and "over it" are
+	// distinguishable — a bare LimitReader would silently truncate instead.
+	n, err := io.Copy(dst, io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil {
 		_ = os.Remove(f.Name())
 		return "", "", err
+	}
+	if n > maxBytes {
+		_ = os.Remove(f.Name())
+		return "", "", fmt.Errorf("asset exceeds the %d MB cap", maxBytes>>20)
 	}
 	return f.Name(), hex.EncodeToString(h.Sum(nil)), nil
 }
