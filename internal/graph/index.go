@@ -146,14 +146,15 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	var mapperFileList []mapperFile
 	var mapperSyms []mapperSym
 	var mapperCarriedUnits []string
-	// One scan produces the symbols, calls, imports and ERROR-node verdicts
+	var mapperCarriedDirectives map[string]string
+	// One scan produces the symbols, calls, imports and parse-trust verdicts
 	// that used to cost four separate read-and-parse passes over the same
 	// files — see mapper_scan.go for the profile that motivated it.
 	var mapperScan mapperScanResult
 	if mFiles, _, mErr := mapperFiles(repo); mErr == nil {
 		mapperFileList = mFiles
 		mapperScan = scanMapperFiles(mFiles)
-		mapperSyms, mapperCarriedUnits = mapperCarryScanned(dbPath, mFiles, mapperScan.syms, mapperScan.hasError)
+		mapperSyms, mapperCarriedUnits, mapperCarriedDirectives = mapperCarry(dbPath, mFiles, mapperScan.syms, mapperScan.hasError)
 	}
 
 	// Mapper-tier imports (Python via gts.ExtractImports, the JS family via
@@ -162,6 +163,13 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	// runs unconditionally off the same discovered file list. Best-effort, same
 	// policy as the symbols/calls passes: a failure here never fails the build.
 	mapperImportRows, mapperBindings := mapperScan.importRows, mapperScan.bindings
+	mapperDirectives := mapperScan.fileDirectives
+	for file, directive := range mapperCarriedDirectives {
+		delete(mapperDirectives, file)
+		if directive != "" {
+			mapperDirectives[file] = directive
+		}
+	}
 
 	// C.10: a repo with neither a usable Go package nor a single mapper-tier
 	// symbol has nothing to build from at all.
@@ -265,7 +273,8 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	// can never collide. fanoutCapped counts CALLSITES whose rung-5 candidate
 	// set exceeded fanoutCap (design D5/D6) — a build-level partiality fact,
 	// not a per-edge one, persisted below as meta.fanout_capped.
-	mapperEdgeSet, fanoutCapped := mapperEdges(mapperFileList, mapperSyms, mapperBindings, mapperScan.fileCalls)
+	aliasCfg := loadAliasConfig(repo)
+	mapperEdgeSet, fanoutCapped := mapperEdges(mapperFileList, mapperSyms, mapperBindings, mapperScan.fileCalls, aliasCfg)
 	for k, m := range mapperEdgeSet {
 		edges.add(k, m)
 	}
@@ -334,7 +343,7 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 		slices.Sort(carriedUnits)
 	}
 
-	return writeGraphDB(ctx, dbPath, repo, module, stampVal, symbols, edges, impls, carriedUnits, emptyReason, fanoutCapped, mapperImportRows)
+	return writeGraphDB(ctx, dbPath, repo, module, stampVal, symbols, edges, impls, carriedUnits, emptyReason, fanoutCapped, mapperImportRows, mapperDirectives)
 }
 
 // goSymbols extracts symbol rows from the type-checked Go packages,
@@ -753,8 +762,9 @@ func implementsEdges(pkgs []*packages.Package, byPos map[string]*symRow) map[[2]
 // be interpreted as "unknown" vs "none". imports is the mapper tier's
 // import rows (mapper_imports.go — Python and the JS family), each
 // carrying its own explicit precision (the imports.precision column has no
-// DDL default, unlike edges/implements).
-func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string, emptyReason string, fanoutCapped int, imports []importRow) error {
+// DDL default, unlike edges/implements). fileDirectives maps repo-relative
+// file → "client" | "server" (P3); persisted to file_directives table.
+func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string, emptyReason string, fanoutCapped int, imports []importRow, fileDirectives map[string]string) error {
 	if err := ctx.Err(); err != nil {
 		return err // cancelled before work started
 	}
@@ -824,6 +834,19 @@ func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, sy
 		for _, r := range imports {
 			if _, err := impIns.ExecContext(ctx, r.importerFile, r.importedModule, r.precision); err != nil {
 				return fmt.Errorf("insert import %s -> %s: %w", r.importerFile, r.importedModule, err)
+			}
+		}
+		dirIns, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO file_directives (file, directive) VALUES (?,?)`)
+		if err != nil {
+			return err
+		}
+		defer dirIns.Close()
+		for f, d := range fileDirectives {
+			if d == "" {
+				continue
+			}
+			if _, err := dirIns.ExecContext(ctx, f, d); err != nil {
+				return fmt.Errorf("insert file_directive %s -> %s: %w", f, d, err)
 			}
 		}
 		// FTS mirror for the search fallback; rowid == symbols.id for the join back.

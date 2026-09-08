@@ -478,7 +478,7 @@ func TestResolveSpecifier_RelativeFormsAndBareMiss(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := resolveSpecifier(tc.importer, tc.spec, known); got != tc.want {
+			if got := resolveSpecifier(tc.importer, tc.spec, known, nil); got != tc.want {
 				t.Errorf("resolveSpecifier(%q, %q) = %q, want %q", tc.importer, tc.spec, got, tc.want)
 			}
 		})
@@ -491,7 +491,7 @@ func TestResolveSpecifier_RelativeFormsAndBareMiss(t *testing.T) {
 // module has both forms — a real layout in TS repos, not a contrived one.
 func TestResolveSpecifier_PrefersDirectFileOverIndexFile(t *testing.T) {
 	known := map[string]bool{"src/util.ts": true, "src/util/index.ts": true}
-	if got := resolveSpecifier("src/a.ts", "./util", known); got != "src/util.ts" {
+	if got := resolveSpecifier("src/a.ts", "./util", known, nil); got != "src/util.ts" {
 		t.Errorf("resolveSpecifier = %q, want the direct file %q", got, "src/util.ts")
 	}
 }
@@ -524,8 +524,8 @@ func rung2aFixture() (syms []mapperSym, importedGet, repoWideGet *symRow) {
 // back means rung 2a did not fire, or did not stop the walk.
 func TestLadder_Rung2a_ImportScopedReceiverStopsWalkBeforeRung2b(t *testing.T) {
 	syms, importedGet, repoWideGet := rung2aFixture()
-	idx := buildMapperLadderIndex(syms, map[string]map[string]string{
-		"a.ts": {"Bar": "x.ts"},
+	idx := buildMapperLadderIndex(syms, mapperResolvedImports{
+		"a.ts": {"Bar": {target: "x.ts", imported: "Client"}},
 	})
 
 	c := mapperCallsite{name: "get", receiver: "Bar", file: "a.ts", pkg: "a", lang: "typescript"}
@@ -560,8 +560,8 @@ func TestLadder_Rung2aMiss_FallsThroughUnNarrowed(t *testing.T) {
 		t.Fatalf("control (no imports at all) did not land on rung 2b's answer; fixture is wrong, not the code")
 	}
 
-	cases := map[string]map[string]map[string]string{
-		"binding resolves to a file holding no candidate": {"a.ts": {"Bar": "unrelated.ts"}},
+	cases := map[string]mapperResolvedImports{
+		"binding resolves to a file holding no candidate": {"a.ts": {"Bar": {target: "unrelated.ts"}}},
 		"specifier resolved to nothing, so no binding":    {"a.ts": {}},
 		"the importing file imported nothing":             {},
 	}

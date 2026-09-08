@@ -55,6 +55,30 @@ type mapperEngine struct {
 	bindings *gts.Query
 }
 
+// mapperTagsQuery augments the inferred tags query for the JS family so
+// top-level `export const`/`export let` (lexical_declaration) and
+// `export var` (variable_declaration) are visible as symbols. The scoped
+// `export_statement` wrapper keeps inner `const` declarations from being
+// captured — spike proved `export const metadata` 0→1 while
+// `function foo(){ const inner=1 }` stays only `foo`.
+//
+// B6 note (future-fragile guard): the added patterns are specifically for
+// lexical_declaration / variable_declaration inside export_statement. Guarding
+// on broad "export_statement" would incorrectly skip the augmentation if
+// upstream ever adds ANY export_statement pattern (e.g. for re-exports) that
+// still lacks lexical_declaration. Guarding on "lexical_declaration" is the
+// precise signal for "our const/let pattern already present" — it keeps the
+// current behavior (base has no lexical_declaration, so we still append) but
+// is resilient to unrelated upstream additions.
+func mapperTagsQuery(entry *grammars.LangEntry) string {
+	base := grammars.ResolveTagsQuery(*entry)
+	if jsFamilyLanguages[entry.Name] && !strings.Contains(base, "lexical_declaration") {
+		base += "\n(export_statement declaration: (lexical_declaration (variable_declarator name: (identifier) @name) @definition.constant))"
+		base += "\n(export_statement declaration: (variable_declaration (variable_declarator name: (identifier) @name) @definition.variable))"
+	}
+	return base
+}
+
 // mapperEngines caches one mapperEngine per language NAME for the lifetime
 // of a single mapperSymbols call — per-run, not package-level. Manager
 // builds different repos concurrently, and a shared package-level cache
@@ -76,7 +100,7 @@ func (e mapperEngines) get(entry *grammars.LangEntry) *mapperEngine {
 	if lang := entry.Language(); lang != nil {
 		eng.lang = lang
 		eng.parsers = gts.NewParserPool(lang)
-		if outliner, err := gts.NewOutliner(lang, grammars.ResolveTagsQuery(*entry)); err == nil {
+		if outliner, err := gts.NewOutliner(lang, mapperTagsQuery(entry)); err == nil {
 			eng.outliner = outliner
 		}
 		if calls, err := gts.NewFactProgram(lang, gts.FactCalls); err == nil {

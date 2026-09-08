@@ -76,6 +76,16 @@ CREATE TABLE imports (
   precision       TEXT NOT NULL,
   PRIMARY KEY (importer_file, imported_module)
 ) WITHOUT ROWID;
+-- Next.js file-level directive (P3): a "use client" / "use server" pragma in the
+-- file's directive prologue, outside any OutlineSymbol.Range — detected by
+-- detectDirective (mapper_scan.go), which walks the parsed prologue rather than
+-- scanning a byte prefix, so comments, a shebang, and unrelated string
+-- directives before it are handled the way JavaScript defines them.
+-- One row per file that has a directive; absence means no directive.
+CREATE TABLE file_directives (
+  file      TEXT PRIMARY KEY,
+  directive TEXT NOT NULL
+) WITHOUT ROWID;
 -- Ranks symbols by relevance to a free-text task phrase (the graph_symbol
 -- search fallback). rowid == symbols.id, so a MATCH joins straight back.
 -- Populated wholesale in writeGraphDB — the graph never updates in place, so

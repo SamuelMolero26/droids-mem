@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -14,7 +15,7 @@ import (
 // input to the stamp generation, so widening it invalidates every cached
 // graph — a graph built before the set grew was built from fewer files.
 func indexedExtensions() []string {
-	return []string{".go", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".py"}
+	return []string{".go", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cts", ".mts", ".py"}
 }
 
 // indexerGen is the third stampGen input: a build-semantics generation that
@@ -36,8 +37,13 @@ func indexedExtensions() []string {
 // build writes — a graph indexed before it holds edges resolved without
 // import scoping, which is not merely less complete but differently
 // attributed. That is the line: bump when a stored graph becomes wrong, not
-// when it merely lacks data no one reads.
-const indexerGen = "5"
+// when it merely lacks data no one reads. P2 (alias) bumps it again because
+// "@/..." imports previously fell to the lossy repo-wide rung 5 instead of
+// the precise import-scoped rung 2a. Bare and namespace import narrowing also
+// changes stored edge attribution, so it advances the generation once more.
+// Generation 8 carries file directives with last-good mapper symbols instead
+// of writing metadata from an untrustworthy current parse.
+const indexerGen = "8"
 
 // stampGen derives the stamp's generation prefix from the things that change
 // what a cached graph MEANS: the schema its rows were written under, the file
@@ -81,7 +87,7 @@ func skipDir(name string) bool {
 		return true
 	}
 	switch name {
-	case "vendor", "node_modules", "dist", "build", "target", "__pycache__":
+	case "vendor", "node_modules", "dist", "build", "target", "__pycache__", "out":
 		return true
 	}
 	return false
@@ -89,10 +95,11 @@ func skipDir(name string) bool {
 
 // stamp fingerprints the repo's indexed source state: count, total size, and
 // max mtime of every file under indexedExtensions() (including _test.go)
-// plus Go module files (go.mod/go.sum/go.work), since dependency changes
-// alter go/packages analysis and call edges. Any edit, add, or delete moves
-// it. Deliberately not git-aware — uncommitted edits must invalidate the
-// graph too, and the same path covers non-git repos.
+// plus Go module files (go.mod/go.sum/go.work) and the exact alias-config
+// inputs loadAliasConfig can consume, since both dependency and alias changes
+// alter call edges. Any normal edit, add, or delete moves it. Deliberately not
+// git-aware — uncommitted edits must invalidate the graph too, and the same
+// path covers non-git repos.
 //
 // The census covers every indexed extension, not just .go: a mapper-only
 // (.ts/.py/etc.) file change must move the stamp too, or an edit to a
@@ -117,6 +124,13 @@ func stamp(repo string) (string, error) {
 	exts := indexedExtensions()
 	var count int
 	var size, maxMtime int64
+	add := func(info fs.FileInfo) {
+		count++
+		size += info.Size()
+		if mt := info.ModTime().UnixNano(); mt > maxMtime {
+			maxMtime = mt
+		}
+	}
 	err := filepath.WalkDir(repo, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil //nolint:nilerr // unreadable entries don't invalidate the walk
@@ -135,15 +149,22 @@ func stamp(repo string) (string, error) {
 		if err != nil {
 			return nil //nolint:nilerr // racing deletes don't invalidate the walk
 		}
-		count++
-		size += info.Size()
-		if mt := info.ModTime().UnixNano(); mt > maxMtime {
-			maxMtime = mt
-		}
+		add(info)
 		return nil
 	})
 	if err != nil {
 		return "", fmt.Errorf("stamp %s: %w", repo, err)
+	}
+	// Alias configs are .json, so the census walk above can never have counted
+	// one — but aliasConfigFiles may name the same path twice (a config that
+	// extends a sibling which extends it back), so dedupe within that short
+	// slice rather than tracking every walked file.
+	for _, p := range slices.Compact(slices.Sorted(slices.Values(aliasConfigFiles(repo)))) {
+		info, err := os.Stat(p) // #nosec G304 -- fixed config names under the checkout, discovered by aliasConfigFiles
+		if err != nil {
+			continue
+		}
+		add(info)
 	}
 	return fmt.Sprintf("%s:%d:%d:%d", currentGen, count, size, maxMtime), nil
 }

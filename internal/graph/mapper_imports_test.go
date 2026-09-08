@@ -229,11 +229,11 @@ func TestTSBindings_AliasedNamedImportRecordsLocalNameOnly(t *testing.T) {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
 	got := bindings[f.rel]
-	if got["Bar"] != "./x" {
-		t.Errorf("bindings[%q][\"Bar\"] = %q, want %q", f.rel, got["Bar"], "./x")
+	if got["Bar"].specifier != "./x" || got["Bar"].imported != "Foo" {
+		t.Errorf("bindings[%q][\"Bar\"] = %+v, want specifier ./x and imported Foo", f.rel, got["Bar"])
 	}
-	if got["Plain"] != "./x" {
-		t.Errorf("bindings[%q][\"Plain\"] = %q, want %q", f.rel, got["Plain"], "./x")
+	if got["Plain"].specifier != "./x" || got["Plain"].imported != "Plain" {
+		t.Errorf("bindings[%q][\"Plain\"] = %+v, want specifier ./x and imported Plain", f.rel, got["Plain"])
 	}
 	if _, ok := got["Foo"]; ok {
 		t.Errorf("recorded %q as a binding, but only the alias %q is in scope: %v", "Foo", "Bar", got)
@@ -249,11 +249,33 @@ func TestTSBindings_DefaultAndNamespaceImports(t *testing.T) {
 
 	_, bindings, _ := mapperImports([]mapperFile{f})
 	got := bindings[f.rel]
-	if got["Baz"] != "./y" {
-		t.Errorf("bindings[\"Baz\"] = %q, want %q", got["Baz"], "./y")
+	if got["Baz"].specifier != "./y" || !got["Baz"].defaultImport {
+		t.Errorf("bindings[\"Baz\"] = %+v, want default specifier ./y", got["Baz"])
 	}
-	if got["ns"] != "./c" {
-		t.Errorf("bindings[\"ns\"] = %q, want %q", got["ns"], "./c")
+	if got["ns"].specifier != "./c" || !got["ns"].namespace {
+		t.Errorf("bindings[\"ns\"] = %+v, want namespace specifier ./c", got["ns"])
+	}
+}
+
+func TestTSBindings_TypeOnlyImportsDoNotBindRuntimeValues(t *testing.T) {
+	dir := t.TempDir()
+	f := mapMapperFile(t, dir, "a.ts", `
+import type DefaultType from "./default-type";
+import type { OnlyType, Original as AliasType } from "./types";
+import { type InlineType, RuntimeValue } from "./mixed";
+export function invalidRuntimeUse() { OnlyType(); AliasType(); InlineType(); }
+`, "a")
+
+	rows, bindings, stats := mapperImports([]mapperFile{f})
+	if stats.parseErr != 0 || stats.readErr != 0 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("import rows = %d, want 3: type-only imports remain dependency rows", len(rows))
+	}
+	got := bindings[f.rel]
+	if len(got) != 1 || got["RuntimeValue"].specifier == "" {
+		t.Errorf("runtime bindings = %v, want only RuntimeValue", got)
 	}
 }
 
