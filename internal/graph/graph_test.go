@@ -19,7 +19,7 @@ func TestWriteGraphDB_CancelledCtxDoesNotPublish(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if err := writeGraphDB(ctx, dbPath, "repo", "mod", "s", nil, nil, nil, nil, "", 0, nil, nil); !errors.Is(err, context.Canceled) {
+	if err := writeGraphDB(ctx, dbPath, "repo", "mod", "s", nil, nil, nil, nil, "", 0, 0, nil, nil); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
@@ -531,5 +531,36 @@ func TestRemoveStaleTemps(t *testing.T) {
 	}
 	if _, err := os.Stat(young); err != nil {
 		t.Errorf("young temp (live sibling) was removed: %v", err)
+	}
+}
+
+// TestPackageSurface_ExcludesTestSymbols pins the biggest token win on this
+// surface: _test.go declarations are counted, never listed. On a real repo they
+// sort first under `ORDER BY file, line` (alias_test.go before graph.go), so
+// they ate the maxPkgSymbols cap and pushed the actual public API out of the
+// response entirely.
+func TestPackageSurface_ExcludesTestSymbols(t *testing.T) {
+	m, repo := testManagerAt(t, "testdata/pkgtest")
+	resp, err := m.Package(context.Background(), PackageRequest{Repo: repo, Package: "pkgtest"})
+	if err != nil {
+		t.Fatalf("Package: %v", err)
+	}
+	names := map[string]bool{}
+	for _, s := range resp.Symbols {
+		names[s.QName] = true
+	}
+	if !names["pkgtest.Real"] {
+		t.Errorf("production symbol pkgtest.Real missing from surface: %v", names)
+	}
+	for _, leaked := range []string{"pkgtest.TestReal", "pkgtest.HelperFixture"} {
+		if names[leaked] {
+			t.Errorf("_test.go symbol %s leaked into the package surface: %v", leaked, names)
+		}
+	}
+	if resp.Tests != 2 {
+		t.Errorf("Tests = %d, want 2 (TestReal + HelperFixture)", resp.Tests)
+	}
+	if resp.Unexported == 0 {
+		t.Error("unexported_count should still count helper()")
 	}
 }

@@ -151,8 +151,16 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	// that used to cost four separate read-and-parse passes over the same
 	// files — see mapper_scan.go for the profile that motivated it.
 	var mapperScan mapperScanResult
-	if mFiles, _, mErr := mapperFiles(repo); mErr == nil {
+	// testsSkipped counts mapper test FILES dropped at walk time
+	// (isMapperTestFile). Unlike the Go tier — which indexes _test.go
+	// declarations and merely keeps them out of a package surface — these
+	// files never enter the graph, so every caller count on a mapper symbol
+	// understates by whatever they contained. Persisted as meta.tests_skipped
+	// so the answer can say so instead of silently under-reporting.
+	var testsSkipped int
+	if mFiles, mStats, mErr := mapperFiles(repo); mErr == nil {
 		mapperFileList = mFiles
+		testsSkipped = mStats.skippedTest
 		mapperScan = scanMapperFiles(mFiles)
 		mapperSyms, mapperCarriedUnits, mapperCarriedDirectives = mapperCarry(dbPath, mFiles, mapperScan.syms, mapperScan.hasError)
 	}
@@ -362,6 +370,7 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 		carriedUnits,
 		emptyReason,
 		fanoutCapped,
+		testsSkipped,
 		mapperImportRows,
 		mapperDirectives,
 		navigationGraph,
@@ -786,7 +795,7 @@ func implementsEdges(pkgs []*packages.Package, byPos map[string]*symRow) map[[2]
 // carrying its own explicit precision (the imports.precision column has no
 // DDL default, unlike edges/implements). fileDirectives maps repo-relative
 // file → "client" | "server" (P3); persisted to file_directives table.
-func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string, emptyReason string, fanoutCapped int, imports []importRow, fileDirectives map[string]string) error {
+func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string, emptyReason string, fanoutCapped, testsSkipped int, imports []importRow, fileDirectives map[string]string) error {
 	return writeGraphDBWithNavigation(
 		ctx,
 		dbPath,
@@ -799,13 +808,14 @@ func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, sy
 		carriedUnits,
 		emptyReason,
 		fanoutCapped,
+		testsSkipped,
 		imports,
 		fileDirectives,
 		nextNavigationGraph{},
 	)
 }
 
-func writeGraphDBWithNavigation(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string, emptyReason string, fanoutCapped int, imports []importRow, fileDirectives map[string]string, navigation nextNavigationGraph) error {
+func writeGraphDBWithNavigation(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string, emptyReason string, fanoutCapped, testsSkipped int, imports []importRow, fileDirectives map[string]string, navigation nextNavigationGraph) error {
 	if err := ctx.Err(); err != nil {
 		return err // cancelled before work started
 	}
@@ -903,6 +913,7 @@ func writeGraphDBWithNavigation(ctx context.Context, dbPath, repo, module, stamp
 			"carried_units": strings.Join(carriedUnits, "\n"),
 			"empty_reason":  emptyReason,
 			"fanout_capped": strconv.Itoa(fanoutCapped),
+			"tests_skipped": strconv.Itoa(testsSkipped),
 		} {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO meta (key, value) VALUES (?,?)`, k, v); err != nil {
 				return err
