@@ -1,9 +1,6 @@
 package graph
 
-import (
-	"encoding/json"
-	"testing"
-)
+import "testing"
 
 // Comment stripping runs before the JSON parse, so anything it drops beyond the
 // comment itself corrupts the document. That failure is silent: the parse fails,
@@ -74,16 +71,11 @@ func TestParseAliasConfig_SurvivesBlockComments(t *testing.T) {
     /* path aliases */"paths": {"@/*": ["src/*"]}
   }
 }`
-	// Guard the premise: without the comment this is ordinary JSON.
-	if err := json.Unmarshal([]byte(`{"compilerOptions":{"baseUrl":".","paths":{"@/*":["src/*"]}}}`), &struct{}{}); err != nil {
-		t.Fatalf("premise broken: %v", err)
-	}
-
 	got := parseAliasConfig([]byte(cfg), t.TempDir(), 0, nil)
 	if got == nil {
 		t.Fatal("parseAliasConfig returned nil: the comment broke the parse, so every alias in this config is silently lost")
 	}
-	if want := []string{"src/*"}; len(got.paths["@/*"]) != 1 || got.paths["@/*"][0] != want[0] {
-		t.Errorf("paths[\"@/*\"] = %v, want %v", got.paths["@/*"], want)
+	if p := got.paths["@/*"]; len(p) != 1 || p[0] != "src/*" {
+		t.Errorf("paths[\"@/*\"] = %v, want [src/*]", p)
 	}
 }
