@@ -50,6 +50,7 @@ ensure-server; the host owns the lifecycle. --addr/--endpoint are ignored.`,
 				Endpoint: envOr("DROIDS_MEM_MCP_ENDPOINT", endpoint),
 				Token:    tok,
 				Graphs:   gm,
+				Version:  version,
 			}
 			return mcpserver.Run(cmd.Context(), cfg, s)
 		},
