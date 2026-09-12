@@ -89,8 +89,11 @@ func TestIdentityProof(t *testing.T) {
 }
 
 func TestIdentityHandler(t *testing.T) {
-	const token = "tok-xyz"
-	h := identityHandler(token, "v-test")
+	const (
+		token   = "tok-xyz"
+		version = "v9.9.9"
+	)
+	h := identityHandler(token, version)
 
 	t.Run("empty nonce is rejected", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/identity", nil)
@@ -111,19 +114,30 @@ func TestIdentityHandler(t *testing.T) {
 		}
 	})
 
-	t.Run("valid nonce returns the proof", func(t *testing.T) {
+	// The stop path signals the PID this answer reports, so every field it
+	// decides on is asserted here rather than probed for a substring.
+	t.Run("valid nonce answers with the full identity", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/identity?nonce=n1", nil)
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", rec.Code)
 		}
-		body := rec.Body.String()
-		if !strings.Contains(body, IdentityProof(token, "n1")) {
-			t.Errorf("body %q missing expected proof", body)
+		type identity struct {
+			Server   string `json:"server"`
+			Proof    string `json:"proof"`
+			Version  string `json:"version"`
+			Pid      int    `json:"pid"`
+			PidProof string `json:"pid_proof"`
 		}
-		if !strings.Contains(body, ServerName) {
-			t.Errorf("body %q missing server name", body)
+		var got identity
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode body %q: %v", rec.Body.String(), err)
+		}
+		want := identity{ServerName, IdentityProof(token, "n1"), version,
+			os.Getpid(), IdentityPidProof(token, "n1", os.Getpid())}
+		if got != want {
+			t.Errorf("identity = %+v, want %+v", got, want)
 		}
 	})
 }
@@ -252,44 +266,5 @@ func TestIdentityPidProof(t *testing.T) {
 	// where it required the other.
 	if IdentityPidProof(token, "n1", 42) == IdentityProof(token, "n1") {
 		t.Fatal("pid proof collided with the plain proof")
-	}
-}
-
-// The stop path signals a PID, so it needs the listener to prove which process
-// it is — not merely that it holds the token.
-func TestIdentityHandler_BindsPidAndVersion(t *testing.T) {
-	const (
-		token = "tok-pid"
-		ver   = "v9.9.9"
-	)
-	req := httptest.NewRequest(http.MethodGet, "/identity?nonce=n1", nil)
-	rec := httptest.NewRecorder()
-	identityHandler(token, ver).ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	var got struct {
-		Server   string `json:"server"`
-		Proof    string `json:"proof"`
-		Version  string `json:"version"`
-		Pid      int    `json:"pid"`
-		PidProof string `json:"pid_proof"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode body %q: %v", rec.Body.String(), err)
-	}
-	if got.Pid != os.Getpid() {
-		t.Errorf("pid = %d, want %d", got.Pid, os.Getpid())
-	}
-	if got.Version != ver {
-		t.Errorf("version = %q, want %q", got.Version, ver)
-	}
-	if want := IdentityPidProof(token, "n1", os.Getpid()); got.PidProof != want {
-		t.Errorf("pid_proof = %q, want %q", got.PidProof, want)
-	}
-	// The pre-existing proof must not move: ensure-server still depends on it.
-	if want := IdentityProof(token, "n1"); got.Proof != want {
-		t.Errorf("proof = %q, want %q", got.Proof, want)
 	}
 }
