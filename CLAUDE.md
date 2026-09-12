@@ -45,9 +45,23 @@ State dir layout: `mem.db` (0600), `token` (0600), `mcp.pid`, `mcp.log`,
 agent's code-graph use visible instead of silent. Both the MCP handlers and the
 `graph` CLI leaves stamp it. Cosmetic only: write failures are swallowed.
 
-`/identity?nonce=<n>` answers `HMAC-SHA256(token, nonce)` — ensure-server uses it
-to verify a listener actually holds the token before reporting `already_running`
-(anti port-squatting).
+`/identity?nonce=<n>` answers `{server, proof, version, pid, pid_proof}`, where
+`proof` is `HMAC-SHA256(token, nonce)` — ensure-server uses it to verify a
+listener actually holds the token before reporting `already_running` (anti
+port-squatting).
+
+`pid_proof` is a **second** HMAC, over `nonce + ":" + pid`, and answers the
+different question a caller about to send a signal has: not "does this listener
+hold the token" but "**is it this exact process**". They are separate values on
+purpose — folding the PID into `proof` would change the answer ensure-server
+already depends on, so a healthy daemon built before this would read as a port
+squatter. `uninstall --all` requires `pid_proof` to match the pidfile before
+SIGTERM and refuses otherwise (`not_verified`), because the pidfile is only
+written by ensure-server's spawn: a server started any other way can hold the
+token while the recorded PID belongs to a process the OS recycled it to.
+`version` is the release version of the binary serving, so a caller can tell a
+daemon still running older code from a current one; its **absence** is itself
+the staleness signal, since a server predating this cannot report it.
 
 ## Architecture
 

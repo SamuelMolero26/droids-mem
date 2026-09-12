@@ -233,12 +233,17 @@ func removeClaudeSnippetStatus(project bool) string {
 // stopServerStatus SIGTERMs the daemon recorded in mcp.pid (server does a
 // graceful Shutdown) and clears the pidfile. The symmetric counterpart of
 // ensure-server's spawn.
-// The OS recycles PIDs, so a stale pidfile can name an unrelated process:
-// ensure-server's /identity challenge gates the signal.
 //
-// ponytail: the probe proves a token holder is listening, not that it is this
-// exact PID. Closing that gap needs a platform-specific port→PID lookup and
-// still requires an already-desynced pidfile.
+// The OS recycles PIDs, so a pidfile a dead daemon left behind can name an
+// unrelated process. The /identity challenge gates the signal, and the
+// listener must prove it IS this PID — proving only that it holds the token
+// would still permit signalling an unrelated process, since a server launched
+// outside ensure-server (which is what writes the pidfile) can hold the token
+// while the recorded PID belongs to something else entirely.
+//
+// A server predating PID binding cannot make that proof, so it is not
+// signalled. Refusing to act on an unproven PID is the safe direction: the
+// cost is a daemon left running, the alternative is SIGTERM to a stranger.
 func stopServerStatus() string {
 	dir, err := state.Dir()
 	if err != nil {
@@ -261,9 +266,17 @@ func stopServerStatus() string {
 		return "error: load token: " + err.Error()
 	}
 	addr := envOr("DROIDS_MEM_MCP_ADDR", mcpserver.DefaultAddr)
-	if err := verifyServer(baseURL(addr), tok, 500*time.Millisecond); err != nil {
-		// Keep the pidfile: erasing it would hide the inconsistency.
+	// Keep the pidfile on every refusal below: erasing it hides the
+	// inconsistency that is the only evidence something went wrong.
+	id, err := verifyServer(baseURL(addr), tok, 500*time.Millisecond)
+	if err != nil {
 		return fmt.Sprintf("not_verified: nothing on %s answered the identity challenge; pid %d left alone (%v)", addr, pid, err)
+	}
+	if id.Pid != pid {
+		if id.Pid == 0 {
+			return fmt.Sprintf("not_verified: the server on %s predates PID binding and cannot prove it is pid %d; left alone — stop it manually", addr, pid)
+		}
+		return fmt.Sprintf("not_verified: the server on %s proved it is pid %d, but the pidfile names %d; left alone", addr, id.Pid, pid)
 	}
 	proc, err := os.FindProcess(pid)
 	if err != nil {
