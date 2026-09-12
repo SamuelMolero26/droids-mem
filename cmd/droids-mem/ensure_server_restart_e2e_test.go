@@ -87,68 +87,70 @@ func alive(pid int) bool {
 	return p.Signal(syscall.Signal(0)) == nil
 }
 
-// A daemon running superseded code is the normal state after an upgrade:
-// nothing restarts it, so it serves the old build until the box reboots.
-// ensure-server replaces it once it can prove which process it is.
-func TestE2E_EnsureServerReplacesStaleDaemon(t *testing.T) {
-	dir := t.TempDir()
-	oldBin := buildVersioned(t, dir, "v1.0.0")
-	newBin := buildVersioned(t, dir, "v2.0.0")
-	env := newDaemonEnv(t)
+// A daemon running superseded code is the normal state after an upgrade —
+// nothing restarts it, so it keeps serving the old build until the box reboots.
+// ensure-server replaces one whose version differs from its own, and must leave
+// one that matches alone: restarting that would sever live MCP streams on every
+// single call.
+func TestE2E_EnsureServerReplacesOnlyAStaleDaemon(t *testing.T) {
+	tests := []struct {
+		name       string
+		running    string // version of the daemon already up
+		calling    string // version of the binary running ensure-server
+		wantStatus string
+		wantSwap   bool
+	}{
+		{
+			name:       "daemon on another version is replaced",
+			running:    "v1.0.0",
+			calling:    "v2.0.0",
+			wantStatus: "restarted",
+			wantSwap:   true,
+		},
+		{
+			name:       "daemon on this version is left alone",
+			running:    "v1.0.0",
+			calling:    "v1.0.0",
+			wantStatus: "already_running",
+		},
+	}
 
-	started := env.run(t, oldBin, "ensure-server", "--addr", env.addr)
-	if started["status"] != "started" {
-		t.Fatalf("first ensure-server = %v, want started", started)
-	}
-	oldPid := env.pidfile(t)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			env := newDaemonEnv(t)
 
-	got := env.run(t, newBin, "ensure-server", "--addr", env.addr)
-	if got["status"] != "restarted" {
-		t.Fatalf("ensure-server = %v, want restarted (daemon runs v1.0.0, binary is v2.0.0)", got)
-	}
-	if replaced, ok := got["replaced"].(float64); !ok || int(replaced) != oldPid {
-		t.Errorf("replaced = %v, want the stale pid %d", got["replaced"], oldPid)
-	}
+			if got := env.run(t, buildVersioned(t, dir, tc.running), "ensure-server", "--addr", env.addr); got["status"] != "started" {
+				t.Fatalf("first ensure-server = %v, want started", got)
+			}
+			before := env.pidfile(t)
 
-	newPid := env.pidfile(t)
-	if newPid == oldPid {
-		t.Fatalf("pidfile still names %d: the stale daemon was not replaced", oldPid)
-	}
-	// The outgoing process drains in the background; it must actually be gone.
-	deadline := time.Now().Add(15 * time.Second)
-	for alive(oldPid) && time.Now().Before(deadline) {
-		time.Sleep(50 * time.Millisecond)
-	}
-	if alive(oldPid) {
-		t.Errorf("stale daemon %d still running after replacement", oldPid)
-	}
-	if !alive(newPid) {
-		t.Errorf("replacement daemon %d is not running", newPid)
-	}
-}
+			got := env.run(t, buildVersioned(t, dir, tc.calling), "ensure-server", "--addr", env.addr)
+			if got["status"] != tc.wantStatus {
+				t.Fatalf("ensure-server = %v, want %q", got, tc.wantStatus)
+			}
+			after := env.pidfile(t)
+			if swapped := after != before; swapped != tc.wantSwap {
+				t.Fatalf("pid changed = %v, want %v (was %d, now %d)", swapped, tc.wantSwap, before, after)
+			}
+			if !alive(after) {
+				t.Errorf("serving daemon %d is not running", after)
+			}
+			if !tc.wantSwap {
+				return
+			}
 
-// The other half of the contract: a daemon already on this build must not be
-// disturbed. Restarting it would sever live MCP streams for no reason, on
-// every single ensure-server call.
-func TestE2E_EnsureServerKeepsCurrentDaemon(t *testing.T) {
-	dir := t.TempDir()
-	bin := buildVersioned(t, dir, "v1.0.0")
-	env := newDaemonEnv(t)
-
-	env.run(t, bin, "ensure-server", "--addr", env.addr)
-	pid := env.pidfile(t)
-
-	got := env.run(t, bin, "ensure-server", "--addr", env.addr)
-	if got["status"] != "already_running" {
-		t.Fatalf("ensure-server = %v, want already_running", got)
-	}
-	if got["stale"] != nil {
-		t.Errorf("stale = %v, want absent on a current daemon", got["stale"])
-	}
-	if env.pidfile(t) != pid {
-		t.Errorf("pidfile changed from %d: a current daemon was needlessly replaced", pid)
-	}
-	if !alive(pid) {
-		t.Errorf("daemon %d was killed", pid)
+			if replaced, ok := got["replaced"].(float64); !ok || int(replaced) != before {
+				t.Errorf("replaced = %v, want the stale pid %d", got["replaced"], before)
+			}
+			// The outgoing process drains in the background, so give it room.
+			deadline := time.Now().Add(15 * time.Second)
+			for alive(before) && time.Now().Before(deadline) {
+				time.Sleep(50 * time.Millisecond)
+			}
+			if alive(before) {
+				t.Errorf("stale daemon %d still running after replacement", before)
+			}
+		})
 	}
 }
