@@ -272,7 +272,12 @@ func stripJSONComments(data []byte) []byte {
 				i += 2
 				for i+1 < len(data) {
 					if data[i] == '*' && data[i+1] == '/' {
-						i += 2
+						// Leave i on the closing '/' so the loop's i++ steps
+						// past it. Advancing by 2 here would let that i++
+						// swallow the character after the comment — the comma
+						// in `1/*c*/,` — and the resulting JSON no longer
+						// parses, which silently drops every alias in the file.
+						i++
 						break
 					}
 					if data[i] == '\n' {
