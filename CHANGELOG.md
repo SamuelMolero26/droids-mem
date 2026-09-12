@@ -73,6 +73,28 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   type-check". The MCP tool descriptions were updated to match; they had
   described the old behaviour.
 
+### Security
+- **`uninstall --all` now requires the listening daemon to prove which process
+  it is before sending SIGTERM.** The stop path previously accepted a token
+  challenge as sufficient, but that only establishes that *some* token holder
+  is listening on the address — not that it is the PID recorded in `mcp.pid`.
+  Only `ensure-server`'s spawn writes that file, so a server started any other
+  way can pass the challenge while the recorded PID belongs to an unrelated
+  process the OS recycled the number to, which then received the signal.
+  `/identity` now also returns `pid` and a `pid_proof` HMAC computed over
+  `nonce + ":" + pid`, and the stop refuses (`not_verified`, pidfile kept)
+  unless that proof matches the pidfile. Binding the PID into its own HMAC —
+  rather than into the existing `proof` — keeps `ensure-server`'s check
+  answering identically, so a healthy daemon built before this is not
+  misreported as a port squatter; such a daemon cannot prove a PID and is
+  therefore left running rather than signalled.
+
+### Added
+- **`/identity` now reports the serving binary's release `version`**, so a
+  caller holding a newer binary can tell a daemon still running older code from
+  a current one. Its absence is itself the staleness signal, since a server
+  predating this cannot report it.
+
 ### Fixed
 - **`droids-mem upgrade` and the TUI update banner never detected a new
   release.** The release workflow injects the git tag verbatim

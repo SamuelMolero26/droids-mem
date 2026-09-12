@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -112,6 +113,11 @@ type Config struct {
 	Token    string // required bearer token; Run errors if empty
 	Logger   *log.Logger
 	Graphs   *graph.Manager // optional code-graph subsystem (ADR-0020); nil skips graph tools
+	// Version is the release version of the binary running this server, as
+	// injected at build time. Advertised on /identity so a caller holding a
+	// newer binary can tell a daemon still running older code from a current
+	// one. Empty means "unknown", which a caller must read as stale.
+	Version string
 }
 
 // Run starts the MCP bridge and blocks until ctx is canceled or the server
@@ -146,7 +152,7 @@ func Run(ctx context.Context, cfg Config, st *store.Store) error {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
-	mux.HandleFunc("/identity", identityHandler(cfg.Token))
+	mux.HandleFunc("/identity", identityHandler(cfg.Token, cfg.Version))
 
 	wrapped := bearerAuth(cfg.Token, cfg.Endpoint, limitBody(mux))
 
@@ -249,20 +255,27 @@ func shareRepo() string {
 }
 
 // identityHandler answers a challenge–response proof of token knowledge:
-// GET /identity?nonce=<client nonce> → {"server":..., "proof": hex(HMAC-SHA256(token, nonce))}.
-// Unauthenticated by design — the proof reveals nothing about the token, and it
-// lets ensure-server verify that whatever answers on this port actually holds
-// the shared token before reporting "already_running" (anti port-squatting).
-// A fresh client nonce per check makes replay of old proofs useless.
-func identityHandler(token string) http.HandlerFunc {
+// GET /identity?nonce=<client nonce> → {"server", "proof", "version", "pid", "pid_proof"}.
+// Unauthenticated by design — the proofs reveal nothing about the token, and
+// they let ensure-server verify that whatever answers on this port actually
+// holds the shared token before reporting "already_running" (anti
+// port-squatting). A fresh client nonce per check makes replay useless.
+//
+// "proof" answers "does this listener hold the token"; "pid_proof" additionally
+// answers "which process is it", which a caller about to send a signal needs
+// and the token alone cannot establish.
+func identityHandler(token, version string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		nonce := r.URL.Query().Get("nonce")
 		if nonce == "" || len(nonce) > maxIdentityNonceLen {
 			http.Error(w, `{"error":"nonce required"}`, http.StatusBadRequest)
 			return
 		}
+		pid := os.Getpid()
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"server":%q,"proof":%q}`, ServerName, IdentityProof(token, nonce))
+		fmt.Fprintf(w, `{"server":%q,"proof":%q,"version":%q,"pid":%d,"pid_proof":%q}`,
+			ServerName, IdentityProof(token, nonce), version, pid,
+			IdentityPidProof(token, nonce, pid))
 	}
 }
 
@@ -272,6 +285,18 @@ func identityHandler(token string) http.HandlerFunc {
 func IdentityProof(token, nonce string) string {
 	mac := hmac.New(sha256.New, []byte(token))
 	mac.Write([]byte(nonce))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// IdentityPidProof binds the answering process's PID into the proof, so a
+// caller can verify the listener IS the process it is about to signal — not
+// merely that some token holder is listening on the address. Deliberately a
+// second value rather than a change to IdentityProof: ensure-server's existing
+// check must keep answering the same way against a server built before this,
+// or a healthy older daemon would be misreported as a port squatter.
+func IdentityPidProof(token, nonce string, pid int) string {
+	mac := hmac.New(sha256.New, []byte(token))
+	mac.Write([]byte(nonce + ":" + strconv.Itoa(pid)))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
