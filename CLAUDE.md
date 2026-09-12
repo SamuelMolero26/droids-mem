@@ -63,6 +63,19 @@ token while the recorded PID belongs to a process the OS recycled it to.
 daemon still running older code from a current one; its **absence** is itself
 the staleness signal, since a server predating this cannot report it.
 
+`ensure-server` uses that to **replace a stale daemon**: nothing else does, so
+without it a daemon serves superseded code until reboot (`upgrade` replaces the
+executable and returns). Any version difference counts, either direction — the
+daemon should be the build the caller actually has. It signals the *proven* PID
+from `/identity`, never the pidfile, then spawns a replacement without waiting
+for the drain: `http.Server.Shutdown` closes listeners before waiting on
+in-flight connections, so the address frees in ms even when a live MCP stream
+holds the drain open for the full `ShutdownGrace`. Reports
+`{"status":"restarted","pid":…,"replaced":…}`. A live stream on the outgoing
+daemon is closed when the grace expires; clients reconnect to the replacement,
+which is already listening. A daemon proving no PID is reported
+(`{"status":"already_running","stale":true}`), never signalled.
+
 ## Architecture
 
 Single binary, layered. Don't bypass layers:

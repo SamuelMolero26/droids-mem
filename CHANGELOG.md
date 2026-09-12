@@ -89,6 +89,29 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   misreported as a port squatter; such a daemon cannot prove a PID and is
   therefore left running rather than signalled.
 
+### Changed
+- **`ensure-server` now replaces a daemon running superseded code.** Nothing
+  restarted it before: `upgrade` replaces the executable on disk and returns,
+  and `ensure-server` reported `already_running` without comparing versions —
+  so a daemon kept serving the old build until the machine rebooted, which made
+  a stale daemon the normal state after every upgrade rather than an edge case.
+  When the running daemon's version differs from the calling binary's *and* it
+  has proven which process it is, `ensure-server` signals it and starts a
+  replacement, reporting `{"status":"restarted","pid":…,"replaced":…}`.
+  Measured at well under a second end-to-end, because `http.Server.Shutdown`
+  closes listeners before draining connections: the replacement binds while the
+  outgoing process is still winding down.
+
+  **Behaviour change**: an agent holding a live MCP stream against the outgoing
+  daemon has that stream closed when the shutdown grace expires. Clients
+  reconnect to the replacement, which is already listening by then.
+
+  A daemon that predates PID binding proves no PID, so there is nothing safe to
+  signal; it is reported on stderr and left running
+  (`{"status":"already_running","stale":true}`) rather than signalled on the
+  strength of a pidfile. That is a one-time transition: every daemon built from
+  this release onward can prove a PID.
+
 ### Added
 - **`/identity` now reports the serving binary's release `version`**, so a
   caller holding a newer binary can tell a daemon still running older code from
