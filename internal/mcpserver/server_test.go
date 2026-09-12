@@ -5,9 +5,12 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -87,7 +90,7 @@ func TestIdentityProof(t *testing.T) {
 
 func TestIdentityHandler(t *testing.T) {
 	const token = "tok-xyz"
-	h := identityHandler(token)
+	h := identityHandler(token, "v-test")
 
 	t.Run("empty nonce is rejected", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/identity", nil)
@@ -218,5 +221,75 @@ func TestInstructions_TransportFork(t *testing.T) {
 	}
 	if strings.Contains(stdioVar, "Do NOT save session summaries") {
 		t.Errorf("stdio variant carries the HTTP no-self-save policy")
+	}
+}
+
+func TestIdentityPidProof(t *testing.T) {
+	const token = "tok-abc"
+
+	// Independently recomputed HMAC — locks the construction so the stop path
+	// and the server can never drift on it.
+	want := func(nonce string, pid int) string {
+		mac := hmac.New(sha256.New, []byte(token))
+		mac.Write([]byte(nonce + ":" + strconv.Itoa(pid)))
+		return hex.EncodeToString(mac.Sum(nil))
+	}
+
+	if got := IdentityPidProof(token, "n1", 42); got != want("n1", 42) {
+		t.Fatalf("pid proof = %q, want %q", got, want("n1", 42))
+	}
+	// The PID is what this proof adds over IdentityProof: it must move it.
+	if IdentityPidProof(token, "n1", 42) == IdentityPidProof(token, "n1", 43) {
+		t.Fatal("different pids produced identical proofs")
+	}
+	if IdentityPidProof(token, "n1", 42) == IdentityPidProof(token, "n2", 42) {
+		t.Fatal("different nonces produced identical proofs")
+	}
+	if IdentityPidProof(token, "n1", 42) == IdentityPidProof("other", "n1", 42) {
+		t.Fatal("different tokens produced identical proofs")
+	}
+	// Must not collide with the PID-less proof, or a caller could accept one
+	// where it required the other.
+	if IdentityPidProof(token, "n1", 42) == IdentityProof(token, "n1") {
+		t.Fatal("pid proof collided with the plain proof")
+	}
+}
+
+// The stop path signals a PID, so it needs the listener to prove which process
+// it is — not merely that it holds the token.
+func TestIdentityHandler_BindsPidAndVersion(t *testing.T) {
+	const (
+		token = "tok-pid"
+		ver   = "v9.9.9"
+	)
+	req := httptest.NewRequest(http.MethodGet, "/identity?nonce=n1", nil)
+	rec := httptest.NewRecorder()
+	identityHandler(token, ver).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var got struct {
+		Server   string `json:"server"`
+		Proof    string `json:"proof"`
+		Version  string `json:"version"`
+		Pid      int    `json:"pid"`
+		PidProof string `json:"pid_proof"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode body %q: %v", rec.Body.String(), err)
+	}
+	if got.Pid != os.Getpid() {
+		t.Errorf("pid = %d, want %d", got.Pid, os.Getpid())
+	}
+	if got.Version != ver {
+		t.Errorf("version = %q, want %q", got.Version, ver)
+	}
+	if want := IdentityPidProof(token, "n1", os.Getpid()); got.PidProof != want {
+		t.Errorf("pid_proof = %q, want %q", got.PidProof, want)
+	}
+	// The pre-existing proof must not move: ensure-server still depends on it.
+	if want := IdentityProof(token, "n1"); got.Proof != want {
+		t.Errorf("proof = %q, want %q", got.Proof, want)
 	}
 }
