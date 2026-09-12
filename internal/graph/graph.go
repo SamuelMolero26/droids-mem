@@ -137,6 +137,17 @@ type Freshness struct {
 	// partiality fact, not a per-edge one. Zero (the JSON-omitted default)
 	// means no callsite in this build hit the cap.
 	FanoutCapped int `json:"fanout_capped,omitempty"`
+	// TestsSkipped is the count of mapper-tier test FILES excluded from the
+	// index at walk time (isMapperTestFile). This is the mapper tier's test
+	// policy and it differs from the Go tier's: Go indexes _test.go
+	// declarations and merely keeps them out of a package surface, so they
+	// stay queryable by name, whereas these files are absent from the graph
+	// entirely — which makes every caller count and transitive_callers on a
+	// mapper symbol understate. A build-level partiality fact like
+	// FanoutCapped, hence its home on Freshness: it qualifies symbol answers
+	// as much as package ones. Zero (JSON-omitted) means nothing was skipped,
+	// which is always the case on a pure Go repo.
+	TestsSkipped int `json:"tests_skipped,omitempty"`
 	// carriedUnits is the FULL list (unexported, never serialized) backing the
 	// per-symbol Carried flag (query.go) — membership can fall outside the
 	// capped StaleUnits list above.
@@ -804,7 +815,7 @@ func (m *Manager) open(path string) (*sql.DB, func(), Freshness, error) {
 	// through freshnessNow and its callers for a two-row read off an
 	// already-cached local handle. The cancellation that matters is on the
 	// walks and the build, both of which are context-bound.
-	rows, err := entry.db.Query(`SELECT key, value FROM meta WHERE key IN ('stamp','indexed_at','carried_units','empty_reason','fanout_capped')`) //nolint:noctx // see above
+	rows, err := entry.db.Query(`SELECT key, value FROM meta WHERE key IN ('stamp','indexed_at','carried_units','empty_reason','fanout_capped','tests_skipped')`) //nolint:noctx // see above
 	if err != nil {
 		release()
 		return nil, noopRelease, Freshness{}, fmt.Errorf("read graph meta: %w", err)
@@ -836,6 +847,12 @@ func (m *Manager) open(path string) (*sql.DB, func(), Freshness, error) {
 			// than an error, since a missing/empty row is not a build failure.
 			if n, err := strconv.Atoi(v); err == nil {
 				fresh.FanoutCapped = n
+			}
+		case "tests_skipped":
+			// Same best-effort parse as fanout_capped above: a graph.db built
+			// before this row existed simply reports 0.
+			if n, err := strconv.Atoi(v); err == nil {
+				fresh.TestsSkipped = n
 			}
 		}
 	}

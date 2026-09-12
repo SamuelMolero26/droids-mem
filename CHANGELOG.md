@@ -74,6 +74,28 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   described the old behaviour.
 
 ### Fixed
+- **`graph_package` no longer buries a package's public API under its tests.**
+  The surface listed every exported symbol ordered by file and line, capped at
+  200. Go indexes `_test.go` declarations too (`packages.Load` runs with
+  `Tests: true`), and on a real package they outnumber the API roughly ten to
+  one and sort first — so the cap was spent on test helpers and the actual
+  exported surface never appeared in the response. Measured 92% test rows on a
+  live package before the fix. Test declarations are now excluded from the rows
+  and reported as a `tests_count` scalar instead; they remain indexed and
+  reachable by name through `graph_symbol`.
+- **`callers_total` and `callees_total` are now actually rendered.** Both
+  fields were computed and populated on truncation, but the shared renderer
+  behind the CLI and the MCP bridge never printed them — so the truncation hint
+  pointed agents at numbers no agent could see. `graph_package` gained the same
+  treatment with a new `symbols_total`.
+- **Mapper-tier test files are excluded from the index, and the answer now says
+  so.** Test files in TypeScript, JavaScript and Python never enter the graph
+  at all, which makes every caller count and `transitive_callers` on a mapper
+  symbol understate. A new `tests_skipped` freshness message names the
+  consequence rather than just the count. The Go and mapper tiers differ here —
+  Go indexes its test declarations, the mapper drops the files — so the package
+  hint now carries the wording that is true for the tier being answered instead
+  of one line that was only true for Go.
 - **A repo that stops type-checking no longer blanks the whole code graph.**
   Previously the first package with a type error aborted the entire build and
   every query fell back to the last good graph, marked stale — so one typo in
