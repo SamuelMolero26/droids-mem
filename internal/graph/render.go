@@ -58,6 +58,16 @@ func RenderSymbol(r *SymbolResponse) string {
 		b.WriteString("carried: true\n")
 	}
 
+	// True neighbor counts behind a capped list. Set only on truncation
+	// (query.go), so a zero here means "not truncated" and stays unprinted —
+	// this is the field truncatedHint's "see *_total" points at.
+	if r.CallersTotal > 0 {
+		fmt.Fprintf(&b, "callers_total: %d\n", r.CallersTotal)
+	}
+	if r.CalleesTotal > 0 {
+		fmt.Fprintf(&b, "callees_total: %d\n", r.CalleesTotal)
+	}
+
 	if r.TransitiveCallers != nil {
 		fmt.Fprintf(&b, "transitive_callers: %d\n", *r.TransitiveCallers)
 	}
@@ -93,8 +103,16 @@ func RenderPackage(r *PackageResponse) string {
 	}
 
 	fmt.Fprintf(&b, "unexported: %d\n", r.Unexported)
+	// Test declarations are a count, never rows — they are indexed and still
+	// reachable by name via graph_symbol.
+	if r.Tests > 0 {
+		fmt.Fprintf(&b, "tests: %d\n", r.Tests)
+	}
 	if r.Truncated {
 		b.WriteString("truncated: true\n")
+		if r.SymbolsTotal > 0 {
+			fmt.Fprintf(&b, "symbols_total: %d\n", r.SymbolsTotal)
+		}
 	}
 	if r.Hint != "" {
 		fmt.Fprintf(&b, "hint: %s\n", r.Hint)
@@ -145,6 +163,14 @@ func writeFreshness(b *strings.Builder, f Freshness) {
 	// not a staleness signal — shown regardless of Stale (design D5/D6).
 	if f.FanoutCapped > 0 {
 		msgs = append(msgs, fmt.Sprintf("fanout_capped: %d (callsite(s) truncated at the repo-wide resolution cap)", f.FanoutCapped))
+	}
+	// Mapper-tier only, and it names the CONSEQUENCE, not just the count: an
+	// agent reading "12 files skipped" cannot infer that its caller numbers are
+	// low, which is the one thing that changes what it should do next. The Go
+	// tier never sets this — its test declarations ARE indexed (see
+	// PackageResponse.Tests for that half of the story).
+	if f.TestsSkipped > 0 {
+		msgs = append(msgs, fmt.Sprintf("tests_skipped: %d test file(s) were not indexed, so caller counts and transitive_callers understate — grep for test callers if that matters", f.TestsSkipped))
 	}
 	if len(msgs) == 0 {
 		return

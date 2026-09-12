@@ -29,8 +29,15 @@ const (
 	// also covers a benign in-flight rebuild with no failure at all (a partial
 	// build that itself succeeds is never stale; see graph.go's Freshness doc).
 	// freshness.index_error, when present, carries the real failure reason.
-	staleGraphHint  = "graph is stale: serving the last good index while it updates (see freshness.index_error if the last build failed)"
-	pkgSymbolsLimit = "exported symbols only; re-query an unexported symbol by its name"
+	staleGraphHint = "graph is stale: serving the last good index while it updates (see freshness.index_error if the last build failed)"
+	// The two tiers exclude tests for different reasons and leave the agent
+	// different escape hatches, so they cannot share one wording. Go indexes
+	// _test.go declarations (packages.Load Tests:true) and merely keeps them
+	// out of this surface, so a re-query by name still finds them. The mapper
+	// tier drops test FILES at walk time (isMapperTestFile), so the same
+	// re-query returns nothing — promising it there would be a lie.
+	pkgSymbolsLimitGo     = "exported non-test symbols only (see unexported/tests counts); test and unexported symbols are indexed — re-query either by its name"
+	pkgSymbolsLimitMapper = "exported symbols only (see unexported count); test files are not indexed at all, so they are not queryable by name either — re-query an unexported symbol by its name"
 	// blast radius rides entirely on call edges, and only func/method symbols are
 	// edge endpoints (byPos maps FuncDecls only). So transitive_callers is a
 	// structural 0 for a type/const/var — omitting it (issue #47) stops an agent
@@ -795,8 +802,39 @@ type PackageResponse struct {
 	Package    string          `json:"package"`
 	Symbols    []PackageSymbol `json:"symbols"`
 	Unexported int             `json:"unexported_count"`
-	Truncated  bool            `json:"truncated,omitempty"`
-	Hint       string          `json:"hint,omitempty"`
+	// Tests counts exported _test.go declarations, which Symbols deliberately
+	// excludes. They are indexed (packages.Load runs with Tests:true) and stay
+	// queryable by name through graph_symbol, but they are never rows here: on
+	// a real package they outnumber the API ~10:1 and, sorting first under
+	// `ORDER BY file, line`, they consumed the whole maxPkgSymbols cap and
+	// pushed the actual public surface out of the response.
+	Tests int `json:"tests_count,omitempty"`
+	// SymbolsTotal is the true count of listed-eligible symbols (exported,
+	// non-test) when the list was capped at maxPkgSymbols. Same convention as
+	// SymbolResponse.CallersTotal: set only on truncation, so 0 (omitted)
+	// unambiguously means "the list is complete".
+	SymbolsTotal int    `json:"symbols_total,omitempty"`
+	Truncated    bool   `json:"truncated,omitempty"`
+	Hint         string `json:"hint,omitempty"`
+}
+
+// isTestFile matches a Go _test.go path inside a SQL predicate. The backslash
+// escape is required: '_' is a LIKE single-character wildcard, so an unescaped
+// '%_test.go' would also match "mytest.go".
+const isTestFile = `file LIKE '%\_test.go' ESCAPE '\'`
+
+// pkgCounts returns the three scalars a package surface reports alongside its
+// rows — unexported, exported-in-tests, and the true exported non-test total —
+// in one pass, for either resolution tier's WHERE clause.
+func pkgCounts(ctx context.Context, conn *sql.DB, where string, args []any) (unexported, tests, total int, err error) {
+	// where is a compile-time literal or placeholder ORs, never user text.
+	q := `SELECT
+		COUNT(CASE WHEN exported = 0 THEN 1 END),
+		COUNT(CASE WHEN exported = 1 AND ` + isTestFile + ` THEN 1 END),
+		COUNT(CASE WHEN exported = 1 AND NOT ` + isTestFile + ` THEN 1 END)
+		FROM symbols WHERE ` + where
+	err = conn.QueryRowContext(ctx, q, args...).Scan(&unexported, &tests, &total)
+	return unexported, tests, total, err
 }
 
 // resolvePackage maps a user-supplied package name onto a real `package`
@@ -899,24 +937,13 @@ func (m *Manager) Package(ctx context.Context, req PackageRequest) (*PackageResp
 
 	// First tier: exact or suffix (preserves Go and Python leaf behavior).
 	if resolved, err := resolvePackage(ctx, conn, req.Package); err == nil {
-		resp := &PackageResponse{Repo: req.Repo, Freshness: fresh, Package: resolved, Hint: pkgSymbolsLimit}
-		var hints []string
-		if fresh.Stale {
-			hints = append(hints, staleGraphHint)
-		}
-		if fresh.Rebuilding {
-			hints = append(hints, rebuildingHint)
-		}
-		if len(hints) > 0 {
-			hints = append(hints, pkgSymbolsLimit)
-			resp.Hint = strings.Join(hints, "; ")
-		}
-		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM symbols WHERE package = ? AND exported = 0`,
-			resolved).Scan(&resp.Unexported); err != nil {
+		resp := &PackageResponse{Repo: req.Repo, Freshness: fresh, Package: resolved}
+		var total int
+		if resp.Unexported, resp.Tests, total, err = pkgCounts(ctx, conn, `package = ?`, []any{resolved}); err != nil {
 			return nil, err
 		}
 		rows, err := conn.QueryContext(ctx, `SELECT qname, kind, signature, doc, file, line FROM symbols
-			WHERE package = ? AND exported = 1 ORDER BY file, line LIMIT ?`,
+			WHERE package = ? AND exported = 1 AND NOT `+isTestFile+` ORDER BY file, line LIMIT ?`,
 			resolved, maxPkgSymbols+1)
 		if err != nil {
 			return nil, err
@@ -937,7 +964,9 @@ func (m *Manager) Package(ctx context.Context, req PackageRequest) (*PackageResp
 		if len(resp.Symbols) > maxPkgSymbols {
 			resp.Symbols = resp.Symbols[:maxPkgSymbols]
 			resp.Truncated = true
+			resp.SymbolsTotal = total
 		}
+		resp.Hint = packageHint(fresh, resp.Symbols)
 		return resp, nil
 	} else if !errors.Is(err, ErrNotFound) {
 		return nil, err
@@ -955,24 +984,13 @@ func (m *Manager) Package(ctx context.Context, req PackageRequest) (*PackageResp
 	if total == 0 {
 		return nil, fmt.Errorf("package %q: %w", req.Package, ErrNotFound)
 	}
-	resp := &PackageResponse{Repo: req.Repo, Freshness: fresh, Package: pkgNorm, Hint: pkgSymbolsLimit}
-	var hints []string
-	if fresh.Stale {
-		hints = append(hints, staleGraphHint)
-	}
-	if fresh.Rebuilding {
-		hints = append(hints, rebuildingHint)
-	}
-	if len(hints) > 0 {
-		hints = append(hints, pkgSymbolsLimit)
-		resp.Hint = strings.Join(hints, "; ")
-	}
-	// Unexported count across the aggregated directory.
-	uq := `SELECT COUNT(*) FROM symbols WHERE ` + where + ` AND exported = 0` // #nosec G202 -- see above
-	if err := conn.QueryRowContext(ctx, uq, args...).Scan(&resp.Unexported); err != nil {
+	resp := &PackageResponse{Repo: req.Repo, Freshness: fresh, Package: pkgNorm}
+	// Counts across the aggregated directory.
+	var symbolsTotal int
+	if resp.Unexported, resp.Tests, symbolsTotal, err = pkgCounts(ctx, conn, where, args); err != nil {
 		return nil, err
 	}
-	sq := `SELECT qname, kind, signature, doc, file, line FROM symbols WHERE ` + where + ` AND exported = 1 ORDER BY file, line LIMIT ?` // #nosec G202 -- see above
+	sq := `SELECT qname, kind, signature, doc, file, line FROM symbols WHERE ` + where + ` AND exported = 1 AND NOT ` + isTestFile + ` ORDER BY file, line LIMIT ?` // #nosec G202 -- see above
 	sargs := append(append([]any{}, args...), maxPkgSymbols+1)
 	rows, err := conn.QueryContext(ctx, sq, sargs...)
 	if err != nil {
@@ -994,6 +1012,28 @@ func (m *Manager) Package(ctx context.Context, req PackageRequest) (*PackageResp
 	if len(resp.Symbols) > maxPkgSymbols {
 		resp.Symbols = resp.Symbols[:maxPkgSymbols]
 		resp.Truncated = true
+		resp.SymbolsTotal = symbolsTotal
 	}
+	resp.Hint = packageHint(fresh, resp.Symbols)
 	return resp, nil
+}
+
+// packageHint assembles a package surface's hint, picking the tier-correct
+// exclusion wording from the symbols actually being returned. Tiers are
+// disjoint per package (a package is one language), so the first row settles
+// it; an empty package gets the Go wording, which promises nothing it cannot
+// keep because there is nothing to caveat.
+func packageHint(fresh Freshness, syms []PackageSymbol) string {
+	limit := pkgSymbolsLimitGo
+	if len(syms) > 0 && symbolPrecision(syms[0].File) == precisionSyntactic {
+		limit = pkgSymbolsLimitMapper
+	}
+	var hints []string
+	if fresh.Stale {
+		hints = append(hints, staleGraphHint)
+	}
+	if fresh.Rebuilding {
+		hints = append(hints, rebuildingHint)
+	}
+	return strings.Join(append(hints, limit), "; ")
 }

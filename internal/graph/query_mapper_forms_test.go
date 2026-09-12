@@ -3,6 +3,7 @@ package graph
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -146,5 +147,80 @@ func TestFence_TagsBySourceLanguage(t *testing.T) {
 		if first := firstLine(got); first != tc.want {
 			t.Errorf("fence(_, %q) opened with %q, want %q", tc.file, first, tc.want)
 		}
+	}
+}
+
+// TestPackageHint_IsTierAware guards against a Go-shaped promise on a mapper
+// answer. The package hint tells the agent how to reach what the surface left
+// out; on Go that is "re-query a test symbol by name" (they are indexed), on
+// the mapper tier that re-query returns nothing (test files were never
+// indexed), so the two tiers must not share one wording.
+func TestPackageHint_IsTierAware(t *testing.T) {
+	if strings.Contains(pkgSymbolsLimitGo, "not indexed") {
+		t.Error("Go hint must not claim test symbols are unindexed — they are queryable by name")
+	}
+	if !strings.Contains(pkgSymbolsLimitMapper, "not indexed") {
+		t.Error("mapper hint must say test files are not indexed at all")
+	}
+	if strings.Contains(pkgSymbolsLimitMapper, "_test.go") {
+		t.Error("mapper hint must not name a Go-specific file pattern")
+	}
+}
+
+// TestMapperTestFiles_CountedAndDisclosed is the end-to-end proof for the
+// mapper tier's half of the test policy, across all three of its languages.
+// isMapperTestFile drops these files at walk time, so unlike Go their symbols
+// are absent from the graph entirely and every caller count understates. The
+// whole chain has to carry that: walk stats → meta.tests_skipped → Freshness →
+// rendered answer. Asserted on a SYMBOL query, because the understated number
+// it qualifies (transitive_callers) lives there, not on the package surface.
+func TestMapperTestFiles_CountedAndDisclosed(t *testing.T) {
+	repo := t.TempDir()
+	writeFile(t, filepath.Join(repo, "src"), "api.ts",
+		"export function real(): number { return 1; }\n")
+	// One per mapper language + one directory-segment case, so the count is
+	// only correct if every discovery pattern fired.
+	writeFile(t, filepath.Join(repo, "src"), "api.test.ts",
+		"import { real } from \"./api\";\nexport function tsTest() { return real(); }\n")
+	writeFile(t, filepath.Join(repo, "src"), "api.spec.js",
+		"export function jsSpec() { return 1; }\n")
+	writeFile(t, filepath.Join(repo, "src"), "test_api.py",
+		"def test_api():\n    return 1\n")
+	writeFile(t, filepath.Join(repo, "tests"), "helper.py",
+		"def helper():\n    return 1\n")
+
+	m := NewManager(filepath.Join(t.TempDir(), "graphs"))
+	t.Cleanup(m.Close)
+	resp, err := m.Symbol(context.Background(), SymbolRequest{Repo: repo, Symbol: "real"})
+	if err != nil {
+		t.Fatalf("Symbol: %v", err)
+	}
+	if resp.Freshness.TestsSkipped != 4 {
+		t.Errorf("TestsSkipped = %d, want 4 (.test.ts, .spec.js, test_*.py, tests/ segment)",
+			resp.Freshness.TestsSkipped)
+	}
+	out := RenderSymbol(resp)
+	if !strings.Contains(out, "tests_skipped: 4") {
+		t.Errorf("rendered answer hides the exclusion:\n%s", out)
+	}
+	if !strings.Contains(out, "understate") {
+		t.Errorf("rendered answer must name the consequence, not just the count:\n%s", out)
+	}
+}
+
+// TestGoRepo_NeverReportsTestsSkipped keeps the two policies from bleeding
+// into each other: the Go tier indexes its test declarations, so a pure Go
+// repo must pay nothing for the mapper tier's disclosure.
+func TestGoRepo_NeverReportsTestsSkipped(t *testing.T) {
+	m, repo := testManagerAt(t, "testdata/pkgtest")
+	resp, err := m.Package(context.Background(), PackageRequest{Repo: repo, Package: "pkgtest"})
+	if err != nil {
+		t.Fatalf("Package: %v", err)
+	}
+	if resp.Freshness.TestsSkipped != 0 {
+		t.Errorf("TestsSkipped = %d on a Go repo, want 0", resp.Freshness.TestsSkipped)
+	}
+	if !strings.Contains(resp.Hint, "re-query either by its name") {
+		t.Errorf("Go package must get the Go hint, got: %s", resp.Hint)
 	}
 }
