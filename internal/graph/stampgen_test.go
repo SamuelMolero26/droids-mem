@@ -174,9 +174,32 @@ func TestCanonicalRepo_ModuleRootBeatsGitRoot(t *testing.T) {
 // Pinning the exact set protects the stamp contract: widening it again is a
 // deliberate decision, because it auto-invalidates every cached graph.
 func TestIndexedExtensions_IncludesMapperLanguages(t *testing.T) {
-	want := []string{".go", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".py"}
-	if got := indexedExtensions(); !slices.Equal(got, want) {
+	want := []string{".go", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cts", ".mts", ".py"}
+	got := indexedExtensions()
+	if !slices.Equal(got, want) {
 		t.Errorf("indexedExtensions() = %v, want %v", got, want)
+	}
+	for _, ext := range got {
+		if ext != ".go" && !mapperFileExtensions[ext] {
+			t.Errorf("stamped mapper extension %q missing from mapperFileExtensions", ext)
+		}
+	}
+	for ext := range mapperFileExtensions {
+		if !slices.Contains(got, ext) {
+			t.Errorf("mapper extension %q missing from indexedExtensions", ext)
+		}
+	}
+	wantSpecifiers := []string{".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cts", ".mts"}
+	if !slices.Equal(specifierExtensions, wantSpecifiers) {
+		t.Errorf("specifierExtensions = %v, want %v", specifierExtensions, wantSpecifiers)
+	}
+	for _, ext := range specifierExtensions {
+		if !mapperFileExtensions[ext] {
+			t.Errorf("specifier extension %q missing from mapperFileExtensions", ext)
+		}
+	}
+	if slices.Contains(got, ".json") || mapperFileExtensions[".json"] || slices.Contains(specifierExtensions, ".json") {
+		t.Error("alias configs must be stamp dependencies, not indexed mapper files")
 	}
 }
 

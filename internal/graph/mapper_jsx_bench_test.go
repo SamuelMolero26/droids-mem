@@ -78,7 +78,7 @@ func BenchmarkMapperLadderResolve_JSX(b *testing.B) {
 	fileCalls, _ := collectMapperCalls(files)
 	callsites := attributeMapperCalls(syms, fileCalls)
 	_, bindings, _ := mapperImports(files)
-	idx := buildMapperLadderIndex(syms, resolveBindings(files, bindings))
+	idx := buildMapperLadderIndex(syms, resolveBindings(files, bindings, nil))
 	if len(callsites) == 0 {
 		b.Fatal("no callsites attributed")
 	}
