@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+)
 
 func TestDecideStale(t *testing.T) {
 	tests := []struct {
@@ -67,5 +72,35 @@ func TestDecideStale(t *testing.T) {
 					tc.running, tc.want, got, tc.action, tc.why)
 			}
 		})
+	}
+}
+
+// stopStale's contract is "the address is free when this returns nil", and the
+// caller spawns a replacement on the strength of it. A failed signal does not
+// establish that: the process may still be alive and holding the listener, in
+// which case the replacement cannot bind, the health poll answers from the
+// *stale* daemon, and ensure-server reports a restart that never happened.
+//
+// So the postcondition must be observed, never inferred from the signal.
+func TestStopStale_FailedSignalDoesNotImplyFreeAddress(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	// A PID the OS refuses to signal, while the listener is demonstrably up.
+	err := stopStale(-1, srv.URL+"/healthz", 20*time.Millisecond, 200*time.Millisecond)
+	if err == nil {
+		t.Fatal("stopStale returned nil while the listener was still answering: " +
+			"the caller would now spawn a replacement that cannot bind")
+	}
+}
+
+// The legitimate case the failed-signal branch was written for: the daemon is
+// already gone, so nothing answers and there is nothing to wait for.
+func TestStopStale_AlreadyGoneReturnsPromptly(t *testing.T) {
+	// Nothing listens here, so the first probe settles it.
+	if err := stopStale(-1, "http://127.0.0.1:1/healthz", 20*time.Millisecond, 2*time.Second); err != nil {
+		t.Fatalf("stopStale = %v, want nil when the address is already free", err)
 	}
 }

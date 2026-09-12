@@ -236,11 +236,14 @@ func stopStale(pid int, healthURL string, probe, timeout time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("find stale server (pid=%d): %w", pid, err)
 	}
-	if err := proc.Signal(syscall.SIGTERM); err != nil {
-		// Already gone between the probe and here: the address is free, which
-		// is all this function was asked to achieve.
-		return nil //nolint:nilerr // a vanished process is the desired end state, not a failure
-	}
+	// A failed signal is not reported: the process may simply have exited
+	// between the probe and here, which is the desired end state. But it is
+	// not *assumed* to mean that either — a signal can fail while the process
+	// is alive and still holding the listener, and a replacement spawned on
+	// that assumption cannot bind. Only the wait below settles it, by
+	// observing the address rather than inferring from the signal.
+	_ = proc.Signal(syscall.SIGTERM)
+
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if !ping(healthURL, probe) {
