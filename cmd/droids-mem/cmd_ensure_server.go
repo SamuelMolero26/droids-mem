@@ -56,7 +56,7 @@ auto-generated tok_<ULID> persisted 0600. First-run is zero-config.`,
 				// Anti port-squatting: never report "already_running" (and let
 				// clients send the bearer token) until whatever answers on this
 				// port proves it holds the same token.
-				if err := verifyServer(base, tok, 500*time.Millisecond); err != nil {
+				if _, err := verifyServer(base, tok, 500*time.Millisecond); err != nil {
 					return fmt.Errorf("a process answers /healthz on %s but failed the token identity check — refusing to treat it as droids-mem serve (another process may be squatting the port): %w", effectiveAddr, err)
 				}
 				fmt.Fprintln(os.Stdout, `{"status":"already_running"}`)
@@ -71,7 +71,7 @@ auto-generated tok_<ULID> persisted 0600. First-run is zero-config.`,
 			deadline := time.Now().Add(timeout)
 			for time.Now().Before(deadline) {
 				if ping(healthURL, probe) {
-					if err := verifyServer(base, tok, 500*time.Millisecond); err != nil {
+					if _, err := verifyServer(base, tok, 500*time.Millisecond); err != nil {
 						return fmt.Errorf("spawned server (pid=%d) failed identity check: %w", pid, err)
 					}
 					fmt.Fprintf(os.Stdout, "{\"status\":\"started\",\"pid\":%d}\n", pid)
@@ -112,38 +112,62 @@ func ping(url string, timeout time.Duration) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
+// serverIdentity is what a verified /identity answer established about the
+// listener. Pid is 0 when the server did not prove one: it predates PID
+// binding, so it established the token and nothing about which process it is.
+type serverIdentity struct {
+	Version string
+	Pid     int
+}
+
 // verifyServer challenges the process behind base with a fresh nonce and
 // checks that its /identity proof equals HMAC-SHA256(token, nonce). Only a
 // holder of the same bearer token can answer correctly, so success means the
 // listener really is droids-mem serve (or an equivalent token holder) — not
 // an arbitrary process that grabbed the port to harvest tokens.
-func verifyServer(base, token string, timeout time.Duration) error {
+//
+// A returned Pid is proven, not merely reported: it is bound into a second
+// HMAC, so a process relaying another server's answers cannot substitute a PID
+// of its choosing. Callers that signal must require it; callers that only ask
+// "is a server up" must ignore it, or a healthy older daemon reads as hostile.
+func verifyServer(base, token string, timeout time.Duration) (serverIdentity, error) {
 	nonce := ulid.Make().String()
 	client := &http.Client{Timeout: timeout}
 	resp, err := client.Get(base + "/identity?nonce=" + url.QueryEscape(nonce))
 	if err != nil {
-		return fmt.Errorf("identity probe: %w", err)
+		return serverIdentity{}, fmt.Errorf("identity probe: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("identity probe: HTTP %d", resp.StatusCode)
+		return serverIdentity{}, fmt.Errorf("identity probe: HTTP %d", resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if err != nil {
-		return fmt.Errorf("identity probe: read body: %w", err)
+		return serverIdentity{}, fmt.Errorf("identity probe: read body: %w", err)
 	}
 	var payload struct {
-		Server string `json:"server"`
-		Proof  string `json:"proof"`
+		Server   string `json:"server"`
+		Proof    string `json:"proof"`
+		Version  string `json:"version"`
+		Pid      int    `json:"pid"`
+		PidProof string `json:"pid_proof"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return fmt.Errorf("identity probe: parse body: %w", err)
+		return serverIdentity{}, fmt.Errorf("identity probe: parse body: %w", err)
 	}
 	want := mcpserver.IdentityProof(token, nonce)
 	if !hmac.Equal([]byte(payload.Proof), []byte(want)) {
-		return fmt.Errorf("identity proof mismatch (server=%q)", payload.Server)
+		return serverIdentity{}, fmt.Errorf("identity proof mismatch (server=%q)", payload.Server)
 	}
-	return nil
+	id := serverIdentity{Version: payload.Version}
+	if payload.PidProof != "" {
+		wantPid := mcpserver.IdentityPidProof(token, nonce, payload.Pid)
+		if !hmac.Equal([]byte(payload.PidProof), []byte(wantPid)) {
+			return serverIdentity{}, fmt.Errorf("identity pid proof mismatch (server=%q, pid=%d)", payload.Server, payload.Pid)
+		}
+		id.Pid = payload.Pid
+	}
+	return id, nil
 }
 
 // spawnDetached re-execs the current binary as `droids-mem serve` in a new
