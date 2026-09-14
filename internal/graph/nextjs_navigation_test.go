@@ -153,6 +153,45 @@ export function Shadowed(NavLink: unknown) {
 	}
 }
 
+// A local binding of any form shadows an outer const of the same name: the
+// evaluator must not substitute the outer value for a runtime one.
+func TestNextNavigation_PatternBindingsShadowOuterConst(t *testing.T) {
+	repo := t.TempDir()
+	writeNextPages(t, repo, "/home")
+	writeFile(t, repo, "app/source.tsx", `
+import { redirect } from "next/navigation";
+const href = "/home";
+
+export function Outer() { redirect(href); }
+export function ObjectDestructured(props: { href: string }) { const { href } = props; redirect(href); }
+export function ArrayDestructured(pair: string[]) { const [href] = pair; redirect(href); }
+export function ForOf(list: string[]) { for (const href of list) { redirect(href); } }
+export function ForIn(obj: object) { for (const href in obj) { redirect(href); } }
+export function ArrowParam() { return (href => redirect(href)); }
+export function CatchParam() { try {} catch (href) { redirect(href); } }
+`)
+
+	m := managerFor(t)
+	if _, err := m.Index(context.Background(), repo); err != nil {
+		t.Fatalf("index: %v", err)
+	}
+
+	if outer := symbolResponse(t, m, repo, "Outer"); len(outer.Destinations) != 1 || outer.Destinations[0].Route != "/home" {
+		t.Fatalf("control: Outer destinations = %+v, want one /home", outer.Destinations)
+	}
+	for _, name := range []string{"ObjectDestructured", "ArrayDestructured", "ForOf", "ForIn", "ArrowParam", "CatchParam"} {
+		t.Run(name, func(t *testing.T) {
+			resp := symbolResponse(t, m, repo, name)
+			if len(resp.Destinations) != 0 {
+				t.Errorf("shadowed href resolved to outer const: %+v", resp.Destinations)
+			}
+			if len(resp.UnresolvedDestinations) != 1 || resp.UnresolvedDestinations[0].Reason != "non_literal" {
+				t.Errorf("unresolved = %+v, want one non_literal", resp.UnresolvedDestinations)
+			}
+		})
+	}
+}
+
 func TestNextNavigation_BoundedDestinationEvaluation(t *testing.T) {
 	repo := t.TempDir()
 	writeNextPages(t, repo, "/about", "/blog/[slug]", "/products/[id]", "/search")

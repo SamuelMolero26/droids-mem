@@ -494,14 +494,13 @@ func (e *nextExpressionEvaluator) destination(
 		return e.template(node)
 	case "identifier":
 		name := node.Text(e.src)
+		// Anything but an evaluable earlier const is a runtime value: symbolic
+		// inside a template, non_literal as a whole destination.
 		binding, ok := e.localBinding(node, name)
-		if !ok {
+		if !ok || binding.kind != "const" || binding.value == nil || binding.start >= node.StartByte() {
 			if allowSymbol {
 				return []nextString{{text: "${" + name + "}", symbolic: true}}, ""
 			}
-			return nil, "non_literal"
-		}
-		if binding.kind != "const" || binding.value == nil || binding.start >= node.StartByte() {
 			return nil, "non_literal"
 		}
 		if e.stack[binding.start] {
@@ -751,17 +750,17 @@ func (e *nextExpressionEvaluator) bindingInScope(scope *gts.Node, name string) (
 		}
 		typeName := node.Type(e.lang)
 		if typeName == "variable_declarator" {
+			// A destructuring pattern binds too; only a plain identifier
+			// takes the initializer as its value, so a pattern stays mutable.
 			bindingName := node.ChildByFieldName("name", e.lang)
-			if bindingName != nil && bindingName.Type(e.lang) == "identifier" && bindingName.Text(e.src) == name {
-				kind := "mutable"
-				if parent := node.Parent(); parent != nil && parent.Type(e.lang) == "lexical_declaration" &&
-					strings.HasPrefix(strings.TrimSpace(parent.Text(e.src)), "const ") {
-					kind = "const"
-				}
-				found = nextLocalBinding{
-					kind:  kind,
-					value: node.ChildByFieldName("value", e.lang),
-					start: node.StartByte(),
+			if nextPatternBinds(bindingName, name, e.lang, e.src) {
+				found = nextLocalBinding{kind: "mutable", start: node.StartByte()}
+				if bindingName.Type(e.lang) == "identifier" {
+					if parent := node.Parent(); parent != nil && parent.Type(e.lang) == "lexical_declaration" &&
+						strings.HasPrefix(strings.TrimSpace(parent.Text(e.src)), "const ") {
+						found.kind = "const"
+						found.value = node.ChildByFieldName("value", e.lang)
+					}
 				}
 				return
 			}
@@ -773,10 +772,14 @@ func (e *nextExpressionEvaluator) bindingInScope(scope *gts.Node, name string) (
 				return
 			}
 		}
-		if nextFunctionScope(typeName) && node == scope {
-			if params := node.ChildByFieldName("parameters", e.lang); nextPatternBinds(params, name, e.lang, e.src) {
-				found = nextLocalBinding{kind: "mutable", start: params.StartByte()}
-				return
+		// Scope-introduced bindings: function "parameters", a single-param
+		// arrow or catch clause "parameter", and a for-in/of "left".
+		if node == scope {
+			for _, field := range []string{"parameters", "parameter", "left"} {
+				if p := node.ChildByFieldName(field, e.lang); nextPatternBinds(p, name, e.lang, e.src) {
+					found = nextLocalBinding{kind: "mutable", start: p.StartByte()}
+					return
+				}
 			}
 		}
 		if node != scope && nextLexicalScope(typeName) {
@@ -811,7 +814,7 @@ func nextPatternBinds(node *gts.Node, name string, lang *gts.Language, src []byt
 	if node.Type(lang) == "type_annotation" {
 		return false
 	}
-	if node.Type(lang) == "identifier" && node.Text(src) == name {
+	if t := node.Type(lang); (t == "identifier" || t == "shorthand_property_identifier_pattern") && node.Text(src) == name {
 		return true
 	}
 	for i := range node.NamedChildCount() {
