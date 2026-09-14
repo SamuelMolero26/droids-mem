@@ -113,11 +113,6 @@ type Config struct {
 	Token    string // required bearer token; Run errors if empty
 	Logger   *log.Logger
 	Graphs   *graph.Manager // optional code-graph subsystem (ADR-0020); nil skips graph tools
-	// Version is the release version of the binary running this server, as
-	// injected at build time. Advertised on /identity so a caller holding a
-	// newer binary can tell a daemon still running older code from a current
-	// one. Empty means "unknown", which a caller must read as stale.
-	Version string
 }
 
 // Run starts the MCP bridge and blocks until ctx is canceled or the server
@@ -152,7 +147,7 @@ func Run(ctx context.Context, cfg Config, st *store.Store) error {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
-	mux.HandleFunc("/identity", identityHandler(cfg.Token, cfg.Version))
+	mux.HandleFunc("/identity", identityHandler(cfg.Token))
 
 	wrapped := bearerAuth(cfg.Token, cfg.Endpoint, limitBody(mux))
 
@@ -255,7 +250,7 @@ func shareRepo() string {
 }
 
 // identityHandler answers a challenge–response proof of token knowledge:
-// GET /identity?nonce=<client nonce> → {"server", "proof", "version", "pid", "pid_proof"}.
+// GET /identity?nonce=<client nonce> → {"server", "proof", "pid", "pid_proof"}.
 // Unauthenticated by design — the proofs reveal nothing about the token, and
 // they let ensure-server verify that whatever answers on this port actually
 // holds the shared token before reporting "already_running" (anti
@@ -264,7 +259,7 @@ func shareRepo() string {
 // "proof" answers "does this listener hold the token"; "pid_proof" additionally
 // answers "which process is it", which a caller about to send a signal needs
 // and the token alone cannot establish.
-func identityHandler(token, version string) http.HandlerFunc {
+func identityHandler(token string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		nonce := r.URL.Query().Get("nonce")
 		if nonce == "" || len(nonce) > maxIdentityNonceLen {
@@ -273,8 +268,8 @@ func identityHandler(token, version string) http.HandlerFunc {
 		}
 		pid := os.Getpid()
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"server":%q,"proof":%q,"version":%q,"pid":%d,"pid_proof":%q}`,
-			ServerName, IdentityProof(token, nonce), version, pid,
+		fmt.Fprintf(w, `{"server":%q,"proof":%q,"pid":%d,"pid_proof":%q}`,
+			ServerName, IdentityProof(token, nonce), pid,
 			IdentityPidProof(token, nonce, pid))
 	}
 }
@@ -288,14 +283,13 @@ func IdentityProof(token, nonce string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// IdentityPidProof binds the answering process's PID into the proof, so a
-// caller can verify the listener IS the process it is about to signal — not
-// merely that some token holder is listening on the address. Deliberately a
-// second value rather than a change to IdentityProof: ensure-server's existing
-// check must keep answering the same way against a server built before this,
-// or a healthy older daemon would be misreported as a port squatter.
+// IdentityPidProof binds the PID into a proof under a token-derived key.
+// Separate from IdentityProof so older daemons still pass ensure-server;
+// derived key so a plain proof of nonce "N:pid" can't double as this one.
 func IdentityPidProof(token, nonce string, pid int) string {
-	mac := hmac.New(sha256.New, []byte(token))
+	kmac := hmac.New(sha256.New, []byte(token))
+	kmac.Write([]byte("droids-mem/pid_proof"))
+	mac := hmac.New(sha256.New, kmac.Sum(nil))
 	mac.Write([]byte(nonce + ":" + strconv.Itoa(pid)))
 	return hex.EncodeToString(mac.Sum(nil))
 }
