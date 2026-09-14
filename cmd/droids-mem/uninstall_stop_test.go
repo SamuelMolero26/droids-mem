@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/samuelmolero26/droids-mem/internal/mcpserver"
@@ -57,35 +58,116 @@ func TestStopServerStatus_RefusesUnverifiedPid(t *testing.T) {
 	}
 }
 
-func TestStopServerStatus_StopsVerifiedServer(t *testing.T) {
+// Pid 0 is kill(0) — the whole process group — and also verifyServer's
+// "no PID proven", so it would match a server that predates PID binding.
+func TestStopServerStatus_RejectsNonPositivePid(t *testing.T) {
 	pidPath := stopServerEnv(t)
-
-	// A listener that answers the identity challenge, so the stop is allowed.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		nonce := r.URL.Query().Get("nonce")
-		fmt.Fprintf(w, `{"server":%q,"proof":%q}`, mcpserver.ServerName, mcpserver.IdentityProof("tok_test", nonce))
-	}))
-	t.Cleanup(srv.Close)
-	t.Setenv("DROIDS_MEM_MCP_ADDR", strings.TrimPrefix(srv.URL, "http://"))
-
-	// A real, signallable stand-in for the daemon.
-	victim := exec.Command("sleep", "60")
-	if err := victim.Start(); err != nil {
-		t.Fatalf("start victim: %v", err)
-	}
-	t.Cleanup(func() { _ = victim.Process.Kill() })
-
-	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(victim.Process.Pid)), 0o600); err != nil {
+	t.Setenv("DROIDS_MEM_MCP_ADDR", identityServer(t, 0, ""))
+	if err := os.WriteFile(pidPath, []byte("0"), 0o600); err != nil {
 		t.Fatalf("write pidfile: %v", err)
 	}
+	if got := stopServerStatus(); !strings.Contains(got, "bad pidfile") {
+		t.Fatalf("stopServerStatus() = %q, want bad pidfile", got)
+	}
+}
 
-	if got := stopServerStatus(); got != "stopped" {
-		t.Fatalf("stopServerStatus() = %q, want stopped", got)
+// identityServer stands in for a live daemon on a throwaway address.
+// proofToken is the token its pid_proof is computed with; "" omits the field
+// entirely, modelling a server built before PID binding.
+func identityServer(t *testing.T, pid int, proofToken string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nonce := r.URL.Query().Get("nonce")
+		proof := mcpserver.IdentityProof("tok_test", nonce)
+		if proofToken == "" {
+			fmt.Fprintf(w, `{"server":%q,"proof":%q}`, mcpserver.ServerName, proof)
+			return
+		}
+		fmt.Fprintf(w, `{"server":%q,"proof":%q,"pid":%d,"pid_proof":%q}`,
+			mcpserver.ServerName, proof, pid, mcpserver.IdentityPidProof(proofToken, nonce, pid))
+	}))
+	t.Cleanup(srv.Close)
+	return strings.TrimPrefix(srv.URL, "http://")
+}
+
+// Every case here has a live token-holding listener and a pidfile, and differs
+// only in what the listener can prove about which process it is. Holding the
+// token is not enough: the pidfile is written solely by ensure-server's spawn,
+// so a server started any other way can answer the challenge while the recorded
+// PID has been recycled to something unrelated.
+//
+// The liveness assertion is the load-bearing one — a regression that signals
+// blindly kills the stand-in process rather than merely returning a wrong
+// string.
+func TestStopServerStatus_SignalsOnlyAProvenPid(t *testing.T) {
+	tests := []struct {
+		name       string
+		pidOffset  int    // added to the stand-in's real PID to form the proven one
+		proofToken string // token behind pid_proof; "" omits the field
+		wantStatus string
+		wantKilled bool
+	}{
+		{
+			name:       "proven pid is stopped",
+			proofToken: "tok_test",
+			wantStatus: "stopped",
+			wantKilled: true,
+		},
+		{
+			name:       "listener proves a different pid",
+			pidOffset:  100000,
+			proofToken: "tok_test",
+			wantStatus: "proved pid",
+		},
+		{
+			name:       "listener predates pid binding and proves none",
+			proofToken: "",
+			wantStatus: "proved pid 0 (0 = none)",
+		},
+		{
+			// A relaying squatter can forward the nonce for a genuine token
+			// proof, then claim any PID. Binding the PID into its own HMAC is
+			// what makes that claim unforgeable.
+			name:       "pid proof is forged with another token",
+			proofToken: "wrong-token",
+			wantStatus: "not_verified",
+		},
 	}
-	if err := victim.Wait(); err == nil {
-		t.Error("victim exited cleanly, want termination by signal")
-	}
-	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
-		t.Error("pidfile should be cleared after a successful stop")
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pidPath := stopServerEnv(t)
+			victim := exec.Command("sleep", "60")
+			if err := victim.Start(); err != nil {
+				t.Fatalf("start stand-in: %v", err)
+			}
+			t.Cleanup(func() { _ = victim.Process.Kill() })
+
+			t.Setenv("DROIDS_MEM_MCP_ADDR", identityServer(t, victim.Process.Pid+tc.pidOffset, tc.proofToken))
+			if err := os.WriteFile(pidPath, []byte(strconv.Itoa(victim.Process.Pid)), 0o600); err != nil {
+				t.Fatalf("write pidfile: %v", err)
+			}
+
+			got := stopServerStatus()
+			if !strings.Contains(got, tc.wantStatus) {
+				t.Fatalf("stopServerStatus() = %q, want it to contain %q", got, tc.wantStatus)
+			}
+
+			// Wait, not a signal-0 probe: a terminated child lingers as a
+			// zombie until it is reaped, and a probe reads that as alive.
+			if tc.wantKilled {
+				if err := victim.Wait(); err == nil {
+					t.Error("stand-in exited cleanly, want termination by signal")
+				}
+			} else if err := victim.Process.Signal(syscall.Signal(0)); err != nil {
+				t.Errorf("stand-in should be untouched, but is gone: %v", err)
+			}
+			// The pidfile is cleared only by a real stop. On a refusal it must
+			// survive: it is the only evidence of the inconsistency.
+			_, statErr := os.Stat(pidPath)
+			if gone := os.IsNotExist(statErr); gone != tc.wantKilled {
+				t.Errorf("pidfile gone = %v, want %v", gone, tc.wantKilled)
+			}
+		})
 	}
 }

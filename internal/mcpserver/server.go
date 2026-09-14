@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -249,11 +250,15 @@ func shareRepo() string {
 }
 
 // identityHandler answers a challenge–response proof of token knowledge:
-// GET /identity?nonce=<client nonce> → {"server":..., "proof": hex(HMAC-SHA256(token, nonce))}.
-// Unauthenticated by design — the proof reveals nothing about the token, and it
-// lets ensure-server verify that whatever answers on this port actually holds
-// the shared token before reporting "already_running" (anti port-squatting).
-// A fresh client nonce per check makes replay of old proofs useless.
+// GET /identity?nonce=<client nonce> → {"server", "proof", "pid", "pid_proof"}.
+// Unauthenticated by design — the proofs reveal nothing about the token, and
+// they let ensure-server verify that whatever answers on this port actually
+// holds the shared token before reporting "already_running" (anti
+// port-squatting). A fresh client nonce per check makes replay useless.
+//
+// "proof" answers "does this listener hold the token"; "pid_proof" additionally
+// answers "which process is it", which a caller about to send a signal needs
+// and the token alone cannot establish.
 func identityHandler(token string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		nonce := r.URL.Query().Get("nonce")
@@ -261,8 +266,11 @@ func identityHandler(token string) http.HandlerFunc {
 			http.Error(w, `{"error":"nonce required"}`, http.StatusBadRequest)
 			return
 		}
+		pid := os.Getpid()
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"server":%q,"proof":%q}`, ServerName, IdentityProof(token, nonce))
+		fmt.Fprintf(w, `{"server":%q,"proof":%q,"pid":%d,"pid_proof":%q}`,
+			ServerName, IdentityProof(token, nonce), pid,
+			IdentityPidProof(token, nonce, pid))
 	}
 }
 
@@ -272,6 +280,17 @@ func identityHandler(token string) http.HandlerFunc {
 func IdentityProof(token, nonce string) string {
 	mac := hmac.New(sha256.New, []byte(token))
 	mac.Write([]byte(nonce))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// IdentityPidProof binds the PID into a proof under a token-derived key.
+// Separate from IdentityProof so older daemons still pass ensure-server;
+// derived key so a plain proof of nonce "N:pid" can't double as this one.
+func IdentityPidProof(token, nonce string, pid int) string {
+	kmac := hmac.New(sha256.New, []byte(token))
+	kmac.Write([]byte("droids-mem/pid_proof"))
+	mac := hmac.New(sha256.New, kmac.Sum(nil))
+	mac.Write([]byte(nonce + ":" + strconv.Itoa(pid)))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
