@@ -265,12 +265,12 @@ func stopServerStatus() string {
 	addr := envOr("DROIDS_MEM_MCP_ADDR", mcpserver.DefaultAddr)
 	// Keep the pidfile on every refusal below: erasing it hides the
 	// inconsistency that is the only evidence something went wrong.
-	provenPid, err := verifyServer(baseURL(addr), tok, 500*time.Millisecond)
+	id, err := verifyServer(baseURL(addr), tok, 500*time.Millisecond)
 	if err != nil {
 		return fmt.Sprintf("not_verified: nothing on %s answered the identity challenge; pid %d left alone (%v)", addr, pid, err)
 	}
-	if provenPid != pid {
-		return fmt.Sprintf("not_verified: the server on %s proved pid %d (0 = none), pidfile names %d; left alone", addr, provenPid, pid)
+	if id.Pid != pid {
+		return fmt.Sprintf("not_verified: the server on %s proved pid %d (0 = none), pidfile names %d; left alone", addr, id.Pid, pid)
 	}
 	proc, err := os.FindProcess(pid)
 	if err != nil {
