@@ -242,6 +242,13 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	for i, s := range symbols {
 		s.id = int64(i + 1)
 	}
+	navigationGraph := buildNextNavigationGraph(
+		repo,
+		mapperFileList,
+		nextFreshMapperSymbols(mapperScan.syms, mapperScan.hasError),
+		mapperScan.navigationSites,
+		mapperScan.defaultExportNames,
+	)
 
 	// byQName is built from ALL symbols (Go + mapper) unconditionally, not
 	// just when broken packages exist — mapper qnames can collide with each
@@ -343,7 +350,22 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 		slices.Sort(carriedUnits)
 	}
 
-	return writeGraphDB(ctx, dbPath, repo, module, stampVal, symbols, edges, impls, carriedUnits, emptyReason, fanoutCapped, mapperImportRows, mapperDirectives)
+	return writeGraphDBWithNavigation(
+		ctx,
+		dbPath,
+		repo,
+		module,
+		stampVal,
+		symbols,
+		edges,
+		impls,
+		carriedUnits,
+		emptyReason,
+		fanoutCapped,
+		mapperImportRows,
+		mapperDirectives,
+		navigationGraph,
+	)
 }
 
 // goSymbols extracts symbol rows from the type-checked Go packages,
@@ -765,6 +787,25 @@ func implementsEdges(pkgs []*packages.Package, byPos map[string]*symRow) map[[2]
 // DDL default, unlike edges/implements). fileDirectives maps repo-relative
 // file → "client" | "server" (P3); persisted to file_directives table.
 func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string, emptyReason string, fanoutCapped int, imports []importRow, fileDirectives map[string]string) error {
+	return writeGraphDBWithNavigation(
+		ctx,
+		dbPath,
+		repo,
+		module,
+		stampVal,
+		symbols,
+		edges,
+		impls,
+		carriedUnits,
+		emptyReason,
+		fanoutCapped,
+		imports,
+		fileDirectives,
+		nextNavigationGraph{},
+	)
+}
+
+func writeGraphDBWithNavigation(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string, emptyReason string, fanoutCapped int, imports []importRow, fileDirectives map[string]string, navigation nextNavigationGraph) error {
 	if err := ctx.Err(); err != nil {
 		return err // cancelled before work started
 	}
@@ -848,6 +889,9 @@ func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, sy
 			if _, err := dirIns.ExecContext(ctx, f, d); err != nil {
 				return fmt.Errorf("insert file_directive %s -> %s: %w", f, d, err)
 			}
+		}
+		if err := writeNextNavigation(ctx, tx, navigation); err != nil {
+			return fmt.Errorf("insert Next.js navigation: %w", err)
 		}
 		// FTS mirror for the search fallback; rowid == symbols.id for the join back.
 		if _, err := tx.ExecContext(ctx, `INSERT INTO symbols_fts(rowid, qname, name, doc, signature)

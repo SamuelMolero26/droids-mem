@@ -12,10 +12,11 @@ import (
 )
 
 const (
-	maxDepth      = 5
-	maxPathDepth  = 10
-	maxMatches    = 20
-	maxPkgSymbols = 200
+	maxDepth             = 5
+	maxPathDepth         = 10
+	maxMatches           = 20
+	maxPkgSymbols        = 200
+	maxNavigationResults = 32
 	// Hints are surface-neutral (ADR-0027): they name the action + the qname to
 	// re-query with, never a specific invocation ("graph_symbol" vs
 	// "droids-mem graph symbol"). The agent already holds the surface it just
@@ -118,6 +119,34 @@ type Neighbor struct {
 	Depth     int    `json:"depth"`
 }
 
+// NavigationDestination is a proven Next.js navigation outcome projected for
+// the exact source symbol. Precision remains response-level and syntactic;
+// evidence and certainty describe independent properties of this site.
+type NavigationDestination struct {
+	Operation      string `json:"operation"`
+	Evidence       string `json:"evidence"`
+	Certainty      string `json:"certainty"`
+	RawDestination string `json:"raw_destination"`
+	Destination    string `json:"destination"`
+	Route          string `json:"route"`
+	TargetFile     string `json:"target_file"`
+	TargetQName    string `json:"target_qname,omitempty"`
+	File           string `json:"file"`
+	Line           int    `json:"line"`
+}
+
+// UnresolvedNavigationDestination keeps a proven navigation site visible when
+// its destination cannot be matched safely.
+type UnresolvedNavigationDestination struct {
+	Operation      string `json:"operation"`
+	Evidence       string `json:"evidence"`
+	RawDestination string `json:"raw_destination"`
+	Destination    string `json:"destination,omitempty"`
+	Reason         string `json:"reason"`
+	File           string `json:"file"`
+	Line           int    `json:"line"`
+}
+
 // SymbolResponse answers a symbol-anchored query.
 type SymbolResponse struct {
 	Repo      string      `json:"repo"`
@@ -172,8 +201,10 @@ type SymbolResponse struct {
 	// Satisfies lists the repo-defined interfaces a concrete type implements.
 	// Absent means it satisfies none (no *_total: a concrete type satisfies few
 	// interfaces, never near the neighbor cap, so the list is its own count).
-	Satisfies []Neighbor `json:"satisfies,omitempty"`
-	Hint      string     `json:"hint,omitempty"`
+	Satisfies              []Neighbor                        `json:"satisfies,omitempty"`
+	Destinations           []NavigationDestination           `json:"destinations,omitempty"`
+	UnresolvedDestinations []UnresolvedNavigationDestination `json:"unresolved_destinations,omitempty"`
+	Hint                   string                            `json:"hint,omitempty"`
 }
 
 // addHint appends extra to the "; "-joined hint chain h, empty-safe.
@@ -287,6 +318,15 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	resp.Symbol = &info
 	resp.Carried = slices.Contains(fresh.carriedUnits, info.Package)
 	resp.Precision = symbolPrecision(info.File)
+	var navTruncated bool
+	resp.Destinations, resp.UnresolvedDestinations, navTruncated, err = navigationRows(ctx, conn, id)
+	if err != nil {
+		return nil, err
+	}
+	if navTruncated {
+		resp.Truncated = true
+		resp.Hint = addHint(resp.Hint, "navigation results are a partial slice at the cap")
+	}
 
 	var blastHint string // see blastTypeHint/blastRefHint above for the why
 	switch info.Kind {

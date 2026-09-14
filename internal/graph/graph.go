@@ -86,6 +86,31 @@ CREATE TABLE file_directives (
   file      TEXT PRIMARY KEY,
   directive TEXT NOT NULL
 ) WITHOUT ROWID;
+-- Next.js App Router endpoints are stable route identities, separate from
+-- symbols because an anonymous page may have no symbol row at all.
+CREATE TABLE routes (
+  id           INTEGER PRIMARY KEY,
+  pattern      TEXT NOT NULL,
+  kind         TEXT NOT NULL,
+  file         TEXT NOT NULL,
+  target_qname TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX idx_routes_pattern ON routes(pattern);
+-- Navigation is parallel to call edges. A nullable route_id records explicit
+-- unresolved evidence without inventing a symbol-to-symbol call relationship.
+CREATE TABLE navigations (
+  source_symbol  INTEGER NOT NULL,
+  ordinal        INTEGER NOT NULL,
+  operation      TEXT NOT NULL,
+  evidence       TEXT NOT NULL,
+  raw_destination TEXT NOT NULL,
+  destination    TEXT NOT NULL,
+  certainty      TEXT NOT NULL,
+  route_id       INTEGER,
+  reason         TEXT NOT NULL DEFAULT '',
+  line           INTEGER NOT NULL,
+  PRIMARY KEY (source_symbol, ordinal)
+) WITHOUT ROWID;
 -- Ranks symbols by relevance to a free-text task phrase (the graph_symbol
 -- search fallback). rowid == symbols.id, so a MATCH joins straight back.
 -- Populated wholesale in writeGraphDB — the graph never updates in place, so

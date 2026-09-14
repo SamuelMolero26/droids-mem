@@ -29,10 +29,12 @@ import (
 // one traversal. Field-for-field it is what mapperSymbols, collectMapperCalls,
 // mapperImports and the carry ERROR probe returned separately.
 type mapperScanResult struct {
-	syms       []mapperSym
-	fileCalls  []mapperFileCalls
-	importRows []importRow
-	bindings   mapperImportBindings
+	syms               []mapperSym
+	fileCalls          []mapperFileCalls
+	importRows         []importRow
+	bindings           mapperImportBindings
+	navigationSites    []nextNavigationSite
+	defaultExportNames map[string]string
 	// hasError is keyed by rel path and holds only the true entries — a file
 	// absent from the map produced a trustworthy parse. Read/parser failures
 	// and tree-sitter ERROR nodes all make fresh definitions unsafe to publish.
@@ -61,9 +63,10 @@ type mapperScanResult struct {
 // the old way for the tests that assert on them.
 func scanMapperFiles(files []mapperFile) mapperScanResult {
 	res := mapperScanResult{
-		bindings:       mapperImportBindings{},
-		hasError:       map[string]bool{},
-		fileDirectives: map[string]string{},
+		bindings:           mapperImportBindings{},
+		hasError:           map[string]bool{},
+		fileDirectives:     map[string]string{},
+		defaultExportNames: map[string]string{},
 	}
 	engines := mapperEngines{}
 
@@ -174,10 +177,6 @@ func scanMapperFile(eng *mapperEngine, f mapperFile, src []byte, res *mapperScan
 
 	res.syms = append(res.syms, outlineMapperTree(eng, f, src, tree, &res.stats)...)
 
-	if refs := callsFromMapperTree(eng, f, src, tree, &res.stats); len(refs) > 0 {
-		res.fileCalls = append(res.fileCalls, mapperFileCalls{file: f.rel, lang: f.entry.Name, refs: refs})
-	}
-
 	// Imports cover Python and the JS family only; every other mapper language
 	// has no import pass at all (mapper_imports.go's package doc).
 	if f.entry != nil {
@@ -189,8 +188,32 @@ func scanMapperFile(eng *mapperEngine, f mapperFile, src []byte, res *mapperScan
 
 	// Carry's trigger input, read off the tree already in hand rather than by
 	// the third re-parse mapperFileHasError used to do.
+	rootHasError := false
 	if root := tree.RootNode(); root != nil && root.HasError() {
+		rootHasError = true
 		res.hasError[f.rel] = true
+	}
+
+	var consumed []nextConsumedRef
+	if f.entry != nil && jsFamilyLanguages[f.entry.Name] && !rootHasError {
+		sites, spans, defaultName := nextNavigationFromMapperTree(
+			f,
+			src,
+			tree,
+			eng.lang,
+			res.bindings[f.rel],
+		)
+		res.navigationSites = append(res.navigationSites, sites...)
+		consumed = spans
+		if defaultName != "" {
+			res.defaultExportNames[f.rel] = defaultName
+		}
+	}
+
+	refs := callsFromMapperTree(eng, f, src, tree, &res.stats)
+	refs = filterNextConsumedCalls(refs, consumed)
+	if len(refs) > 0 {
+		res.fileCalls = append(res.fileCalls, mapperFileCalls{file: f.rel, lang: f.entry.Name, refs: refs})
 	}
 	return true
 }

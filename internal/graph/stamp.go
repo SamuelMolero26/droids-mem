@@ -43,7 +43,7 @@ func indexedExtensions() []string {
 // changes stored edge attribution, so it advances the generation once more.
 // Generation 8 carries file directives with last-good mapper symbols instead
 // of writing metadata from an untrustworthy current parse.
-const indexerGen = "8"
+const indexerGen = "9"
 
 // stampGen derives the stamp's generation prefix from the things that change
 // what a cached graph MEANS: the schema its rows were written under, the file
@@ -111,25 +111,25 @@ func skipDir(name string) bool {
 // would mean editing a test file never moves the stamp, so a new test caller
 // is silently never picked up.
 //
-// Known blind spot (accepted): the count+size+maxMtime triple cannot see a
-// content swap between two files that preserves the aggregate — file A takes
-// B's bytes and B takes A's, keeping total count, total size, and the latest
-// mtime unchanged. Since a normal edit bumps mtime to "now", this only fires
-// when mtimes are also preserved (touch -r, tar/rsync --times) alongside a
-// size-preserving swap: astronomically rare. Closing it would require reading
-// content bytes from every indexed file on every query (stamp runs per graph
-// call, not just on rebuild), so we accept the gap rather than pay that
-// hot-path IO.
+// The aggregate remains readable in the stamp, but invalidation uses a second
+// deterministic digest over each input's repo-relative path, size, and mtime.
+// This detects path renames and add/delete swaps without reading source bytes
+// on the query hot path.
 func stamp(repo string) (string, error) {
 	exts := indexedExtensions()
-	var count int
-	var size, maxMtime int64
-	add := func(info fs.FileInfo) {
-		count++
-		size += info.Size()
-		if mt := info.ModTime().UnixNano(); mt > maxMtime {
-			maxMtime = mt
+	type input struct {
+		path  string
+		size  int64
+		mtime int64
+	}
+	inputs := map[string]input{}
+	add := func(name string, info fs.FileInfo) {
+		rel, err := filepath.Rel(repo, name)
+		if err != nil {
+			rel = name
 		}
+		rel = filepath.ToSlash(rel)
+		inputs[rel] = input{path: rel, size: info.Size(), mtime: info.ModTime().UnixNano()}
 	}
 	err := filepath.WalkDir(repo, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -149,7 +149,7 @@ func stamp(repo string) (string, error) {
 		if err != nil {
 			return nil //nolint:nilerr // racing deletes don't invalidate the walk
 		}
-		add(info)
+		add(p, info)
 		return nil
 	})
 	if err != nil {
@@ -164,9 +164,22 @@ func stamp(repo string) (string, error) {
 		if err != nil {
 			continue
 		}
-		add(info)
+		add(p, info)
 	}
-	return fmt.Sprintf("%s:%d:%d:%d", currentGen, count, size, maxMtime), nil
+	ordered := make([]input, 0, len(inputs))
+	for _, item := range inputs {
+		ordered = append(ordered, item)
+	}
+	slices.SortFunc(ordered, func(a, b input) int { return strings.Compare(a.path, b.path) })
+	h := sha256.New()
+	var size, maxMtime int64
+	for _, item := range ordered {
+		size += item.size
+		maxMtime = max(maxMtime, item.mtime)
+		fmt.Fprintf(h, "%s\x00%d\x00%d\x00", item.path, item.size, item.mtime)
+	}
+	digest := hex.EncodeToString(h.Sum(nil)[:8])
+	return fmt.Sprintf("%s:%d:%d:%d:%s", currentGen, len(ordered), size, maxMtime, digest), nil
 }
 
 // isModuleFile reports whether name is a Go module manifest whose changes can
