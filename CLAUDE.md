@@ -45,7 +45,7 @@ State dir layout: `mem.db` (0600), `token` (0600), `mcp.pid`, `mcp.log`,
 agent's code-graph use visible instead of silent. Both the MCP handlers and the
 `graph` CLI leaves stamp it. Cosmetic only: write failures are swallowed.
 
-`/identity?nonce=<n>` answers `{server, proof, pid, pid_proof}`. `proof` is
+`/identity?nonce=<n>` answers `{server, proof, version, pid, pid_proof}`. `proof` is
 `HMAC-SHA256(token, nonce)` — ensure-server uses it to verify a listener holds
 the token before reporting `already_running` (anti port-squatting).
 
@@ -53,6 +53,19 @@ the token before reporting `already_running` (anti port-squatting).
 "droids-mem/pid_proof")` — separate so older daemons still pass ensure-server,
 derived key so a plain `proof` of nonce `N:pid` can't forge it. `uninstall
 --all` SIGTERMs only when it matches the pidfile.
+
+`ensure-server` uses that to **replace a stale daemon**: nothing else does, so
+without it a daemon serves superseded code until reboot (`upgrade` replaces the
+executable and returns). Any version difference counts, either direction — the
+daemon should be the build the caller actually has. It signals the *proven* PID
+from `/identity`, never the pidfile, then spawns a replacement without waiting
+for the drain: `http.Server.Shutdown` closes listeners before waiting on
+in-flight connections, so the address frees in ms even when a live MCP stream
+holds the drain open for the full `ShutdownGrace`. Reports
+`{"status":"restarted","pid":…,"replaced":…}`. A live stream on the outgoing
+daemon is closed when the grace expires; clients reconnect to the replacement,
+which is already listening. A daemon proving no PID is reported
+(`{"status":"already_running","stale":true}`), never signalled.
 
 ## Architecture
 
