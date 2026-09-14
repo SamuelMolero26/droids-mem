@@ -66,10 +66,11 @@ func managerFor(t *testing.T) *Manager {
 
 func writeFile(t *testing.T, repo, name, body string) {
 	t.Helper()
-	if err := os.MkdirAll(repo, 0o750); err != nil {
+	target := filepath.Join(repo, name)
+	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(repo, name), []byte(body), 0o600); err != nil {
+	if err := os.WriteFile(target, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -126,6 +127,49 @@ func waitForBuild(t *testing.T, m *Manager, repo string, d time.Duration) {
 // warm-serve path hands the caller a cached *sql.DB and then buildAsync's
 // closeConn used to Close that very handle when the build landed, so a query
 // still assembling its response failed with "sql: database is closed".
+// A graph written under another generation (older schema or indexer semantics)
+// cannot be read by this binary's queries, so it must be rebuilt before it is
+// served — never warm-served stale the way a merely outdated source graph is.
+func TestEnsureFresh_OtherGenerationRebuildsInsteadOfServingStale(t *testing.T) {
+	repo := copyFixture(t)
+	m := managerFor(t)
+	ctx := context.Background()
+
+	if _, err := m.Index(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	canon, err := canonicalRepo(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a graph left on disk by a previous binary: a different
+	// generation prefix, and a table the current schema added missing.
+	old, err := sql.Open("sqlite", m.dbPath(canon))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(`DROP TABLE file_directives;
+		UPDATE meta SET value = 'v00000000' || substr(value, instr(value, ':')) WHERE key = 'stamp'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	conn, release, fresh, err := m.ensureFresh(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if fresh.Stale || fresh.Rebuilding {
+		t.Fatalf("other-generation graph was warm-served: %+v", fresh)
+	}
+	var n int
+	if err := conn.QueryRow(`SELECT COUNT(*) FROM file_directives`).Scan(&n); err != nil {
+		t.Fatalf("served graph lacks the current schema: %v", err)
+	}
+}
+
 func TestEnsureFresh_HandleSurvivesRebuild(t *testing.T) {
 	repo := copyFixture(t)
 	m := managerFor(t)

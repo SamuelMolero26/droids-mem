@@ -85,6 +85,39 @@ func TestRenderSymbol_CallerSplitsAndCarried(t *testing.T) {
 	}
 }
 
+func TestRenderSymbol_NavigationIsCompactAndDeterministic(t *testing.T) {
+	r := &SymbolResponse{
+		Repo: "/repo",
+		Symbol: &SymbolInfo{
+			QName: "app/source:Send", Kind: "func", File: "app/source.tsx", Line: 3, Signature: "function Send()",
+		},
+		Destinations: []NavigationDestination{
+			{
+				Operation: "push", Evidence: "direct", Certainty: "conditional",
+				RawDestination: "`/blog/${slug}`", Destination: "/blog/${slug}", Route: "/blog/[slug]",
+				TargetFile: "app/blog/[slug]/page.tsx", TargetQName: "app/blog/[slug]/page:Post",
+				File: "app/source.tsx", Line: 6,
+			},
+		},
+		UnresolvedDestinations: []UnresolvedNavigationDestination{
+			{
+				Operation: "redirect", Evidence: "direct", RawDestination: "makePath()",
+				Reason: "unsupported_expression", File: "app/source.tsx", Line: 7,
+			},
+		},
+	}
+	want := `repo: /repo
+symbol: app/source:Send  func  app/source.tsx:3
+signature: function Send()
+destinations[1]{operation,evidence,certainty,raw,destination,route,target_file,target_qname,loc}:
+  push,direct,conditional,` + "`/blog/${slug}`" + `,/blog/${slug},/blog/[slug],app/blog/[slug]/page.tsx,app/blog/[slug]/page:Post,app/source.tsx:6
+unresolved_destinations[1]{operation,evidence,raw,destination,reason,loc}:
+  redirect,direct,makePath(),,unsupported_expression,app/source.tsx:7`
+	if got := RenderSymbol(r); got != want {
+		t.Fatalf("RenderSymbol() =\n%s\nwant\n%s", got, want)
+	}
+}
+
 // TestRenderSymbol_StaleUnitsCappedWithHint pins task 6.8 (spec "Freshness
 // reports carried units, capped"): the rendered freshness line must show
 // "stale_units[N of M]" (not inline all M) plus the capped names, when the

@@ -96,6 +96,8 @@ const tsImportsQuery = `
 //
 // A side-effect import (`import "./x"`) binds nothing and matches no pattern
 // here by construction — it has no import_clause.
+// Type-only statement/specifier tokens are rejected while consuming captures;
+// their module remains an imports-table dependency but not a runtime binding.
 const tsBindingsQuery = `
 (import_statement
   (import_clause (identifier) @binding)
@@ -106,18 +108,26 @@ const tsBindingsQuery = `
   source: (string (string_fragment) @name)) @binding.namespace
 
 (import_statement
-  (import_clause (named_imports (import_specifier alias: (identifier) @binding)))
-  source: (string (string_fragment) @name)) @binding.alias
+  (import_clause (named_imports
+    (import_specifier name: (identifier) @imported alias: (identifier) @binding) @binding.named))
+  source: (string (string_fragment) @name)) @binding.statement
 
 (import_statement
-  (import_clause (named_imports (import_specifier !alias name: (identifier) @binding)))
-  source: (string (string_fragment) @name)) @binding.named
+  (import_clause (named_imports
+    (import_specifier !alias name: (identifier) @binding) @binding.named))
+  source: (string (string_fragment) @name)) @binding.statement
 `
 
 // mapperImportBindings maps a repo-relative importer file to the local names
-// its imports introduce, each pointing at the module specifier it came from:
-// file -> binding name -> specifier. Build-time only, never persisted.
-type mapperImportBindings map[string]map[string]string
+// its imports introduce. Build-time only, never persisted.
+type mapperImportBindings map[string]map[string]mapperImportBinding
+
+type mapperImportBinding struct {
+	specifier     string
+	imported      string
+	namespace     bool
+	defaultImport bool
+}
 
 // mapperImports parses every Python and JS-family file in files an EXTRA
 // time (mirroring mapperSymbols/collectMapperCalls/mapperCarry's own
@@ -210,22 +220,41 @@ func importsFromMapperTree(eng *mapperEngine, f mapperFile, src []byte, tree *gt
 		}
 		if eng.bindings != nil {
 			for _, m := range eng.bindings.Execute(tree) {
-				var name, spec string
+				var name string
+				binding := mapperImportBinding{}
+				named := false
+				typeOnly := false
 				for _, c := range m.Captures {
 					switch c.Name {
 					case "binding":
 						name = c.Text(src)
+					case "imported":
+						binding.imported = c.Text(src)
 					case "name":
-						spec = c.Text(src)
+						binding.specifier = c.Text(src)
+					case "binding.namespace":
+						binding.namespace = true
+						typeOnly = typeOnly || importNodeIsTypeOnly(c.Node, eng.lang)
+					case "binding.default":
+						binding.defaultImport = true
+						typeOnly = typeOnly || importNodeIsTypeOnly(c.Node, eng.lang)
+					case "binding.statement":
+						typeOnly = typeOnly || importNodeIsTypeOnly(c.Node, eng.lang)
+					case "binding.named":
+						named = true
+						typeOnly = typeOnly || importNodeIsTypeOnly(c.Node, eng.lang)
 					}
 				}
-				if name == "" || spec == "" {
+				if name == "" || binding.specifier == "" || typeOnly {
 					continue
 				}
-				if bindings[f.rel] == nil {
-					bindings[f.rel] = map[string]string{}
+				if named && binding.imported == "" {
+					binding.imported = name
 				}
-				bindings[f.rel][name] = spec
+				if bindings[f.rel] == nil {
+					bindings[f.rel] = map[string]mapperImportBinding{}
+				}
+				bindings[f.rel][name] = binding
 			}
 		}
 		return
@@ -250,4 +279,21 @@ func importsFromMapperTree(eng *mapperEngine, f mapperFile, src []byte, tree *gt
 			precision:      mapperImportPrecision,
 		})
 	}
+}
+
+func importNodeIsTypeOnly(node *gts.Node, lang *gts.Language) bool {
+	if node == nil || lang == nil {
+		return false
+	}
+	for i := range node.ChildCount() {
+		child := node.Child(i)
+		if child == nil {
+			continue
+		}
+		switch child.Type(lang) {
+		case "type", "typeof":
+			return true
+		}
+	}
+	return false
 }

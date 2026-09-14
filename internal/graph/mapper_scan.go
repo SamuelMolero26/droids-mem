@@ -19,20 +19,32 @@
 // parse, every extraction run against that single tree.
 package graph
 
-import "os"
+import (
+	"os"
+
+	gts "github.com/odvcencio/gotreesitter"
+)
 
 // mapperScanResult is everything the four mapper passes produce, gathered in
 // one traversal. Field-for-field it is what mapperSymbols, collectMapperCalls,
 // mapperImports and the carry ERROR probe returned separately.
 type mapperScanResult struct {
-	syms       []mapperSym
-	fileCalls  []mapperFileCalls
-	importRows []importRow
-	bindings   mapperImportBindings
+	syms               []mapperSym
+	fileCalls          []mapperFileCalls
+	importRows         []importRow
+	bindings           mapperImportBindings
+	navigationSites    []nextNavigationSite
+	defaultExportNames map[string]string
 	// hasError is keyed by rel path and holds only the true entries — a file
-	// absent from the map parsed clean. Feeds mapperCarryScanned.
+	// absent from the map produced a trustworthy parse. Read/parser failures
+	// and tree-sitter ERROR nodes all make fresh definitions unsafe to publish.
+	// Feeds mapperCarry.
 	hasError map[string]bool
 	stats    mapperStats
+	// fileDirectives maps repo-relative file path → "client" | "server" | "".
+	// Only non-empty entries are stored; absence means no directive. Feeds
+	// file_directives table / SymbolResponse.hint (P3).
+	fileDirectives map[string]string
 }
 
 // scanMapperFiles reads and parses every file in files EXACTLY ONCE and runs
@@ -51,8 +63,10 @@ type mapperScanResult struct {
 // the old way for the tests that assert on them.
 func scanMapperFiles(files []mapperFile) mapperScanResult {
 	res := mapperScanResult{
-		bindings: mapperImportBindings{},
-		hasError: map[string]bool{},
+		bindings:           mapperImportBindings{},
+		hasError:           map[string]bool{},
+		fileDirectives:     map[string]string{},
+		defaultExportNames: map[string]string{},
 	}
 	engines := mapperEngines{}
 
@@ -63,16 +77,80 @@ func scanMapperFiles(files []mapperFile) mapperScanResult {
 		src, err := os.ReadFile(f.abs)
 		if err != nil {
 			res.stats.readErr++
+			res.hasError[f.rel] = true
 			continue // unreadable file is skip-and-continue, not fatal
 		}
 		eng := engines.get(f.entry)
 		if eng.lang == nil {
 			res.stats.parseErr++ // no working language: no tree can ever be produced
+			res.hasError[f.rel] = true
 			continue
 		}
-		scanMapperFile(eng, f, src, &res)
+		if !scanMapperFile(eng, f, src, &res) {
+			res.hasError[f.rel] = true
+		}
 	}
 	return res
+}
+
+// detectDirective walks JavaScript's directive prologue. Comments and a
+// shebang are trivia; the first statement that is not a bare string literal
+// ends the prologue. Conflicting client/server directives are invalid in
+// Next.js, so neither hint is safe to report.
+func detectDirective(src []byte, tree *gts.Tree, lang *gts.Language) string {
+	if tree == nil || lang == nil {
+		return ""
+	}
+	root := tree.RootNode()
+	if root == nil {
+		return ""
+	}
+
+	directive := ""
+	for i := 0; i < root.ChildCount(); i++ {
+		stmt := root.Child(i)
+		switch stmt.Type(lang) {
+		case "comment", "hash_bang_line":
+			continue
+		case "expression_statement":
+			if stmt.HasError() {
+				return directive
+			}
+		default:
+			return directive
+		}
+
+		var literal *gts.Node
+		for j := 0; j < stmt.ChildCount(); j++ {
+			child := stmt.Child(j)
+			if !child.IsNamed() || child.Type(lang) == "comment" {
+				continue
+			}
+			if literal != nil || child.Type(lang) != "string" {
+				return directive
+			}
+			literal = child
+		}
+		if literal == nil {
+			return directive
+		}
+
+		found := ""
+		switch literal.Text(src) {
+		case "\"use client\"", "'use client'":
+			found = "client"
+		case "\"use server\"", "'use server'":
+			found = "server"
+		}
+		if found == "" {
+			continue
+		}
+		if directive != "" && directive != found {
+			return ""
+		}
+		directive = found
+	}
+	return directive
 }
 
 // scanMapperFile is one file's single parse plus every extraction, scoped as
@@ -84,19 +162,20 @@ func scanMapperFiles(files []mapperFile) mapperScanResult {
 //
 // Every extraction below is documented release-safe at its own definition:
 // nothing retained here points into the tree's arenas.
-func scanMapperFile(eng *mapperEngine, f mapperFile, src []byte, res *mapperScanResult) {
+func scanMapperFile(eng *mapperEngine, f mapperFile, src []byte, res *mapperScanResult) bool {
 	tree, err := eng.parsers.Parse(src) // pooled: see mapperEngine.parsers
 	if err != nil {
 		res.stats.parseErr++
-		return // unparsable file is skip-and-continue, not fatal
+		return false // unparsable file is skip-and-continue, not fatal
 	}
 	defer tree.Release()
+	if f.entry != nil && jsFamilyLanguages[f.entry.Name] {
+		if dir := detectDirective(src, tree, eng.lang); dir != "" {
+			res.fileDirectives[f.rel] = dir
+		}
+	}
 
 	res.syms = append(res.syms, outlineMapperTree(eng, f, src, tree, &res.stats)...)
-
-	if refs := callsFromMapperTree(eng, f, src, tree, &res.stats); len(refs) > 0 {
-		res.fileCalls = append(res.fileCalls, mapperFileCalls{file: f.rel, lang: f.entry.Name, refs: refs})
-	}
 
 	// Imports cover Python and the JS family only; every other mapper language
 	// has no import pass at all (mapper_imports.go's package doc).
@@ -109,7 +188,32 @@ func scanMapperFile(eng *mapperEngine, f mapperFile, src []byte, res *mapperScan
 
 	// Carry's trigger input, read off the tree already in hand rather than by
 	// the third re-parse mapperFileHasError used to do.
+	rootHasError := false
 	if root := tree.RootNode(); root != nil && root.HasError() {
+		rootHasError = true
 		res.hasError[f.rel] = true
 	}
+
+	var consumed []nextConsumedRef
+	if f.entry != nil && jsFamilyLanguages[f.entry.Name] && !rootHasError {
+		sites, spans, defaultName := nextNavigationFromMapperTree(
+			f,
+			src,
+			tree,
+			eng.lang,
+			res.bindings[f.rel],
+		)
+		res.navigationSites = append(res.navigationSites, sites...)
+		consumed = spans
+		if defaultName != "" {
+			res.defaultExportNames[f.rel] = defaultName
+		}
+	}
+
+	refs := callsFromMapperTree(eng, f, src, tree, &res.stats)
+	refs = filterNextConsumedCalls(refs, consumed)
+	if len(refs) > 0 {
+		res.fileCalls = append(res.fileCalls, mapperFileCalls{file: f.rel, lang: f.entry.Name, refs: refs})
+	}
+	return true
 }
