@@ -73,6 +73,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   type-check". The MCP tool descriptions were updated to match; they had
   described the old behaviour.
 
+### Security
+- **`uninstall --all` only SIGTERMs a daemon that proves it is the pidfile's
+  PID.** A token challenge alone let a recycled PID be signalled. `/identity`
+  now returns `pid` + `pid_proof` (HMAC under a token-derived key); anything
+  unproven is refused with `not_verified` and the pidfile kept.
+
 ### Fixed
 - **`droids-mem upgrade` and the TUI update banner never detected a new
   release.** The release workflow injects the git tag verbatim
