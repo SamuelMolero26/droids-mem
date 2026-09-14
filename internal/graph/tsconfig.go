@@ -2,6 +2,7 @@ package graph
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path"
 	"path/filepath"
@@ -60,8 +61,11 @@ func loadAliasConfigTracked(repoRoot string) (*aliasConfig, []string) {
 	for cur := repoRoot; ; {
 		for _, name := range []string{"tsconfig.json", "jsconfig.json"} {
 			p := filepath.Join(cur, name)
-			data, err := os.ReadFile(p) // #nosec G304 -- cur is an ancestor of canonicalRepo, p is a fixed config name
+			data, err := readBoundedConfig(p)
 			if err != nil {
+				if !os.IsNotExist(err) {
+					files = append(files, p)
+				}
 				continue
 			}
 			files = append(files, p)
@@ -146,11 +150,17 @@ func parseAliasConfig(data []byte, dir string, depth int, files *[]string) *alia
 			if filepath.Ext(extPath) == "" {
 				extPath += ".json"
 			}
-			if bData, err := os.ReadFile(extPath); err == nil { // #nosec G304 -- extPath is joined from dir+extends, dir is config dir
+			bData, err := readBoundedConfig(extPath)
+			if err != nil {
+				if !os.IsNotExist(err) && files != nil && depth < 5 {
+					*files = append(*files, extPath)
+				}
+			} else {
 				if files != nil && depth < 5 {
 					*files = append(*files, extPath)
 				}
 				baseCfg = parseAliasConfig(bData, filepath.Dir(extPath), depth+1, files)
+				baseCfg = rebaseInherited(baseCfg, filepath.Dir(extPath), dir)
 			}
 		}
 	}
@@ -181,6 +191,84 @@ func parseAliasConfig(data []byte, dir string, depth int, files *[]string) *alia
 		out.paths[k] = v
 	}
 	return out
+}
+
+// readBoundedConfig reads one tsconfig/jsconfig file with the same bounds as
+// mapper discovery: symlinks and other non-regular files are rejected (a
+// symlinked config would pull content from outside the repo, and git preserves
+// symlinks through a clone), and files over maxMapperFileBytes are rejected
+// before parsing. Callers use os.IsNotExist to distinguish "no such file"
+// (skip silently) from a rejected-but-present file (still tracked for stamp
+// invalidation).
+func readBoundedConfig(p string) ([]byte, error) {
+	fi, err := os.Lstat(p)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("config %s: not a regular file", p)
+	}
+	if fi.Size() > maxMapperFileBytes {
+		return nil, fmt.Errorf("config %s: %d bytes over %d cap", p, fi.Size(), maxMapperFileBytes)
+	}
+	// #nosec G304 -- p is a fixed config name under the checkout or a
+	// dir-relative extends target; Lstat above already rejected symlinks.
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxMapperFileBytes {
+		return nil, fmt.Errorf("config %s: %d bytes over %d cap", p, len(data), maxMapperFileBytes)
+	}
+	return data, nil
+}
+
+// rebaseInherited rewrites a base config's dir-relative values into the
+// extending child's frame. TS resolves each relative setting against the file
+// where it originated, so a base in config/ with baseUrl "." means config/,
+// not the child's directory. The base's baseUrl is rebased via its directory;
+// its paths targets stay as-is when a baseUrl exists (they resolve against
+// that baseUrl at query time), and are rebased via the base directory only
+// when no baseUrl exists (then they are config-file-relative).
+func rebaseInherited(base *aliasConfig, baseDir, childDir string) *aliasConfig {
+	if base == nil {
+		return nil
+	}
+	out := &aliasConfig{baseUrl: base.baseUrl, paths: map[string][]string{}}
+	if out.baseUrl != "" && !filepath.IsAbs(filepath.FromSlash(out.baseUrl)) {
+		abs := filepath.Join(baseDir, filepath.FromSlash(out.baseUrl))
+		if rel, err := filepath.Rel(childDir, abs); err == nil {
+			out.baseUrl = filepath.ToSlash(rel)
+		}
+	}
+	keepTargets := base.baseUrl != ""
+	for k, v := range base.paths {
+		if keepTargets {
+			out.paths[k] = v
+			continue
+		}
+		rebased := make([]string, 0, len(v))
+		for _, t := range v {
+			rebased = append(rebased, rebasePathTarget(t, baseDir, childDir))
+		}
+		out.paths[k] = rebased
+	}
+	return out
+}
+
+// rebasePathTarget rewrites one config-file-relative paths target from baseDir
+// into childDir. Absolute targets are kept; "*" is treated as a literal path
+// segment so Join/Rel move the surrounding directories correctly.
+func rebasePathTarget(t, baseDir, childDir string) string {
+	if t == "" || filepath.IsAbs(t) || path.IsAbs(t) {
+		return t
+	}
+	abs := filepath.Join(baseDir, filepath.FromSlash(t))
+	rel, err := filepath.Rel(childDir, abs)
+	if err != nil {
+		return t
+	}
+	return filepath.ToSlash(rel)
 }
 
 // matchSpec selects the paths entry that governs spec and returns its targets

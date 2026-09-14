@@ -143,6 +143,29 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Build output is excluded from the source walk**: `dist`, `build`, `target`
   and `__pycache__` join the existing dotdir/`vendor`/`node_modules`
   exclusions, so a build no longer moves the staleness stamp.
+- **`graph_symbol` answers "where does this send the user?" for Next.js.**
+  Proven navigation sites (`<Link>` from `next/link`, `redirect` /
+  `permanentRedirect` and `router.push` / `replace` from `next/navigation`)
+  resolve literal, constant, concatenated, template and finite-conditional
+  destinations against the App Router route inventory and appear as
+  `destinations`; computed or unmatched destinations stay visible as
+  `unresolved_destinations` with a reason instead of guessing. Navigation
+  lives in parallel tables — callers, call paths and `transitive_callers`
+  keep their call-only meaning.
+- **Inherited `tsconfig` aliases now resolve against the file that defined
+  them.** Extending `config/base.json` with `baseUrl: "."` used to probe
+  `./src/*` from the repo root; it now probes `config/src/*`, matching
+  TypeScript. A regression test with the real target and a root distractor
+  pins the edge to the real callee.
+- **Unreadable single-symbol files no longer vanish from the graph.** The
+  carry trigger compared with integer division, so zero fresh definitions
+  against one previous definition (`0 < 0`) never carried. It now compares
+  `defCount*2 < prevDefCount`, with one- and three-symbol regression cases.
+- **Alias config reads are bounded like mapper source reads.** Root and
+  `extends` configs were read unbounded with symlinks followed, so a
+  committed config could OOM the server. They now go through a regular-file,
+  2 MiB-capped helper; rejected-but-present files are still tracked so the
+  stamp invalidates on them.
 
 ## [1.2.1] — 2026-08-10
 

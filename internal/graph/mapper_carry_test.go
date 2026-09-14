@@ -22,9 +22,13 @@ func TestMapperCarryTrigger(t *testing.T) {
 		defCount, prevDefCount int
 		want                   bool
 	}{
-		{"ERROR nodes without def-count halving does not carry", true, 4, 6, false}, // 4 !< 3
-		{"ERROR nodes with halved def count carries", true, 2, 6, true},             // 2 < 3
+		{"ERROR nodes without def-count halving does not carry", true, 4, 6, false}, // 8 !< 6
+		{"ERROR nodes with halved def count carries", true, 2, 6, true},             // 4 < 6
 		{"zero ERROR nodes never carries, even with a halved count", false, 1, 6, false},
+		{"unreadable one-symbol file carries (0 of 1)", true, 0, 1, true},       // 0 < 1
+		{"three-symbol file reduced to one carries (1 of 3)", true, 1, 3, true}, // 2 < 3
+		{"exact half does not carry (1 of 2)", true, 1, 2, false},               // 2 !< 2
+		{"zero previous defs never carries", true, 0, 0, false},                 // 0 !< 0
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -185,6 +189,93 @@ export function fnF() {}
 	}
 	if got, ok := graphDirective(t, m, repo, "app.ts"); !ok || got != "client" {
 		t.Errorf("carried unreadable file directive = %q, %v; want client, true", got, ok)
+	}
+}
+
+// TestMapperCarry_UnreadableOneSymbolFileCarries pins the integer-floor fix:
+// an unreadable single-export page.tsx has 0 fresh defs against 1 previous
+// (0 < 0 under the old defCount < prevDefCount/2 comparison, so it never
+// carried). Under defCount*2 < prevDefCount (0 < 1) it carries.
+func TestMapperCarry_UnreadableOneSymbolFileCarries(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("file mode cannot make the fixture unreadable")
+	}
+
+	repo := t.TempDir()
+	writeFile(t, filepath.Join(repo, "app"), "page.tsx", "export function target() {}\n")
+	writeFile(t, repo, "keep.ts", "export function keep() {}\n")
+
+	m := managerFor(t)
+	ctx := context.Background()
+	if _, err := m.Index(ctx, repo); err != nil {
+		t.Fatalf("clean generation index: %v", err)
+	}
+
+	pagePath := filepath.Join(repo, "app", "page.tsx")
+	if err := os.Chmod(pagePath, 0); err != nil {
+		t.Skipf("make fixture unreadable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(pagePath, 0o600) })
+	if _, err := os.ReadFile(pagePath); err == nil {
+		t.Skip("platform still permits reading a mode-000 file")
+	}
+	writeFile(t, repo, "keep.ts", "export function keep() { return 1; }\n")
+	if _, err := m.Index(ctx, repo); err != nil {
+		t.Fatalf("unreadable generation index: %v", err)
+	}
+
+	resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "target"})
+	if err != nil {
+		t.Fatalf("Symbol target: %v", err)
+	}
+	if resp.Symbol == nil {
+		t.Fatal("target not found — one-symbol carry was lost, not carried forward")
+	}
+	if !resp.Carried {
+		t.Errorf("target.Carried = false, want true (its unreadable one-symbol file was carried forward)")
+	}
+}
+
+// TestMapperCarry_UnreadableThreeSymbolFileCarries pins the same fix one rung
+// up: an unreadable three-export file (0 fresh of 3 previous) must still carry
+// its last-good symbols.
+func TestMapperCarry_UnreadableThreeSymbolFileCarries(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("file mode cannot make the fixture unreadable")
+	}
+
+	repo := t.TempDir()
+	writeFile(t, filepath.Join(repo, "app"), "page.tsx", "export function targetA() {}\nexport function targetB() {}\nexport function targetC() {}\n")
+	writeFile(t, repo, "keep.ts", "export function keep() {}\n")
+
+	m := managerFor(t)
+	ctx := context.Background()
+	if _, err := m.Index(ctx, repo); err != nil {
+		t.Fatalf("clean generation index: %v", err)
+	}
+
+	pagePath := filepath.Join(repo, "app", "page.tsx")
+	if err := os.Chmod(pagePath, 0); err != nil {
+		t.Skipf("make fixture unreadable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(pagePath, 0o600) })
+	if _, err := os.ReadFile(pagePath); err == nil {
+		t.Skip("platform still permits reading a mode-000 file")
+	}
+	writeFile(t, repo, "keep.ts", "export function keep() { return 1; }\n")
+	if _, err := m.Index(ctx, repo); err != nil {
+		t.Fatalf("unreadable generation index: %v", err)
+	}
+
+	resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "targetB"})
+	if err != nil {
+		t.Fatalf("Symbol targetB: %v", err)
+	}
+	if resp.Symbol == nil {
+		t.Fatal("targetB not found — three-symbol carry was lost, not carried forward")
+	}
+	if !resp.Carried {
+		t.Errorf("targetB.Carried = false, want true (its unreadable three-symbol file was carried forward)")
 	}
 }
 

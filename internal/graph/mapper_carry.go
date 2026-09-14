@@ -25,7 +25,7 @@ import (
 // falling below HALF the previous build's — triggers carry. The resulting
 // miss class is a principled limit, not a TODO.
 func mapperCarryTrigger(hasError bool, defCount, prevDefCount int) bool {
-	return hasError && defCount < prevDefCount/2
+	return hasError && defCount*2 < prevDefCount
 }
 
 // mapperCarriedFile reads dbPath (the previous graph.db, still in place when

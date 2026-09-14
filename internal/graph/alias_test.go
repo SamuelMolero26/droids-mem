@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -461,4 +462,152 @@ func TestResolveSpecifier_AliasDeterministicPatternPrecedence(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestBuildIndex_ExtendsInheritedAliasOrigin pins the inherited-alias-origin
+// fix: a root tsconfig extending config/base.json inherits that base's baseUrl
+// "." resolved against config/, so "@/*": ["src/*"] probes config/src/* —
+// not root src/*. Both the real target (config/src/util.ts) and a distractor
+// (src/util.ts) export the same symbol; only the import-scoped edge proves
+// which file the alias chose.
+func TestBuildIndex_ExtendsInheritedAliasOrigin(t *testing.T) {
+	repo := aliasRepo(t)
+	writeFile(t, repo, "config/base.json", `{"compilerOptions":{"baseUrl":".","paths":{"@/*":["src/*"]}}}`)
+	writeFile(t, repo, "tsconfig.json", `{"extends":"./config/base.json"}`)
+	writeFile(t, filepath.Join(repo, "config/src"), "util.ts", "export function target() {}\n")
+	writeFile(t, filepath.Join(repo, "src"), "util.ts", "export function target() {}\n")
+	writeFile(t, repo, "app.ts", "import { target } from \"@/util\";\nexport function caller() { target(); }\n")
+
+	cfg := loadAliasConfig(repo)
+	if cfg == nil {
+		t.Fatal("loadAliasConfig returned nil, want inherited config")
+	}
+	if cfg.baseUrl != "config" {
+		t.Errorf("inherited baseUrl = %q, want %q (base's \".\" resolved against config/)", cfg.baseUrl, "config")
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "graph.db")
+	st, err := stamp(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+		t.Fatalf("buildIndex: %v", err)
+	}
+	conn, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	rows, err := conn.Query(`SELECT s2.file FROM edges e JOIN symbols s1 ON s1.id = e.caller JOIN symbols s2 ON s2.id = e.callee WHERE s1.name = 'caller' AND s2.name = 'target'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var files []string
+	for rows.Next() {
+		var f string
+		if err := rows.Scan(&f); err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, f)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("edges caller()->target() land in %v, want exactly one (config/src/util.ts)", files)
+	}
+	if files[0] != "config/src/util.ts" {
+		t.Errorf("caller()->target() resolved into %q, want %q: inherited baseUrl was read against the root instead of config/", files[0], "config/src/util.ts")
+	}
+}
+
+// TestAliasConfig_BoundedReads pins the config-read bounds shared with mapper
+// discovery: a symlinked root config and an over-cap root config are both
+// rejected (no alias), while a normal config and an extends chain still load.
+// Rejected-but-present files stay tracked for stamp invalidation.
+func TestAliasConfig_BoundedReads(t *testing.T) {
+	t.Run("symlink config rejected but tracked", func(t *testing.T) {
+		repo := aliasRepo(t)
+		writeFile(t, repo, "real.json", `{"compilerOptions":{"baseUrl":".","paths":{"@/*":["./*"]}}}`)
+		if err := os.Symlink(filepath.Join(repo, "real.json"), filepath.Join(repo, "tsconfig.json")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		if cfg := loadAliasConfig(repo); cfg != nil {
+			t.Errorf("loadAliasConfig via symlink = %#v, want nil (non-regular configs are rejected)", cfg)
+		}
+		found := false
+		for _, f := range aliasConfigFiles(repo) {
+			if strings.HasSuffix(filepath.ToSlash(f), "tsconfig.json") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("aliasConfigFiles = %v, want the rejected symlink still tracked for stamp invalidation", aliasConfigFiles(repo))
+		}
+	})
+
+	t.Run("over-cap config rejected but tracked", func(t *testing.T) {
+		repo := aliasRepo(t)
+		padded := `{"compilerOptions":{"baseUrl":".","paths":{"@/*":["./*"]}},"_pad":"` + strings.Repeat("x", maxMapperFileBytes+1) + `"}`
+		writeFile(t, repo, "tsconfig.json", padded)
+		if cfg := loadAliasConfig(repo); cfg != nil {
+			t.Errorf("loadAliasConfig over-cap = %#v, want nil (configs over %d bytes are rejected)", cfg, maxMapperFileBytes)
+		}
+		found := false
+		for _, f := range aliasConfigFiles(repo) {
+			if strings.HasSuffix(filepath.ToSlash(f), "tsconfig.json") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("aliasConfigFiles = %v, want the over-cap config still tracked for stamp invalidation", aliasConfigFiles(repo))
+		}
+	})
+
+	t.Run("normal and extends configs still load", func(t *testing.T) {
+		repo := aliasRepo(t)
+		writeFile(t, repo, "tsconfig.json", `{"compilerOptions":{"baseUrl":".","paths":{"@/*":["./*"]}}}`)
+		cfg := loadAliasConfig(repo)
+		if cfg == nil {
+			t.Fatal("normal loadAliasConfig returned nil, want non-nil")
+		}
+		if got := aliasResolve(cfg, "@/a", "a.ts"); got != "a.ts" {
+			t.Errorf("normal config @/a = %q, want %q", got, "a.ts")
+		}
+
+		repo2 := aliasRepo(t)
+		writeFile(t, repo2, "tsconfig.base.json", `{"compilerOptions":{"baseUrl":"src","paths":{"@/*":["*"]}}}`)
+		writeFile(t, repo2, "tsconfig.json", `{"extends":"./tsconfig.base.json","compilerOptions":{"paths":{"@utils/*":["utils/*"]}}}`)
+		cfg2 := loadAliasConfig(repo2)
+		if cfg2 == nil {
+			t.Fatal("extends loadAliasConfig returned nil, want non-nil")
+		}
+		if got := aliasResolve(cfg2, "@/utils", "src/utils.ts"); got != "src/utils.ts" {
+			t.Errorf("extends inherits @/* = %q, want %q", got, "src/utils.ts")
+		}
+		if got := aliasResolve(cfg2, "@utils/foo", "src/utils/foo.ts"); got != "src/utils/foo.ts" {
+			t.Errorf("extends child @utils/* = %q, want %q", got, "src/utils/foo.ts")
+		}
+	})
+
+	t.Run("symlink extends base ignored, root values still load", func(t *testing.T) {
+		repo := aliasRepo(t)
+		writeFile(t, repo, "real-base.json", `{"compilerOptions":{"paths":{"@base/*":["base/*"]}}}`)
+		if err := os.Symlink(filepath.Join(repo, "real-base.json"), filepath.Join(repo, "base.json")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		writeFile(t, repo, "tsconfig.json", `{"extends":"./base.json","compilerOptions":{"baseUrl":".","paths":{"@/*":["./*"]}}}`)
+		cfg := loadAliasConfig(repo)
+		if cfg == nil {
+			t.Fatal("loadAliasConfig with symlinked extends base returned nil, want root values")
+		}
+		if got := aliasResolve(cfg, "@/a", "a.ts"); got != "a.ts" {
+			t.Errorf("root @/a = %q, want %q", got, "a.ts")
+		}
+		if got := aliasResolve(cfg, "@base/x", "base/x.ts"); got != "" {
+			t.Errorf("symlinked extends base must be ignored, @base/x = %q, want empty", got)
+		}
+	})
 }

@@ -60,6 +60,38 @@ func TestStamp_MapperOnlyEditMovesStamp(t *testing.T) {
 	}
 }
 
+func TestStamp_PathRenameMovesStampWithPreservedSizeAndMtime(t *testing.T) {
+	repo := t.TempDir()
+	oldPath := filepath.Join(repo, "app", "one", "page.tsx")
+	newPath := filepath.Join(repo, "app", "two", "page.tsx")
+	writeFile(t, filepath.Dir(oldPath), filepath.Base(oldPath), "export default function Page() { return null }\n")
+	fixed := time.Unix(1_700_000_000, 123)
+	if err := os.Chtimes(oldPath, fixed, fixed); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := stamp(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(newPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(oldPath, newPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(newPath, fixed, fixed); err != nil {
+		t.Fatal(err)
+	}
+	after, err := stamp(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before == after {
+		t.Fatalf("path rename with preserved size and mtime did not move stamp: %q", before)
+	}
+}
+
 func TestManager_AliasRootConfigEditInvalidatesGraph(t *testing.T) {
 	for _, configName := range []string{"tsconfig.json", "jsconfig.json"} {
 		t.Run(configName, func(t *testing.T) {
@@ -95,7 +127,12 @@ func TestManager_AliasRootConfigEditInvalidatesGraph(t *testing.T) {
 
 func TestManager_AliasExtendsEditInvalidatesGraph(t *testing.T) {
 	repo := t.TempDir()
-	writeAliasInvalidationFixture(t, repo)
+	// The inherited base lives in config/ with baseUrl ".", so under
+	// origin retention its "." means config/ and its targets land under
+	// config/a and config/b — not root a/ and b/.
+	writeFile(t, repo, "config/a/target.ts", "export function target() {}\n")
+	writeFile(t, repo, "config/b/target.ts", "export function target() {}\n")
+	writeFile(t, repo, "app.ts", "import { target } from \"@/target\";\nexport function caller() { target(); }\n")
 	writeFile(t, repo, "tsconfig.json", `{"extends":"./config/aliases.json"}`)
 	writeFile(t, repo, "config/aliases.json", aliasConfigFor("a"))
 
@@ -103,7 +140,7 @@ func TestManager_AliasExtendsEditInvalidatesGraph(t *testing.T) {
 	if _, err := m.Index(context.Background(), repo); err != nil {
 		t.Fatalf("initial index: %v", err)
 	}
-	assertCallerTarget(t, m, repo, "a/target.ts")
+	assertCallerTarget(t, m, repo, "config/a/target.ts")
 
 	before, err := stamp(repo)
 	if err != nil {
@@ -120,7 +157,7 @@ func TestManager_AliasExtendsEditInvalidatesGraph(t *testing.T) {
 	}
 
 	refreshGraph(t, m, repo)
-	assertCallerTarget(t, m, repo, "b/target.ts")
+	assertCallerTarget(t, m, repo, "config/b/target.ts")
 }
 
 func TestManager_AliasConfigAddRemoveInvalidatesFallback(t *testing.T) {
