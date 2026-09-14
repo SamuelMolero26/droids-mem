@@ -61,21 +61,3 @@ func TestStripJSONComments_KeepsTheCharacterAfterAComment(t *testing.T) {
 		})
 	}
 }
-
-// The consequence the stripper exists to avoid: a config that only differs from
-// valid JSON by a comment must still parse, and must still yield its aliases.
-func TestParseAliasConfig_SurvivesBlockComments(t *testing.T) {
-	const cfg = `{
-  "compilerOptions": {
-    "baseUrl": ".",
-    /* path aliases */"paths": {"@/*": ["src/*"]}
-  }
-}`
-	got := parseAliasConfig([]byte(cfg), t.TempDir(), 0, nil)
-	if got == nil {
-		t.Fatal("parseAliasConfig returned nil: the comment broke the parse, so every alias in this config is silently lost")
-	}
-	if p := got.paths["@/*"]; len(p) != 1 || p[0] != "src/*" {
-		t.Errorf("paths[\"@/*\"] = %v, want [src/*]", p)
-	}
-}

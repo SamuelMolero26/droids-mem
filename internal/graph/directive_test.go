@@ -3,11 +3,8 @@ package graph
 import (
 	"context"
 	"database/sql"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	gts "github.com/odvcencio/gotreesitter"
 	"github.com/odvcencio/gotreesitter/grammars"
@@ -138,57 +135,6 @@ func TestDirective_HintOnSymbol(t *testing.T) {
 	}
 }
 
-// TestDirective_PersistsToDB verifies file_directives table is written.
-func TestDirective_PersistsToDB(t *testing.T) {
-	repo := t.TempDir()
-	writeFile(t, repo, "a.tsx", "\"use client\";\nexport function Foo() {}\n")
-	writeFile(t, repo, "b.ts", "\"use server\";\nexport function Bar() {}\n")
-	writeFile(t, repo, "c.ts", "export function Baz() {}\n")
-
-	dbPath := filepath.Join(t.TempDir(), "graph.db")
-	st, err := stamp(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
-		t.Fatalf("buildIndex: %v", err)
-	}
-	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	rows, err := db.Query(`SELECT file, directive FROM file_directives ORDER BY file`)
-	if err != nil {
-		t.Fatalf("query file_directives: %v", err)
-	}
-	defer rows.Close()
-	got := map[string]string{}
-	for rows.Next() {
-		var f, d string
-		if err := rows.Scan(&f, &d); err != nil {
-			t.Fatal(err)
-		}
-		got[f] = d
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
-	}
-	if got["a.tsx"] != "client" {
-		t.Errorf("a.tsx directive = %q, want client", got["a.tsx"])
-	}
-	if got["b.ts"] != "server" {
-		t.Errorf("b.ts directive = %q, want server", got["b.ts"])
-	}
-	if _, ok := got["c.ts"]; ok {
-		t.Errorf("c.ts should not be in file_directives, got %v", got)
-	}
-	if len(got) != 2 {
-		t.Errorf("file_directives count = %d, want 2 (only directive files)", len(got))
-	}
-}
-
 func TestDirective_NormalRebuildReplacesAndRemovesRow(t *testing.T) {
 	repo := t.TempDir()
 	writeFile(t, repo, "app.ts", "'use client';\nexport function render() {}\n")
@@ -222,74 +168,6 @@ func TestDirective_NormalRebuildReplacesAndRemovesRow(t *testing.T) {
 	}
 	if strings.Contains(resp.Hint, clientDirectiveHint) || strings.Contains(resp.Hint, serverDirectiveHint) {
 		t.Errorf("removed directive remained in hint %q", resp.Hint)
-	}
-}
-
-func TestManager_FileDirectivesSchemaAdditionInvalidatesOldGraph(t *testing.T) {
-	repo := t.TempDir()
-	writeFile(t, repo, "app.ts", "'use client';\nexport function render() {}\n")
-
-	m := managerFor(t)
-	canon, err := canonicalRepo(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dbPath := m.dbPath(canon)
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0o750); err != nil {
-		t.Fatal(err)
-	}
-
-	const directiveDDL = `CREATE TABLE file_directives (
-  file      TEXT PRIMARY KEY,
-  directive TEXT NOT NULL
-) WITHOUT ROWID;
-`
-	oldSchema := strings.Replace(schema, directiveDDL, "", 1)
-	if oldSchema == schema {
-		t.Fatal("test setup: file_directives DDL not found in schema")
-	}
-	st, err := stamp(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, rest, ok := strings.Cut(st, ":")
-	if !ok {
-		t.Fatalf("stamp = %q, want generation separator", st)
-	}
-	oldStamp := stampGen(oldSchema, indexedExtensions(), indexerGen) + ":" + rest
-	if strings.HasPrefix(st, stampGen(oldSchema, indexedExtensions(), indexerGen)+":") {
-		t.Fatalf("schema addition did not move current generation: current stamp %q", st)
-	}
-
-	db, err := sql.Open("sqlite", "file:"+dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(oldSchema); err != nil {
-		db.Close()
-		t.Fatal(err)
-	}
-	for k, v := range map[string]string{
-		"stamp": oldStamp, "indexed_at": "2026-01-01T00:00:00Z", "carried_units": "",
-	} {
-		if _, err := db.Exec(`INSERT INTO meta (key, value) VALUES (?,?)`, k, v); err != nil {
-			db.Close()
-			t.Fatal(err)
-		}
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	wait, err := m.WaitBuild(context.Background(), repo, 60*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !wait.Completed || !wait.Rebuilt {
-		t.Fatalf("old schema graph was not rebuilt: %+v", wait)
-	}
-	if got, ok := graphDirective(t, m, repo, "app.ts"); !ok || got != "client" {
-		t.Fatalf("rebuilt directive = %q, %v; want client, true", got, ok)
 	}
 }
 

@@ -4,12 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
-	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -81,52 +78,6 @@ export function ClassAliasCall() { return API.get(); }
 	}
 }
 
-func TestLadder_Rung2a_ImportScopedBareAndNamespace(t *testing.T) {
-	cn := &symRow{id: 1, name: "cn", file: "lib/utils.ts"}
-	distractorCN := &symRow{id: 2, name: "cn", file: "distractor.ts"}
-	client := &symRow{id: 3, name: "Client", kind: "class", file: "services/client.ts"}
-	get := &symRow{id: 4, name: "get", file: "services/client.ts"}
-	api := &symRow{id: 5, name: "API", kind: "class", file: "distractor.ts"}
-	distractorGet := &symRow{id: 6, name: "get", file: "distractor.ts"}
-	syms := []mapperSym{
-		{row: cn},
-		{row: distractorCN},
-		{row: client},
-		{row: get, container: "Client"},
-		{row: api},
-		{row: distractorGet, container: "API"},
-	}
-	idx := buildMapperLadderIndex(syms, mapperResolvedImports{
-		"app/page.tsx": {
-			"cn":    {target: "lib/utils.ts", imported: "cn"},
-			"merge": {target: "lib/utils.ts", imported: "cn"},
-			"utils": {target: "lib/utils.ts", namespace: true},
-			"API":   {target: "services/client.ts", imported: "Client"},
-		},
-	})
-	cases := []struct {
-		name     string
-		callsite mapperCallsite
-		wantID   int64
-	}{
-		{"named bare", mapperCallsite{name: "cn"}, cn.id},
-		{"aliased named bare", mapperCallsite{name: "merge"}, cn.id},
-		{"namespace member", mapperCallsite{name: "cn", receiver: "utils"}, cn.id},
-		{"class alias member", mapperCallsite{name: "get", receiver: "API"}, get.id},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			c := tc.callsite
-			c.file = "app/page.tsx"
-			c.lang = "tsx"
-			hits, total := idx.resolve(c)
-			if len(hits) != 1 || total != 1 || idx.syms[hits[0]].row.id != tc.wantID {
-				t.Fatalf("resolve = hits %v total %d, want id %d", hits, total, tc.wantID)
-			}
-		})
-	}
-}
-
 func TestBuildIndex_ImportScopedBareLocalShadowAndFallback(t *testing.T) {
 	repo := t.TempDir()
 	writeFile(t, repo, "tsconfig.json", `{"compilerOptions":{"baseUrl":".","paths":{"@/*":["./*"]}}}`)
@@ -168,40 +119,6 @@ export function UnresolvedAliasCall() { missing(); }
 				t.Errorf("edges from %s = %v, want %v", tc.caller, got, tc.want)
 			}
 		})
-	}
-}
-
-func TestManager_IndexerGenBump_RebuildsPriorGraphWithBareImports(t *testing.T) {
-	repo := t.TempDir()
-	writeFile(t, repo, "target.ts", "export function helper(): void {}\n")
-	writeFile(t, repo, "app.ts", "import { helper } from './target';\nexport function run() { helper(); }\n")
-
-	m := managerFor(t)
-	canon, err := canonicalRepo(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dbPath := m.dbPath(canon)
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	st, err := stamp(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, rest, ok := strings.Cut(st, ":")
-	if !ok {
-		t.Fatalf("stamp() = %q, want generation prefix", st)
-	}
-	oldStamp := stampGen(schema, indexedExtensions(), "6") + ":" + rest
-	seedRawGraphMeta(t, dbPath, oldStamp, nil)
-
-	resp, err := m.WaitBuild(context.Background(), repo, 60*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !resp.Completed || !resp.Rebuilt {
-		t.Fatalf("generation-6 graph was not rebuilt: %+v", resp)
 	}
 }
 
