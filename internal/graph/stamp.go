@@ -42,7 +42,11 @@ func indexedExtensions() []string {
 // the precise import-scoped rung 2a. Bare and namespace import narrowing also
 // changes stored edge attribution, so it advances the generation once more.
 // Generation 8 carries file directives with last-good mapper symbols instead
-// of writing metadata from an untrustworthy current parse.
+// of writing metadata from an untrustworthy current parse. Generation 9 adds
+// meta.tests_skipped: a graph built before it has no such row, so the
+// answer omits the disclosure — a silent under-report on any mapper repo with
+// tests. That is the bump line exactly: the stored graph became wrong, not
+// merely incomplete.
 const indexerGen = "9"
 
 // stampGen derives the stamp's generation prefix from the things that change
