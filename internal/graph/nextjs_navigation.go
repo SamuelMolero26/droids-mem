@@ -965,6 +965,15 @@ func resolveNextDestination(
 		return row
 	}
 	matches := nextMatchingRoutes(matchPath, value.symbolic, routes)
+	if len(matches) > 1 {
+		// Parallel-route slot pages render alongside the children page at the
+		// same URL, so the children page is the target when one exists.
+		if children := slices.DeleteFunc(slices.Clone(matches), func(m nextRouteMatch) bool {
+			return strings.Contains("/"+m.route.file, "/@")
+		}); len(children) > 0 {
+			matches = children
+		}
+	}
 	if len(matches) == 0 {
 		row.reason = "no_matching_route"
 		return row
@@ -1127,16 +1136,6 @@ func navigationRows(
 	conn *sql.DB,
 	sourceID int64,
 ) ([]NavigationDestination, []UnresolvedNavigationDestination, bool, error) {
-	var exists int
-	if err := conn.QueryRowContext(ctx, `SELECT EXISTS(
-		SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'navigations'
-	)`).Scan(&exists); err != nil {
-		return nil, nil, false, err
-	}
-	if exists == 0 {
-		return nil, nil, false, nil
-	}
-
 	rows, err := conn.QueryContext(ctx, `SELECT
 		n.operation, n.evidence, n.raw_destination, n.destination, n.certainty,
 		COALESCE(r.pattern, ''), COALESCE(r.file, ''), COALESCE(r.target_qname, ''),

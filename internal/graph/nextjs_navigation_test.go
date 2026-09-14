@@ -2,7 +2,6 @@ package graph
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -260,6 +259,51 @@ export function Send({ slug, choose }: { slug: string, choose: boolean }) {
 	}
 }
 
+// A parallel-route slot page renders alongside the children page at the same
+// URL; the navigation target is the children page, not an ambiguity. A slot
+// page with no children page at its URL still resolves, and two slots alone at
+// one URL remain ambiguous.
+func TestNextNavigation_ParallelSlotsPreferChildrenPage(t *testing.T) {
+	repo := t.TempDir()
+	writeFile(t, repo, "app/page.tsx", "export default function Home() { return null }\n")
+	writeFile(t, repo, "app/@team/page.tsx", "export default function TeamHome() { return null }\n")
+	writeFile(t, repo, "app/settings/page.tsx", "export default function Settings() { return null }\n")
+	writeFile(t, repo, "app/@team/settings/page.tsx", "export default function TeamSettings() { return null }\n")
+	writeFile(t, repo, "app/@modal/photo/page.tsx", "export default function Photo() { return null }\n")
+	writeFile(t, repo, "app/@a/shared/page.tsx", "export default function A() { return null }\n")
+	writeFile(t, repo, "app/@b/shared/page.tsx", "export default function B() { return null }\n")
+	writeFile(t, repo, "app/source.tsx", `
+import { redirect } from "next/navigation";
+
+export function ToHome() { redirect("/"); }
+export function ToSettings() { redirect("/settings"); }
+export function ToPhoto() { redirect("/photo"); }
+export function ToShared() { redirect("/shared"); }
+`)
+
+	m := managerFor(t)
+	if _, err := m.Index(context.Background(), repo); err != nil {
+		t.Fatalf("index: %v", err)
+	}
+	for symbol, wantFile := range map[string]string{
+		"ToHome":     "app/page.tsx",
+		"ToSettings": "app/settings/page.tsx",
+		"ToPhoto":    "app/@modal/photo/page.tsx",
+	} {
+		resp := symbolResponse(t, m, repo, symbol)
+		if len(resp.Destinations) != 1 || resp.Destinations[0].TargetFile != wantFile {
+			t.Errorf("%s destinations = %+v unresolved = %+v, want %s",
+				symbol, resp.Destinations, resp.UnresolvedDestinations, wantFile)
+		}
+	}
+	shared := symbolResponse(t, m, repo, "ToShared")
+	if len(shared.Destinations) != 0 || len(shared.UnresolvedDestinations) != 1 ||
+		shared.UnresolvedDestinations[0].Reason != "ambiguous_route" {
+		t.Errorf("two slots alone at one URL = %+v / %+v, want ambiguous_route",
+			shared.Destinations, shared.UnresolvedDestinations)
+	}
+}
+
 func TestNextNavigation_ClassificationsAndAmbiguity(t *testing.T) {
 	repo := t.TempDir()
 	writeNextPages(t, repo, "/about")
@@ -437,22 +481,6 @@ export function Send() { redirect("/about"); }
 	destination := resp.Destinations[0]
 	if destination.Route != "/about" || destination.TargetFile != "app/about/page.tsx" || destination.TargetQName != "" {
 		t.Errorf("anonymous target = %+v", destination)
-	}
-}
-
-func TestNavigationRows_OldSchemaReturnsNoRows(t *testing.T) {
-	db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "old.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if _, err := db.Exec(`CREATE TABLE symbols (id INTEGER PRIMARY KEY)`); err != nil {
-		t.Fatal(err)
-	}
-
-	resolved, unresolved, truncated, err := navigationRows(context.Background(), db, 1)
-	if err != nil || len(resolved) != 0 || len(unresolved) != 0 || truncated {
-		t.Fatalf("old schema navigationRows = %v %v %v, err %v", resolved, unresolved, truncated, err)
 	}
 }
 

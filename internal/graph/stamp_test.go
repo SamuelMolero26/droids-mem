@@ -8,6 +8,29 @@ import (
 	"time"
 )
 
+// An unchanged tree must stamp identically every time: a stamp that varies
+// never matches the stored one, so every query would rebuild every graph.
+func TestStamp_UnchangedTreeIsDeterministic(t *testing.T) {
+	repo := t.TempDir()
+	writeFile(t, repo, "go.mod", "module x\n\ngo 1.21\n")
+	writeFile(t, repo, "a.go", "package x\n")
+	writeFile(t, repo, "a/b.go", "package a\n")
+	writeFile(t, repo, "app/page.tsx", "export default function P() { return null }\n")
+	writeFile(t, repo, "tsconfig.json", `{"compilerOptions":{"paths":{"@/*":["./*"]}}}`)
+
+	first, err := stamp(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 5 {
+		if s, err := stamp(repo); err != nil {
+			t.Fatal(err)
+		} else if s != first {
+			t.Fatalf("stamp changed on an unchanged tree: %q then %q", first, s)
+		}
+	}
+}
+
 // TestStamp_TestFileEditMovesStamp pins the Tests:true lockstep requirement
 // (stamp.go's own comment already said this filter must drop "in lockstep"
 // once test indexing is enabled): once the semantic tier loads packages with

@@ -562,6 +562,14 @@ func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, func()
 		releaseLock(lock)
 		return conn, release, fresh, nil
 	}
+	// A graph from another generation was written under a different schema or
+	// indexer semantics: this binary's queries cannot read it, so it is no
+	// fallback. Treat it as absent — the caller waits for a first build rather
+	// than being warm-served a graph that errors or answers wrongly.
+	if conn != nil && !strings.HasPrefix(fresh.Stamp, currentGen+":") {
+		release()
+		conn, release = nil, noopRelease
+	}
 
 	// First build: the caller waits, because there is no prior graph to serve
 	// stale. Who waits and what the build runs on are separate concerns:

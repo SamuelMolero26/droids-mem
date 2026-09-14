@@ -115,21 +115,25 @@ func skipDir(name string) bool {
 // deterministic digest over each input's repo-relative path, size, and mtime.
 // This detects path renames and add/delete swaps without reading source bytes
 // on the query hot path.
+//
+// Inputs are hashed as they are visited, so memory stays O(1) in the number
+// of files. WalkDir visits in lexical order, which makes the digest
+// deterministic for a given tree without collecting and sorting the census.
 func stamp(repo string) (string, error) {
 	exts := indexedExtensions()
-	type input struct {
-		path  string
-		size  int64
-		mtime int64
-	}
-	inputs := map[string]input{}
+	h := sha256.New()
+	var count int
+	var size, maxMtime int64
 	add := func(name string, info fs.FileInfo) {
 		rel, err := filepath.Rel(repo, name)
 		if err != nil {
 			rel = name
 		}
-		rel = filepath.ToSlash(rel)
-		inputs[rel] = input{path: rel, size: info.Size(), mtime: info.ModTime().UnixNano()}
+		mtime := info.ModTime().UnixNano()
+		count++
+		size += info.Size()
+		maxMtime = max(maxMtime, mtime)
+		fmt.Fprintf(h, "%s\x00%d\x00%d\x00", filepath.ToSlash(rel), info.Size(), mtime)
 	}
 	err := filepath.WalkDir(repo, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -166,20 +170,8 @@ func stamp(repo string) (string, error) {
 		}
 		add(p, info)
 	}
-	ordered := make([]input, 0, len(inputs))
-	for _, item := range inputs {
-		ordered = append(ordered, item)
-	}
-	slices.SortFunc(ordered, func(a, b input) int { return strings.Compare(a.path, b.path) })
-	h := sha256.New()
-	var size, maxMtime int64
-	for _, item := range ordered {
-		size += item.size
-		maxMtime = max(maxMtime, item.mtime)
-		fmt.Fprintf(h, "%s\x00%d\x00%d\x00", item.path, item.size, item.mtime)
-	}
 	digest := hex.EncodeToString(h.Sum(nil)[:8])
-	return fmt.Sprintf("%s:%d:%d:%d:%s", currentGen, len(ordered), size, maxMtime, digest), nil
+	return fmt.Sprintf("%s:%d:%d:%d:%s", currentGen, count, size, maxMtime, digest), nil
 }
 
 // isModuleFile reports whether name is a Go module manifest whose changes can
