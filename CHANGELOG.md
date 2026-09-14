@@ -74,6 +74,28 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   described the old behaviour.
 
 ### Fixed
+- **`droids-mem upgrade` and the TUI update banner never detected a new
+  release.** The release workflow injects the git tag verbatim
+  (`-X main.version=v1.2.1`), but `release.IsNewer` prepended a second `v`
+  before parsing, so every released binary compared `vv1.2.1` — not valid
+  semver — and silently reported itself up to date. Both sides of the
+  comparison now accept a version with or without the prefix. The existing
+  tests missed this because they only ever passed bare versions; they now
+  cover the prefixed form the release build actually produces.
+- **`droids-mem uninstall --all` could terminate an unrelated process.** It
+  read a PID from `mcp.pid` and signalled it unconditionally, so a daemon that
+  died without clearing the file — plus a PID the OS had since recycled — sent
+  SIGTERM to whatever now held that number. The stop path now runs the same
+  `/identity` HMAC challenge `ensure-server` uses against port squatters, and
+  signals nothing unless a droids-mem holding the current token answers.
+  Unverified, it reports `not_verified`, leaves the process alone, and keeps
+  the pidfile rather than hiding the inconsistency.
+- **`droids-mem upgrade` downloads are now bounded.** The metadata and checksum
+  requests carry the same deadline the TUI already used, the asset transfer has
+  its own longer one, and the download stops at a 64 MB cap — the checksum only
+  rejects bad bytes once they are already on disk, so it was never the thing
+  bounding disk use. The command's download and checksum paths have unit tests
+  for the first time.
 - **A repo that stops type-checking no longer blanks the whole code graph.**
   Previously the first package with a type error aborted the entire build and
   every query fell back to the last good graph, marked stale — so one typo in
