@@ -12,6 +12,15 @@ func TestIsNewer(t *testing.T) {
 		{"1.2.1", "1.2.0", false}, // ahead of latest (local dev build)
 		{"1.2.1", "not-a-version", false},
 		{"not-a-version", "1.2.1", false},
+
+		// Release builds inject the tag verbatim ("-X main.version=v1.2.1"),
+		// so current arrives WITH the "v". Both sides must accept either form.
+		{"v1.2.1", "1.3.0", true},
+		{"v1.2.1", "v1.3.0", true},
+		{"1.2.1", "v1.3.0", true},
+		{"v1.2.1", "v1.2.1", false},
+		{"v1.2.1", "v1.2.0", false},
+		{"dev", "1.3.0", false},
 	}
 	for _, c := range cases {
 		if got := IsNewer(c.current, c.latest); got != c.want {
