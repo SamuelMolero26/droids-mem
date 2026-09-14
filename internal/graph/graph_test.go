@@ -557,10 +557,10 @@ func TestPackageSurface_ExcludesTestSymbols(t *testing.T) {
 			t.Errorf("_test.go symbol %s leaked into the package surface: %v", leaked, names)
 		}
 	}
-	if resp.Tests != 2 {
-		t.Errorf("Tests = %d, want 2 (TestReal + HelperFixture)", resp.Tests)
+	if resp.Tests != 3 {
+		t.Errorf("Tests = %d, want 3 (TestReal + HelperFixture + newFixture)", resp.Tests)
 	}
-	if resp.Unexported == 0 {
-		t.Error("unexported_count should still count helper()")
+	if resp.Unexported != 1 {
+		t.Errorf("Unexported = %d, want 1 (helper only — newFixture is a test symbol)", resp.Unexported)
 	}
 }

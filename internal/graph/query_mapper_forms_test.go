@@ -208,6 +208,28 @@ func TestMapperTestFiles_CountedAndDisclosed(t *testing.T) {
 	}
 }
 
+// TestPackageHint_MapperWithNoExportedRows pins the tier choice to the package,
+// not to the listed rows. A Python module with only _private defs lists
+// nothing, and deciding the tier from an empty row set fell back to the Go
+// wording — promising test symbols are re-queryable, which is false here.
+func TestPackageHint_MapperWithNoExportedRows(t *testing.T) {
+	repo := t.TempDir()
+	writeFile(t, filepath.Join(repo, "app"), "hidden.py", "def _hidden():\n    return 1\n")
+	m := NewManager(filepath.Join(t.TempDir(), "graphs"))
+	t.Cleanup(m.Close)
+
+	resp, err := m.Package(context.Background(), PackageRequest{Repo: repo, Package: "app.hidden"})
+	if err != nil {
+		t.Fatalf("Package: %v", err)
+	}
+	if len(resp.Symbols) != 0 {
+		t.Fatalf("fixture must list no symbols, got %v", resp.Symbols)
+	}
+	if resp.Hint != pkgSymbolsLimitMapper {
+		t.Errorf("mapper package with no listed rows got hint %q, want the mapper wording", resp.Hint)
+	}
+}
+
 // TestGoRepo_NeverReportsTestsSkipped keeps the two policies from bleeding
 // into each other: the Go tier indexes its test declarations, so a pure Go
 // repo must pay nothing for the mapper tier's disclosure.

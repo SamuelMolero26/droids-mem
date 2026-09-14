@@ -13,3 +13,7 @@ func TestReal(t *testing.T) {
 // HelperFixture is a second exported _test.go symbol, so the tests count is
 // distinguishable from "exactly one".
 func HelperFixture() {}
+
+// newFixture is an unexported _test.go symbol: it belongs in the tests count,
+// not the unexported count, so the two partition what the surface omits.
+func newFixture() int { return Real() }

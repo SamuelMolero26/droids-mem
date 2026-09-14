@@ -842,8 +842,9 @@ type PackageResponse struct {
 	Package    string          `json:"package"`
 	Symbols    []PackageSymbol `json:"symbols"`
 	Unexported int             `json:"unexported_count"`
-	// Tests counts exported _test.go declarations, which Symbols deliberately
-	// excludes. They are indexed (packages.Load runs with Tests:true) and stay
+	// Tests counts _test.go declarations (exported or not), which Symbols
+	// deliberately excludes and Unexported does not overlap, so rows +
+	// Unexported + Tests partition the package. They are indexed (packages.Load runs with Tests:true) and stay
 	// queryable by name through graph_symbol, but they are never rows here: on
 	// a real package they outnumber the API ~10:1 and, sorting first under
 	// `ORDER BY file, line`, they consumed the whole maxPkgSymbols cap and
@@ -863,18 +864,30 @@ type PackageResponse struct {
 // '%_test.go' would also match "mytest.go".
 const isTestFile = `file LIKE '%\_test.go' ESCAPE '\'`
 
-// pkgCounts returns the three scalars a package surface reports alongside its
-// rows — unexported, exported-in-tests, and the true exported non-test total —
-// in one pass, for either resolution tier's WHERE clause.
-func pkgCounts(ctx context.Context, conn *sql.DB, where string, args []any) (unexported, tests, total int, err error) {
+// pkgCount holds the scalars a package surface reports alongside its rows.
+// mapper is decided from every row in the package, not the listed ones: a
+// module with no exported symbols still needs the tier-correct hint.
+type pkgCount struct {
+	unexported, tests, total int
+	mapper                   bool
+}
+
+// pkgCounts computes pkgCount in one pass, for either resolution tier's WHERE
+// clause.
+func pkgCounts(ctx context.Context, conn *sql.DB, where string, args []any) (pkgCount, error) {
 	// where is a compile-time literal or placeholder ORs, never user text.
 	q := `SELECT
-		COUNT(CASE WHEN exported = 0 THEN 1 END),
-		COUNT(CASE WHEN exported = 1 AND ` + isTestFile + ` THEN 1 END),
-		COUNT(CASE WHEN exported = 1 AND NOT ` + isTestFile + ` THEN 1 END)
+		COUNT(CASE WHEN exported = 0 AND NOT ` + isTestFile + ` THEN 1 END),
+		COUNT(CASE WHEN ` + isTestFile + ` THEN 1 END),
+		COUNT(CASE WHEN exported = 1 AND NOT ` + isTestFile + ` THEN 1 END),
+		COUNT(CASE WHEN file LIKE '%.go' THEN 1 END)
 		FROM symbols WHERE ` + where
-	err = conn.QueryRowContext(ctx, q, args...).Scan(&unexported, &tests, &total)
-	return unexported, tests, total, err
+	var c pkgCount
+	var goRows int
+	err := conn.QueryRowContext(ctx, q, args...).Scan(&c.unexported, &c.tests, &c.total, &goRows)
+	// ponytail: tiers are disjoint per package, so "no .go rows" is the mapper.
+	c.mapper = goRows == 0
+	return c, err
 }
 
 // resolvePackage maps a user-supplied package name onto a real `package`
@@ -978,10 +991,11 @@ func (m *Manager) Package(ctx context.Context, req PackageRequest) (*PackageResp
 	// First tier: exact or suffix (preserves Go and Python leaf behavior).
 	if resolved, err := resolvePackage(ctx, conn, req.Package); err == nil {
 		resp := &PackageResponse{Repo: req.Repo, Freshness: fresh, Package: resolved}
-		var total int
-		if resp.Unexported, resp.Tests, total, err = pkgCounts(ctx, conn, `package = ?`, []any{resolved}); err != nil {
+		var counts pkgCount
+		if counts, err = pkgCounts(ctx, conn, `package = ?`, []any{resolved}); err != nil {
 			return nil, err
 		}
+		resp.Unexported, resp.Tests = counts.unexported, counts.tests
 		rows, err := conn.QueryContext(ctx, `SELECT qname, kind, signature, doc, file, line FROM symbols
 			WHERE package = ? AND exported = 1 AND NOT `+isTestFile+` ORDER BY file, line LIMIT ?`,
 			resolved, maxPkgSymbols+1)
@@ -1004,9 +1018,9 @@ func (m *Manager) Package(ctx context.Context, req PackageRequest) (*PackageResp
 		if len(resp.Symbols) > maxPkgSymbols {
 			resp.Symbols = resp.Symbols[:maxPkgSymbols]
 			resp.Truncated = true
-			resp.SymbolsTotal = total
+			resp.SymbolsTotal = counts.total
 		}
-		resp.Hint = packageHint(fresh, resp.Symbols)
+		resp.Hint = packageHint(fresh, counts.mapper)
 		return resp, nil
 	} else if !errors.Is(err, ErrNotFound) {
 		return nil, err
@@ -1026,10 +1040,11 @@ func (m *Manager) Package(ctx context.Context, req PackageRequest) (*PackageResp
 	}
 	resp := &PackageResponse{Repo: req.Repo, Freshness: fresh, Package: pkgNorm}
 	// Counts across the aggregated directory.
-	var symbolsTotal int
-	if resp.Unexported, resp.Tests, symbolsTotal, err = pkgCounts(ctx, conn, where, args); err != nil {
+	counts, err := pkgCounts(ctx, conn, where, args)
+	if err != nil {
 		return nil, err
 	}
+	resp.Unexported, resp.Tests = counts.unexported, counts.tests
 	sq := `SELECT qname, kind, signature, doc, file, line FROM symbols WHERE ` + where + ` AND exported = 1 AND NOT ` + isTestFile + ` ORDER BY file, line LIMIT ?` // #nosec G202 -- see above
 	sargs := append(append([]any{}, args...), maxPkgSymbols+1)
 	rows, err := conn.QueryContext(ctx, sq, sargs...)
@@ -1052,20 +1067,17 @@ func (m *Manager) Package(ctx context.Context, req PackageRequest) (*PackageResp
 	if len(resp.Symbols) > maxPkgSymbols {
 		resp.Symbols = resp.Symbols[:maxPkgSymbols]
 		resp.Truncated = true
-		resp.SymbolsTotal = symbolsTotal
+		resp.SymbolsTotal = counts.total
 	}
-	resp.Hint = packageHint(fresh, resp.Symbols)
+	resp.Hint = packageHint(fresh, counts.mapper)
 	return resp, nil
 }
 
-// packageHint assembles a package surface's hint, picking the tier-correct
-// exclusion wording from the symbols actually being returned. Tiers are
-// disjoint per package (a package is one language), so the first row settles
-// it; an empty package gets the Go wording, which promises nothing it cannot
-// keep because there is nothing to caveat.
-func packageHint(fresh Freshness, syms []PackageSymbol) string {
+// packageHint assembles a package surface's hint with the tier-correct
+// exclusion wording (see pkgCount.mapper).
+func packageHint(fresh Freshness, mapper bool) string {
 	limit := pkgSymbolsLimitGo
-	if len(syms) > 0 && symbolPrecision(syms[0].File) == precisionSyntactic {
+	if mapper {
 		limit = pkgSymbolsLimitMapper
 	}
 	var hints []string
