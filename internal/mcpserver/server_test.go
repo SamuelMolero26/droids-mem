@@ -90,7 +90,7 @@ func TestIdentityProof(t *testing.T) {
 
 func TestIdentityHandler(t *testing.T) {
 	const token = "tok-xyz"
-	h := identityHandler(token)
+	h := identityHandler(token, "v9.9.9")
 
 	t.Run("empty nonce is rejected", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/identity", nil)
@@ -123,6 +123,7 @@ func TestIdentityHandler(t *testing.T) {
 		type identity struct {
 			Server   string `json:"server"`
 			Proof    string `json:"proof"`
+			Version  string `json:"version"`
 			Pid      int    `json:"pid"`
 			PidProof string `json:"pid_proof"`
 		}
@@ -130,7 +131,7 @@ func TestIdentityHandler(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 			t.Fatalf("decode body %q: %v", rec.Body.String(), err)
 		}
-		want := identity{ServerName, IdentityProof(token, "n1"),
+		want := identity{ServerName, IdentityProof(token, "n1"), "v9.9.9",
 			os.Getpid(), IdentityPidProof(token, "n1", os.Getpid())}
 		if got != want {
 			t.Errorf("identity = %+v, want %+v", got, want)
