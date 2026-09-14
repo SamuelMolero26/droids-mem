@@ -89,11 +89,8 @@ func TestIdentityProof(t *testing.T) {
 }
 
 func TestIdentityHandler(t *testing.T) {
-	const (
-		token   = "tok-xyz"
-		version = "v9.9.9"
-	)
-	h := identityHandler(token, version)
+	const token = "tok-xyz"
+	h := identityHandler(token, "v9.9.9")
 
 	t.Run("empty nonce is rejected", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/identity", nil)
@@ -134,7 +131,7 @@ func TestIdentityHandler(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 			t.Fatalf("decode body %q: %v", rec.Body.String(), err)
 		}
-		want := identity{ServerName, IdentityProof(token, "n1"), version,
+		want := identity{ServerName, IdentityProof(token, "n1"), "v9.9.9",
 			os.Getpid(), IdentityPidProof(token, "n1", os.Getpid())}
 		if got != want {
 			t.Errorf("identity = %+v, want %+v", got, want)
@@ -244,7 +241,9 @@ func TestIdentityPidProof(t *testing.T) {
 	// Independently recomputed HMAC — locks the construction so the stop path
 	// and the server can never drift on it.
 	want := func(nonce string, pid int) string {
-		mac := hmac.New(sha256.New, []byte(token))
+		kmac := hmac.New(sha256.New, []byte(token))
+		kmac.Write([]byte("droids-mem/pid_proof"))
+		mac := hmac.New(sha256.New, kmac.Sum(nil))
 		mac.Write([]byte(nonce + ":" + strconv.Itoa(pid)))
 		return hex.EncodeToString(mac.Sum(nil))
 	}
@@ -252,19 +251,14 @@ func TestIdentityPidProof(t *testing.T) {
 	if got := IdentityPidProof(token, "n1", 42); got != want("n1", 42) {
 		t.Fatalf("pid proof = %q, want %q", got, want("n1", 42))
 	}
-	// The PID is what this proof adds over IdentityProof: it must move it.
-	if IdentityPidProof(token, "n1", 42) == IdentityPidProof(token, "n1", 43) {
-		t.Fatal("different pids produced identical proofs")
-	}
-	if IdentityPidProof(token, "n1", 42) == IdentityPidProof(token, "n2", 42) {
-		t.Fatal("different nonces produced identical proofs")
-	}
-	if IdentityPidProof(token, "n1", 42) == IdentityPidProof("other", "n1", 42) {
-		t.Fatal("different tokens produced identical proofs")
-	}
 	// Must not collide with the PID-less proof, or a caller could accept one
 	// where it required the other.
 	if IdentityPidProof(token, "n1", 42) == IdentityProof(token, "n1") {
 		t.Fatal("pid proof collided with the plain proof")
+	}
+	// A relay can ask any server for the plain proof of a crafted nonce. If
+	// that equals a pid proof, the relay forges a PID of its choosing.
+	if IdentityPidProof(token, "n1", 42) == IdentityProof(token, "n1:42") {
+		t.Fatal("pid proof is obtainable as the plain proof of nonce+\":\"+pid")
 	}
 }

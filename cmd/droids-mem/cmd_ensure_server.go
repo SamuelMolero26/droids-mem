@@ -130,24 +130,24 @@ func ping(url string, timeout time.Duration) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-// serverIdentity is what a verified /identity answer established about the
-// listener. Pid is 0 when the server did not prove one: it predates PID
-// binding, so it established the token and nothing about which process it is.
-type serverIdentity struct {
-	Version string
-	Pid     int
-}
-
 // verifyServer challenges the process behind base with a fresh nonce and
 // checks that its /identity proof equals HMAC-SHA256(token, nonce). Only a
 // holder of the same bearer token can answer correctly, so success means the
 // listener really is droids-mem serve (or an equivalent token holder) — not
 // an arbitrary process that grabbed the port to harvest tokens.
 //
-// A returned Pid is proven, not merely reported: it is bound into a second
+// serverIdentity is what a listener proved on /identity. Version is empty when
+// the server predates reporting one.
+type serverIdentity struct {
+	Pid     int
+	Version string
+}
+
+// The returned Pid is proven, not merely reported: it is bound into a second
 // HMAC, so a process relaying another server's answers cannot substitute a PID
-// of its choosing. Callers that signal must require it; callers that only ask
-// "is a server up" must ignore it, or a healthy older daemon reads as hostile.
+// of its choosing. It is 0 when the server predates PID binding and proved
+// none. Callers that signal must require it; callers that only ask "is a
+// server up" must ignore it, or a healthy older daemon reads as hostile.
 func verifyServer(base, token string, timeout time.Duration) (serverIdentity, error) {
 	nonce := ulid.Make().String()
 	client := &http.Client{Timeout: timeout}
@@ -177,15 +177,14 @@ func verifyServer(base, token string, timeout time.Duration) (serverIdentity, er
 	if !hmac.Equal([]byte(payload.Proof), []byte(want)) {
 		return serverIdentity{}, fmt.Errorf("identity proof mismatch (server=%q)", payload.Server)
 	}
-	id := serverIdentity{Version: payload.Version}
-	if payload.PidProof != "" {
-		wantPid := mcpserver.IdentityPidProof(token, nonce, payload.Pid)
-		if !hmac.Equal([]byte(payload.PidProof), []byte(wantPid)) {
-			return serverIdentity{}, fmt.Errorf("identity pid proof mismatch (server=%q, pid=%d)", payload.Server, payload.Pid)
-		}
-		id.Pid = payload.Pid
+	if payload.PidProof == "" {
+		return serverIdentity{Version: payload.Version}, nil
 	}
-	return id, nil
+	wantPid := mcpserver.IdentityPidProof(token, nonce, payload.Pid)
+	if !hmac.Equal([]byte(payload.PidProof), []byte(wantPid)) {
+		return serverIdentity{}, fmt.Errorf("identity pid proof mismatch (server=%q, pid=%d)", payload.Server, payload.Pid)
+	}
+	return serverIdentity{Pid: payload.Pid, Version: payload.Version}, nil
 }
 
 // staleAction is what to do about a daemon that already answers on the
