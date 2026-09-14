@@ -45,6 +45,8 @@ func RenderSymbol(r *SymbolResponse) string {
 	writeNeighbors(&b, "matches", r.Matches)
 	writeNeighbors(&b, "implementers", r.Implementers)
 	writeNeighbors(&b, "satisfies", r.Satisfies)
+	writeNavigationDestinations(&b, r.Destinations)
+	writeUnresolvedNavigationDestinations(&b, r.UnresolvedDestinations)
 
 	// Caller-fidelity splits (issue #48/#49, decision 7a/2 amended): response-
 	// level only — no per-row test/dispatch field exists on Neighbor.
@@ -73,6 +75,48 @@ func RenderSymbol(r *SymbolResponse) string {
 		fmt.Fprintf(&b, "hint: %s\n", r.Hint)
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func writeNavigationDestinations(b *strings.Builder, destinations []NavigationDestination) {
+	if len(destinations) == 0 {
+		return
+	}
+	keys := []string{"operation", "evidence", "certainty", "raw", "destination", "route", "target_file", "target_qname", "loc"}
+	b.WriteString(header("destinations", len(destinations), keys))
+	for _, destination := range destinations {
+		b.WriteString(row(
+			destination.Operation,
+			destination.Evidence,
+			destination.Certainty,
+			destination.RawDestination,
+			destination.Destination,
+			destination.Route,
+			destination.TargetFile,
+			destination.TargetQName,
+			loc(destination.File, destination.Line),
+		))
+	}
+}
+
+func writeUnresolvedNavigationDestinations(
+	b *strings.Builder,
+	destinations []UnresolvedNavigationDestination,
+) {
+	if len(destinations) == 0 {
+		return
+	}
+	keys := []string{"operation", "evidence", "raw", "destination", "reason", "loc"}
+	b.WriteString(header("unresolved_destinations", len(destinations), keys))
+	for _, destination := range destinations {
+		b.WriteString(row(
+			destination.Operation,
+			destination.Evidence,
+			destination.RawDestination,
+			destination.Destination,
+			destination.Reason,
+			loc(destination.File, destination.Line),
+		))
+	}
 }
 
 // RenderPackage encodes a scope-anchored (package surface) response.

@@ -12,10 +12,11 @@ import (
 )
 
 const (
-	maxDepth      = 5
-	maxPathDepth  = 10
-	maxMatches    = 20
-	maxPkgSymbols = 200
+	maxDepth             = 5
+	maxPathDepth         = 10
+	maxMatches           = 20
+	maxPkgSymbols        = 200
+	maxNavigationResults = 32
 	// Hints are surface-neutral (ADR-0027): they name the action + the qname to
 	// re-query with, never a specific invocation ("graph_symbol" vs
 	// "droids-mem graph symbol"). The agent already holds the surface it just
@@ -66,6 +67,13 @@ const (
 	// Symbol() (design D5/D7). Attached only when Precision == "syntactic";
 	// a "resolved" (Go) answer needs no caveat.
 	syntacticHint = "this symbol is mapper-tier (non-Go): its callers/callees are syntactically resolved from names and lexical containment, not type-checked — treat an ambiguous call site's candidates as approximate, not exact"
+	// directiveHints surface Next.js file-level pragmas that sit outside
+	// OutlineSymbol.Range (P3). Detected by detectDirective's walk of the
+	// JavaScript directive prologue (mapper_scan.go) and persisted to
+	// file_directives; appended via the same hint chain as
+	// syntacticHint/carriedHint.
+	clientDirectiveHint = "client component (\"use client\" directive)"
+	serverDirectiveHint = "server component (\"use server\" directive)"
 	// precisionResolved/precisionSyntactic name SymbolResponse.Precision's two
 	// values (design D7). The rest of the mapper tier (edgeSet, mapper_calls.go)
 	// uses the same two values as bare string literals; named here because
@@ -109,6 +117,34 @@ type Neighbor struct {
 	File      string `json:"file"`
 	Line      int    `json:"line"`
 	Depth     int    `json:"depth"`
+}
+
+// NavigationDestination is a proven Next.js navigation outcome projected for
+// the exact source symbol. Precision remains response-level and syntactic;
+// evidence and certainty describe independent properties of this site.
+type NavigationDestination struct {
+	Operation      string `json:"operation"`
+	Evidence       string `json:"evidence"`
+	Certainty      string `json:"certainty"`
+	RawDestination string `json:"raw_destination"`
+	Destination    string `json:"destination"`
+	Route          string `json:"route"`
+	TargetFile     string `json:"target_file"`
+	TargetQName    string `json:"target_qname,omitempty"`
+	File           string `json:"file"`
+	Line           int    `json:"line"`
+}
+
+// UnresolvedNavigationDestination keeps a proven navigation site visible when
+// its destination cannot be matched safely.
+type UnresolvedNavigationDestination struct {
+	Operation      string `json:"operation"`
+	Evidence       string `json:"evidence"`
+	RawDestination string `json:"raw_destination"`
+	Destination    string `json:"destination,omitempty"`
+	Reason         string `json:"reason"`
+	File           string `json:"file"`
+	Line           int    `json:"line"`
 }
 
 // SymbolResponse answers a symbol-anchored query.
@@ -165,8 +201,10 @@ type SymbolResponse struct {
 	// Satisfies lists the repo-defined interfaces a concrete type implements.
 	// Absent means it satisfies none (no *_total: a concrete type satisfies few
 	// interfaces, never near the neighbor cap, so the list is its own count).
-	Satisfies []Neighbor `json:"satisfies,omitempty"`
-	Hint      string     `json:"hint,omitempty"`
+	Satisfies              []Neighbor                        `json:"satisfies,omitempty"`
+	Destinations           []NavigationDestination           `json:"destinations,omitempty"`
+	UnresolvedDestinations []UnresolvedNavigationDestination `json:"unresolved_destinations,omitempty"`
+	Hint                   string                            `json:"hint,omitempty"`
 }
 
 // addHint appends extra to the "; "-joined hint chain h, empty-safe.
@@ -177,12 +215,22 @@ func addHint(h, extra string) string {
 	return h + "; " + extra
 }
 
+// escapeLike escapes LIKE wildcards so a literal '_' or '%' in package/qname
+// does not become a wildcard (W4). Backslash is escaped first so the
+// subsequent replacements do not double-escape.
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
+
 // mapperFileExtensions is the syntactic (mapper) tier's extension set,
 // mirroring mapperLanguages (mapper.go) but keyed by extension instead of
 // grammar name — the only lookup Precision derivation needs. Any extension
 // outside this set (in practice, only ".go") is the resolved tier.
 var mapperFileExtensions = map[string]bool{
-	".ts": true, ".tsx": true, ".js": true, ".jsx": true, ".mjs": true, ".py": true,
+	".ts": true, ".tsx": true, ".js": true, ".jsx": true, ".mjs": true, ".cjs": true, ".cts": true, ".mts": true, ".py": true,
 }
 
 // symbolPrecision derives a symbol's precision class from its OWN file
@@ -270,6 +318,15 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	resp.Symbol = &info
 	resp.Carried = slices.Contains(fresh.carriedUnits, info.Package)
 	resp.Precision = symbolPrecision(info.File)
+	var navTruncated bool
+	resp.Destinations, resp.UnresolvedDestinations, navTruncated, err = navigationRows(ctx, conn, id)
+	if err != nil {
+		return nil, err
+	}
+	if navTruncated {
+		resp.Truncated = true
+		resp.Hint = addHint(resp.Hint, "navigation results are a partial slice at the cap")
+	}
 
 	var blastHint string // see blastTypeHint/blastRefHint above for the why
 	switch info.Kind {
@@ -331,6 +388,16 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	}
 	if resp.Precision == precisionSyntactic {
 		resp.Hint = addHint(resp.Hint, syntacticHint)
+	}
+	directive, err := directiveForFile(ctx, conn, info.File)
+	if err != nil {
+		return nil, err
+	}
+	switch directive {
+	case "client":
+		resp.Hint = addHint(resp.Hint, clientDirectiveHint)
+	case "server":
+		resp.Hint = addHint(resp.Hint, serverDirectiveHint)
 	}
 
 	depth := min(max(req.Depth, 1), maxDepth)
@@ -433,14 +500,15 @@ func callerSplit(ctx context.Context, conn *sql.DB, id int64) (total, inTests, v
 // instead of the symbol's body, callers, and callees.
 func findSymbol(ctx context.Context, conn *sql.DB, name string) ([]Neighbor, error) {
 	suffix := strings.TrimPrefix(name, ".")
+	escapedSuffix := escapeLike(suffix)
 	queries := []struct {
 		where string
 		arg   string
 	}{
 		{"qname = ?", name},
 		{"name = ?", name},
-		{"qname LIKE ?", "%." + suffix},
-		{"qname LIKE ?", "%:" + suffix},
+		{"qname LIKE ? ESCAPE '\\'", "%." + escapedSuffix},
+		{"qname LIKE ? ESCAPE '\\'", "%:" + escapedSuffix},
 	}
 	for _, q := range queries {
 		rows, err := conn.QueryContext(ctx, `SELECT qname, signature, file, line FROM symbols
@@ -513,13 +581,11 @@ func transitiveCallers(ctx context.Context, conn *sql.DB, id int64) (int, error)
 // typeHasMethods reports whether the type named by qname has any indexed
 // methods, so a blast-radius query on it can point at them (a method's qname is
 // the type's qname + "." + method). A method-less type has no call-graph handle.
-// ponytail: LIKE prefix left unescaped — a '_' in the qname is a LIKE wildcard,
-// but a false match only swaps in the method-redirect hint (the agent finds no
-// methods and self-corrects), never a wrong answer, so no ESCAPE clause.
 func typeHasMethods(ctx context.Context, conn *sql.DB, qname string) (bool, error) {
 	var exists int
+	esc := escapeLike(qname)
 	err := conn.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM symbols
-		WHERE kind = 'method' AND qname LIKE ?)`, qname+".%").Scan(&exists)
+		WHERE kind = 'method' AND qname LIKE ? ESCAPE '\')`, esc+".%").Scan(&exists)
 	return exists == 1, err
 }
 
@@ -662,6 +728,25 @@ func idArgs(ids []int64) []any {
 	return args
 }
 
+// directiveForFile returns the file-level directive ("client" | "server") for
+// file, or "" when the file has none.
+//
+// Only ErrNoRows is swallowed. A graph.db predating the file_directives table
+// cannot reach here: stampGen hashes the schema DDL into currentGen, so an
+// older-schema db fails ensureFresh's stamp check and is rebuilt before any
+// query runs — tolerating a missing table would be a permanently dead branch
+// that also hid real query failures behind a silently absent hint.
+func directiveForFile(ctx context.Context, conn *sql.DB, file string) (string, error) {
+	var d string
+	switch err := conn.QueryRowContext(ctx, `SELECT directive FROM file_directives WHERE file = ?`, file).Scan(&d); {
+	case errors.Is(err, sql.ErrNoRows):
+		return "", nil // no directive in this file
+	case err != nil:
+		return "", err
+	}
+	return d, nil
+}
+
 // callPath BFSes caller→callee edges from start to the symbol named target,
 // returning the shortest call chain including both endpoints.
 func callPath(ctx context.Context, conn *sql.DB, start int64, targetQName string) ([]Neighbor, error) {
@@ -763,7 +848,7 @@ type PackageResponse struct {
 // rewritten to '.'. Shortest match wins per rung — the old tie-break.
 func resolvePackage(ctx context.Context, conn *sql.DB, name string) (string, error) {
 	const q = `SELECT package FROM symbols
-		WHERE package = ? OR package LIKE ? OR package LIKE ?
+		WHERE package = ? OR package LIKE ? ESCAPE '\' OR package LIKE ? ESCAPE '\'
 		ORDER BY length(package) LIMIT 1`
 
 	pkg := strings.Trim(strings.TrimSpace(name), "/")
@@ -774,8 +859,9 @@ func resolvePackage(ctx context.Context, conn *sql.DB, name string) (string, err
 		if cand == "" {
 			continue
 		}
+		esc := escapeLike(cand)
 		var resolved string
-		switch err := conn.QueryRowContext(ctx, q, cand, "%/"+cand, "%."+cand).Scan(&resolved); {
+		switch err := conn.QueryRowContext(ctx, q, cand, "%/"+esc, "%."+esc).Scan(&resolved); {
 		case err == nil:
 			return resolved, nil
 		case !errors.Is(err, sql.ErrNoRows):
@@ -816,20 +902,21 @@ func packageDirWhere(pkg string) (string, []any) {
 	var clauses []string
 	var args []any
 	for _, cand := range usable {
+		esc := escapeLike(cand)
 		clauses = append(clauses, "package = ?")
 		args = append(args, cand)
-		clauses = append(clauses, "package LIKE ? || '/%'")
-		args = append(args, cand)
-		clauses = append(clauses, "package LIKE '%/' || ?")
-		args = append(args, cand)
-		clauses = append(clauses, "package LIKE '%/' || ? || '/%'")
-		args = append(args, cand)
-		clauses = append(clauses, "package LIKE ? || '.%'")
-		args = append(args, cand)
-		clauses = append(clauses, "package LIKE '%.' || ?")
-		args = append(args, cand)
-		clauses = append(clauses, "package LIKE '%.' || ? || '.%'")
-		args = append(args, cand)
+		clauses = append(clauses, "package LIKE (? || '/%') ESCAPE '\\'")
+		args = append(args, esc)
+		clauses = append(clauses, "package LIKE ('%/' || ?) ESCAPE '\\'")
+		args = append(args, esc)
+		clauses = append(clauses, "package LIKE ('%/' || ? || '/%') ESCAPE '\\'")
+		args = append(args, esc)
+		clauses = append(clauses, "package LIKE (? || '.%') ESCAPE '\\'")
+		args = append(args, esc)
+		clauses = append(clauses, "package LIKE ('%.' || ?) ESCAPE '\\'")
+		args = append(args, esc)
+		clauses = append(clauses, "package LIKE ('%.' || ? || '.%') ESCAPE '\\'")
+		args = append(args, esc)
 	}
 	return "(" + strings.Join(clauses, " OR ") + ")", args
 }

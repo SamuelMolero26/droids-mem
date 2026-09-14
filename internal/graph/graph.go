@@ -76,6 +76,41 @@ CREATE TABLE imports (
   precision       TEXT NOT NULL,
   PRIMARY KEY (importer_file, imported_module)
 ) WITHOUT ROWID;
+-- Next.js file-level directive (P3): a "use client" / "use server" pragma in the
+-- file's directive prologue, outside any OutlineSymbol.Range — detected by
+-- detectDirective (mapper_scan.go), which walks the parsed prologue rather than
+-- scanning a byte prefix, so comments, a shebang, and unrelated string
+-- directives before it are handled the way JavaScript defines them.
+-- One row per file that has a directive; absence means no directive.
+CREATE TABLE file_directives (
+  file      TEXT PRIMARY KEY,
+  directive TEXT NOT NULL
+) WITHOUT ROWID;
+-- Next.js App Router endpoints are stable route identities, separate from
+-- symbols because an anonymous page may have no symbol row at all.
+CREATE TABLE routes (
+  id           INTEGER PRIMARY KEY,
+  pattern      TEXT NOT NULL,
+  kind         TEXT NOT NULL,
+  file         TEXT NOT NULL,
+  target_qname TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX idx_routes_pattern ON routes(pattern);
+-- Navigation is parallel to call edges. A nullable route_id records explicit
+-- unresolved evidence without inventing a symbol-to-symbol call relationship.
+CREATE TABLE navigations (
+  source_symbol  INTEGER NOT NULL,
+  ordinal        INTEGER NOT NULL,
+  operation      TEXT NOT NULL,
+  evidence       TEXT NOT NULL,
+  raw_destination TEXT NOT NULL,
+  destination    TEXT NOT NULL,
+  certainty      TEXT NOT NULL,
+  route_id       INTEGER,
+  reason         TEXT NOT NULL DEFAULT '',
+  line           INTEGER NOT NULL,
+  PRIMARY KEY (source_symbol, ordinal)
+) WITHOUT ROWID;
 -- Ranks symbols by relevance to a free-text task phrase (the graph_symbol
 -- search fallback). rowid == symbols.id, so a MATCH joins straight back.
 -- Populated wholesale in writeGraphDB — the graph never updates in place, so
@@ -526,6 +561,14 @@ func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, func()
 	if err == nil && fresh.Stamp == current {
 		releaseLock(lock)
 		return conn, release, fresh, nil
+	}
+	// A graph from another generation was written under a different schema or
+	// indexer semantics: this binary's queries cannot read it, so it is no
+	// fallback. Treat it as absent — the caller waits for a first build rather
+	// than being warm-served a graph that errors or answers wrongly.
+	if conn != nil && !strings.HasPrefix(fresh.Stamp, currentGen+":") {
+		release()
+		conn, release = nil, noopRelease
 	}
 
 	// First build: the caller waits, because there is no prior graph to serve

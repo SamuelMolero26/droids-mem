@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -21,9 +22,13 @@ func TestMapperCarryTrigger(t *testing.T) {
 		defCount, prevDefCount int
 		want                   bool
 	}{
-		{"ERROR nodes without def-count halving does not carry", true, 4, 6, false}, // 4 !< 3
-		{"ERROR nodes with halved def count carries", true, 2, 6, true},             // 2 < 3
+		{"ERROR nodes without def-count halving does not carry", true, 4, 6, false}, // 8 !< 6
+		{"ERROR nodes with halved def count carries", true, 2, 6, true},             // 4 < 6
 		{"zero ERROR nodes never carries, even with a halved count", false, 1, 6, false},
+		{"unreadable one-symbol file carries (0 of 1)", true, 0, 1, true},       // 0 < 1
+		{"three-symbol file reduced to one carries (1 of 3)", true, 1, 3, true}, // 2 < 3
+		{"exact half does not carry (1 of 2)", true, 1, 2, false},               // 2 !< 2
+		{"zero previous defs never carries", true, 0, 0, false},                 // 0 !< 0
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -94,6 +99,94 @@ export function fnF() {}
 	}
 	if !found {
 		t.Errorf("fnB callers = %v, want fnA carried forward as a caller", callersResp.Callers)
+	}
+}
+
+func TestMapperCarry_TriggeredFileCarriesDirective(t *testing.T) {
+	repo := t.TempDir()
+	writeFile(t, repo, "app.ts", `'use client';
+export function fnA() { fnB(); }
+export function fnB() {}
+export function fnC() {}
+export function fnD() {}
+export function fnE() {}
+export function fnF() {}
+`)
+
+	m := managerFor(t)
+	ctx := context.Background()
+	if _, err := m.Index(ctx, repo); err != nil {
+		t.Fatalf("clean generation index: %v", err)
+	}
+
+	writeFile(t, repo, "app.ts", "export function fnA() { fnB(\n")
+	if _, err := m.Index(ctx, repo); err != nil {
+		t.Fatalf("corrupted generation index: %v", err)
+	}
+
+	resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "fnC"})
+	if err != nil {
+		t.Fatalf("Symbol fnC: %v", err)
+	}
+	if !resp.Carried {
+		t.Fatalf("fnC.Carried = false, want true")
+	}
+	if !strings.Contains(resp.Hint, clientDirectiveHint) {
+		t.Errorf("carried fnC hint = %q, want %q", resp.Hint, clientDirectiveHint)
+	}
+	if got := graphMeta(t, m, repo, "carried_units"); got != "app" {
+		t.Errorf("carried_units = %q, want %q", got, "app")
+	}
+	if got, ok := graphDirective(t, m, repo, "app.ts"); !ok || got != "client" {
+		t.Errorf("carried file directive = %q, %v; want client, true", got, ok)
+	}
+}
+
+// An unreadable file carries its last-good symbols and directive. The fixture
+// has a single export — the common page.tsx shape, and the integer-floor edge
+// (0 fresh of 1 previous) that TestMapperCarryTrigger pins arithmetically.
+func TestMapperCarry_UnreadableFileCarriesSymbolsAndDirective(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("file mode cannot make the fixture unreadable")
+	}
+
+	repo := t.TempDir()
+	writeFile(t, repo, "app.ts", `'use client';
+export function fnC() {}
+`)
+	writeFile(t, repo, "keep.ts", "export function keep() {}\n")
+
+	m := managerFor(t)
+	ctx := context.Background()
+	if _, err := m.Index(ctx, repo); err != nil {
+		t.Fatalf("clean generation index: %v", err)
+	}
+
+	appPath := filepath.Join(repo, "app.ts")
+	if err := os.Chmod(appPath, 0); err != nil {
+		t.Skipf("make fixture unreadable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(appPath, 0o600) })
+	if _, err := os.ReadFile(appPath); err == nil {
+		t.Skip("platform still permits reading a mode-000 file")
+	}
+	writeFile(t, repo, "keep.ts", "export function keep() { return 1; }\n")
+	if _, err := m.Index(ctx, repo); err != nil {
+		t.Fatalf("unreadable generation index: %v", err)
+	}
+
+	resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "fnC"})
+	if err != nil {
+		t.Fatalf("Symbol fnC: %v", err)
+	}
+	if !resp.Carried {
+		t.Fatalf("fnC.Carried = false, want true")
+	}
+	if !strings.Contains(resp.Hint, clientDirectiveHint) {
+		t.Errorf("carried fnC hint = %q, want %q", resp.Hint, clientDirectiveHint)
+	}
+	if got, ok := graphDirective(t, m, repo, "app.ts"); !ok || got != "client" {
+		t.Errorf("carried unreadable file directive = %q, %v; want client, true", got, ok)
 	}
 }
 
