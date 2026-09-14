@@ -58,6 +58,19 @@ func TestStopServerStatus_RefusesUnverifiedPid(t *testing.T) {
 	}
 }
 
+// Pid 0 is kill(0) — the whole process group — and also verifyServer's
+// "no PID proven", so it would match a server that predates PID binding.
+func TestStopServerStatus_RejectsNonPositivePid(t *testing.T) {
+	pidPath := stopServerEnv(t)
+	t.Setenv("DROIDS_MEM_MCP_ADDR", identityServer(t, 0, ""))
+	if err := os.WriteFile(pidPath, []byte("0"), 0o600); err != nil {
+		t.Fatalf("write pidfile: %v", err)
+	}
+	if got := stopServerStatus(); !strings.Contains(got, "bad pidfile") {
+		t.Fatalf("stopServerStatus() = %q, want bad pidfile", got)
+	}
+}
+
 // identityServer stands in for a live daemon on a throwaway address.
 // proofToken is the token its pid_proof is computed with; "" omits the field
 // entirely, modelling a server built before PID binding.
@@ -104,12 +117,12 @@ func TestStopServerStatus_SignalsOnlyAProvenPid(t *testing.T) {
 			name:       "listener proves a different pid",
 			pidOffset:  100000,
 			proofToken: "tok_test",
-			wantStatus: "not_verified",
+			wantStatus: "proved pid",
 		},
 		{
 			name:       "listener predates pid binding and proves none",
 			proofToken: "",
-			wantStatus: "predates PID binding",
+			wantStatus: "proved pid 0 (0 = none)",
 		},
 		{
 			// A relaying squatter can forward the nonce for a genuine token
