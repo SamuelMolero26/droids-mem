@@ -186,7 +186,7 @@ jobs:
             echo
             echo '```'
             if [ "$CHANNEL" = beta ]; then
-              echo "curl -fsSL https://raw.githubusercontent.com/SamuelMolero26/droids-mem/main/install.sh | DROIDS_MEM_VERSION=$TAG sh"
+              echo "curl -fsSL https://raw.githubusercontent.com/SamuelMolero26/droids-mem/$TAG/install.sh | DROIDS_MEM_VERSION=$TAG sh"
             else
               echo "brew tap samuelmolero26/tap && brew install droids-mem"
             fi
