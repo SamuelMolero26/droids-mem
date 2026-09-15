@@ -7,242 +7,97 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.3.0-beta.1] — 2026-09-14
+
+Headline: a multi-language code graph with Next.js and JSX awareness, safer
+self-updates and daemon replacement, and provenance-preserving shared memory.
+
 ### Added
-- **`/identity` now reports the serving binary's release `version`**, so a
-  caller holding a newer binary can tell a daemon still running older code from
-  a current one. Its absence is itself the staleness signal, since a server
-  predating this cannot report it.
-- **`droids-mem upgrade`** downloads and installs the latest GitHub release in
-  place: fetches the matching `droids-mem-<tag>-<goos>-<goarch>` asset,
-  verifies it against the release's published SHA256 sidecar, and atomically
-  replaces the running binary. Shows a progress bar on stderr while
-  downloading. Refuses to touch a Homebrew-managed install (Cellar path) and
-  points at `brew upgrade droids-mem` instead.
-- **The TUI now checks for updates on startup.** `droids-mem tui` compares its
-  build version against the latest GitHub release (cached 24h in
-  `~/.droids-mem/update_check` so repeat launches skip the network call) and
-  shows a header banner naming the new version and the `droids-mem upgrade`
-  command when one is available.
-- **The code graph now covers TypeScript, TSX, JavaScript and Python, not just
-  Go.** `graph_symbol` and `graph_package` answer for those languages through a
-  new mapper tier built on tree-sitter, running alongside the Go tier rather
-  than replacing it. The two never mix: no edge joins a Go symbol to a mapper
-  one. What the new tier costs in precision is stated rather than hidden:
-  - Every symbol response carries `precision` — `"resolved"` for a Go answer
-    backed by the type checker, `"syntactic"` for a mapper answer resolved by
-    name. A syntactic answer says so in its hint as well.
-  - Mapper call edges come from a resolution ladder that narrows candidates by
-    receiver arity, enclosing class, imported binding, defining file, then
-    package. A rung that matches nothing falls through *without* narrowing, so
-    a callsite can never resolve to zero candidates — the graph may report a
-    caller that cannot fire, but never misses one that can.
-  - A callsite whose repo-wide fallback exceeds the fan-out cap is labelled in
-    `meta.fanout_capped` alongside its true pre-cap count, never silently
-    truncated.
-  - A mapper file that stops parsing cleanly carries its previous build's
-    symbols and edges forward instead of dropping out of the graph, the same
-    way a Go package that stops type-checking already did.
-  - The `imports` table records module specifiers for the JS family and
-    Python, each with its own explicit precision.
-- **Building a mapper-language graph got roughly 14x faster.** A 200-file
-  TypeScript tree went from 4.6 s and 4.8 GiB of allocation to 290 ms and
-  211 MiB (-93.7% time, -95.7% bytes, -95.4% allocations). Two causes, both
-  found by profiling: a tree-sitter parser was constructed per file, and each
-  one rebuilds its parse tables because they are cached on the parser rather
-  than on the shared language; and parsed trees were never released, so every
-  parse allocated fresh node arenas instead of reusing the pooled ones. The
-  effect is user-visible as wait time — an agent's first `graph_symbol` call
-  on a large TypeScript repo is what pays for a build.
-
-- **Code-graph answers now say how much to trust them.** Three signals, all
-  response-level rather than repeated per row:
-  - `callers_in_tests` splits the caller count, so "89 callers" reads as
-    "5 production, 84 in tests" — the difference between a semantic change and
-    a mechanical one, which a bare total hides.
-  - `callers_via_interface` counts callers reached through interface dispatch.
-    CHA over-approximates on purpose, so a method whose name is shared across
-    many types (`Error`, `String`, `Close`) can report every function in the
-    repo that calls *anything* of that name. That answer is now labelled
-    instead of looking like a genuine hub.
-  - `carried` on a symbol, and `stale_units` on freshness, name the packages
-    whose edges came from the previous build rather than this one.
-    `stale_units` is capped and rendered as `[N of M]`, like every other list
-    on this surface. `carried` carries a hint, because the flag is narrower
-    than it looks: the symbol, its signature and its callers are all freshly
-    analyzed, and only its callees ride on the previous build. Without that,
-    the safe reading is to distrust the whole answer and throw away the fresh
-    caller list a blast-radius query was asking for.
-- `freshness.stale` correspondingly narrows to mean a genuine build failure —
-  a whole-graph fallback — instead of doubling as "some package didn't
-  type-check". The MCP tool descriptions were updated to match; they had
-  described the old behaviour.
-
-### Security
-- **`uninstall --all` only SIGTERMs a daemon that proves it is the pidfile's
-  PID.** A token challenge alone let a recycled PID be signalled. `/identity`
-  now returns `pid` + `pid_proof` (HMAC under a token-derived key); anything
-  unproven is refused with `not_verified` and the pidfile kept.
+- **Checksum-verifying install script** for macOS and Linux on `amd64` and
+  `arm64`. The published install path now downloads a release binary, verifies
+  its SHA-256 sidecar, smoke-tests it, and installs it to `/usr/local/bin` or
+  `~/.local/bin`; `go install ...@latest` is no longer advertised because it
+  cannot produce the release build with the required grammar subset.
+- **Self-update support.** `droids-mem upgrade` downloads the matching release,
+  verifies it, and atomically replaces a non-Homebrew binary. Metadata and
+  checksum requests have deadlines, asset downloads have a 64 MB cap, and
+  Homebrew installs are redirected to `brew upgrade droids-mem`. The TUI checks
+  for stable updates on startup, caches the result for 24 hours, and shows the
+  available version and upgrade command.
+- **Python, TypeScript, TSX, and JavaScript code graphs.** A tree-sitter mapper
+  tier now supplies symbols, imports, call edges, and package surfaces beside
+  the resolved Go graph, without joining edges across tiers. Mapper answers are
+  marked `precision: syntactic`; their resolution ladder narrows by receiver,
+  enclosing class, imported binding, file, and package while retaining an
+  explicitly capped repo-wide fallback.
+  - `graph_symbol` accepts bare names, full qnames, and receiver-qualified forms
+    such as `UserPersonaModel.dominant_persona`.
+  - `graph_package` accepts dotted, slash, bare, leaf, and directory forms and
+    aggregates descendant modules for JavaScript, TypeScript, and Python.
+  - Rendered source fences now match the source language instead of labelling
+    every body as Go.
+- **JSX component call edges.** Opening and self-closing component tags,
+  including member expressions, now contribute callers, call paths, and
+  `transitive_callers`; lowercase HTML and namespaced tags remain excluded.
+- **Next.js App Router navigation results.** Proven `next/link` and
+  `next/navigation` sites resolve bounded literal, constant, concatenated,
+  template, and finite-conditional destinations against the route inventory.
+  Resolved and unresolved destinations are reported separately from call edges,
+  so caller and blast-radius semantics remain unchanged.
+- **Shared-memory authoring provenance.** `authored_at` records when a lesson
+  was originally written while `created_at` remains the local import time.
+  Imports preserve peer origin, clamp future timestamps, exports coarsen the
+  value to a UTC day, and force corrections keep the existing origin. The
+  transactional `v8→v9` migration backfills legacy and archived rows from
+  `created_at`, while shared summaries are fenced from personal retention.
 
 ### Changed
-- **`ensure-server` now replaces a daemon running superseded code.** Nothing
-  restarted it before: `upgrade` replaces the executable on disk and returns,
-  and `ensure-server` reported `already_running` without comparing versions —
-  so a daemon kept serving the old build until the machine rebooted, which made
-  a stale daemon the normal state after every upgrade rather than an edge case.
-  When the running daemon's version differs from the calling binary's *and* it
-  has proven which process it is, `ensure-server` signals it and starts a
-  replacement, reporting `{"status":"restarted","pid":…,"replaced":…}`.
-  Measured at well under a second end-to-end, because `http.Server.Shutdown`
-  closes listeners before draining connections: the replacement binds while the
-  outgoing process is still winding down.
-
-  **Behaviour change**: an agent holding a live MCP stream against the outgoing
-  daemon has that stream closed when the shutdown grace expires. Clients
-  reconnect to the replacement, which is already listening by then.
-
-  A daemon that predates PID binding proves no PID, so there is nothing safe to
-  signal; it is reported on stderr and left running
-  (`{"status":"already_running","stale":true}`) rather than signalled on the
-  strength of a pidfile. That is a one-time transition: every daemon built from
-  this release onward can prove a PID.
+- **Mapper builds now read and parse each file once.** The mapper's performance
+  work was measured in two separate stages on a 200-file fixture: parser pooling
+  and tree release reduced build time from 4.616 s to 290 ms and allocation from
+  4.782 GiB to 210.6 MiB; the later single-parse scan independently reduced
+  295 ms to 142 ms (`-51.88%`) while adding JSX extraction.
+- **Code-graph answers expose their trust boundary.** `callers_in_tests`,
+  `callers_via_interface`, `carried`, `stale_units`, `tests_skipped`, and true
+  truncated totals distinguish type-checked, syntactic, partial, and capped
+  answers. `freshness.stale` is reserved for whole-graph fallback after a real
+  build failure; a single broken Go package degrades only its outgoing edges.
+- **Go test callers are indexed.** Package variants are deduplicated, test-file
+  edits invalidate the graph, and production callers sort ahead of tests at the
+  neighbour cap. `graph_package` keeps test declarations out of the public
+  surface, reports `tests_count`, and leaves them queryable by name.
+- **README rewritten around the current user path:** installation, agent
+  connection, the eight MCP tools, graph precision, data safety, and operations.
 
 ### Fixed
-- **`droids-mem upgrade` and the TUI update banner never detected a new
-  release.** The release workflow injects the git tag verbatim
-  (`-X main.version=v1.2.1`), but `release.IsNewer` prepended a second `v`
-  before parsing, so every released binary compared `vv1.2.1` — not valid
-  semver — and silently reported itself up to date. Both sides of the
-  comparison now accept a version with or without the prefix. The existing
-  tests missed this because they only ever passed bare versions; they now
-  cover the prefixed form the release build actually produces.
-- **`droids-mem uninstall --all` could terminate an unrelated process.** It
-  read a PID from `mcp.pid` and signalled it unconditionally, so a daemon that
-  died without clearing the file — plus a PID the OS had since recycled — sent
-  SIGTERM to whatever now held that number. The stop path now runs the same
-  `/identity` HMAC challenge `ensure-server` uses against port squatters, and
-  signals nothing unless a droids-mem holding the current token answers.
-  Unverified, it reports `not_verified`, leaves the process alone, and keeps
-  the pidfile rather than hiding the inconsistency.
-- **`droids-mem upgrade` downloads are now bounded.** The metadata and checksum
-  requests carry the same deadline the TUI already used, the asset transfer has
-  its own longer one, and the download stops at a 64 MB cap — the checksum only
-  rejects bad bytes once they are already on disk, so it was never the thing
-  bounding disk use. The command's download and checksum paths have unit tests
-  for the first time.
-- **`graph_package` no longer buries a package's public API under its tests.**
-  The surface listed every exported symbol ordered by file and line, capped at
-  200. Go indexes `_test.go` declarations too (`packages.Load` runs with
-  `Tests: true`), and on a real package they outnumber the API roughly ten to
-  one and sort first — so the cap was spent on test helpers and the actual
-  exported surface never appeared in the response. Measured 92% test rows on a
-  live package before the fix. Test declarations are now excluded from the rows
-  and reported as a `tests_count` scalar instead; they remain indexed and
-  reachable by name through `graph_symbol`.
-- **`callers_total` and `callees_total` are now actually rendered.** Both
-  fields were computed and populated on truncation, but the shared renderer
-  behind the CLI and the MCP bridge never printed them — so the truncation hint
-  pointed agents at numbers no agent could see. `graph_package` gained the same
-  treatment with a new `symbols_total`.
-- **Mapper-tier test files are excluded from the index, and the answer now says
-  so.** Test files in TypeScript, JavaScript and Python never enter the graph
-  at all, which makes every caller count and `transitive_callers` on a mapper
-  symbol understate. A new `tests_skipped` freshness message names the
-  consequence rather than just the count. The Go and mapper tiers differ here —
-  Go indexes its test declarations, the mapper drops the files — so the package
-  hint now carries the wording that is true for the tier being answered instead
-  of one line that was only true for Go.
-- **A repo that stops type-checking no longer blanks the whole code graph.**
-  Previously the first package with a type error aborted the entire build and
-  every query fell back to the last good graph, marked stale — so one typo in
-  one function body cost fresh answers for the whole tree. Now a broken package
-  degrades alone: symbols are still extracted from source for every package
-  (that needs no type information), fresh call edges are still computed for
-  every package that compiles, and edges *out of* a broken package — the only
-  ones that genuinely need a body we cannot type-check — are carried forward
-  from the previous build and remapped by qualified name. Edges into a broken
-  package survive natively. Carry-forward is best-effort: if the previous graph
-  cannot be read the build still succeeds with nothing carried. If more than
-  half the packages are broken the previous whole graph is served instead,
-  since a mostly-carried answer is not worth the confusion.
-- **The code graph now indexes test callers, and keeps its own reachability
-  contract.** The graph documented that it "may report a caller that can't
-  fire, never misses one that can", but `packages.Config` never set `Tests`, so
-  no `_test.go` was loaded and **zero** indexed symbols came from a test file.
-  `store.Store.Save` reported 5 callers while 84 distinct test functions call
-  it — the blind spot largest exactly on exported API, which is what an agent
-  queries before changing a signature. Three changes make it hold:
-  - `Tests: true`, with package-variant deduplication. `packages.Load` returns
-    several variants per tested package and the in-package test variant shares
-    a `PkgPath` while re-parsing the same production files; without dedupe
-    every production symbol was emitted twice, and because `symbols.qname` is
-    not unique those duplicates inserted silently and made every symbol in a
-    tested package report as ambiguous.
-  - The staleness stamp's file census now includes `_test.go`, so editing a
-    test file moves the stamp. Previously a newly added test caller was never
-    indexed.
-  - Caller lists order production callers before test callers. Test indexing
-    roughly triples caller counts, and the previous ordering put a package's
-    own test callers ahead of production callers in other packages — at the
-    50-neighbour cap an agent could see zero production callers and wrongly
-    conclude a signature change was test-only. Same-package proximity is kept
-    as the secondary key. **Existing graphs rebuild once** on the first query
-    after upgrading, because the file census changed.
-- **`prune --suggest-dupes` now tokenizes like the save-time duplicate check it
-  claims to mirror.** `dupeQuery` documents itself as building "the same capped,
-  phrase-quoted OR query the save-time near-duplicate check uses", but the two
-  had silently diverged: save-time runs on `dedupeTokens`, which replaces
-  punctuation with a space, while `searchTerms` stripped it to nothing. So
-  `store.Save` became the single token `storesave` in the prune query while
-  FTS5's `unicode61` tokenizer had indexed it as `store` and `save` — a
-  phrase-quoted term that could never match. `searchTerms` and `tokenSet` are
-  now thin projections of the one `dedupeTokens` sweep, which is what the
-  original fold intended.
-- **The `phone` scrub detector no longer redacts numeric deltas** (issue #102).
-  Its regex floor was two digits, so any signed number (`+370 bytes`, `+46%`,
-  diff stats) matched the E.164 phone shape and was silently and irreversibly
-  redacted before the row was stored — 6 of 7 matches were false positives.
-  The floor is now the E.164 real-world minimum of seven digits. A 7+ digit
-  numeric delta still matches; tightening further needs context rules and stays
-  documented as a deliberate residual.
-- **Code-graph cache now invalidates on a schema change.** `ensureFresh` gated
-  only on the file-census stamp, and `graph.db` records no schema version, so
-  editing the schema left every cached graph serving rows in the old shape
-  until an unrelated source edit happened to move the stamp — a repo whose
-  `.go` files were untouched kept the stale shape indefinitely. The stamp's
-  generation is now derived from `sha256(schema + indexed extensions)` instead
-  of a hand-written literal, so it cannot be forgotten. **Existing graphs
-  rebuild once** on the first query after upgrading.
-- **Non-Go repositories no longer split their cache.** `moduleRoot` anchored on
-  `go.mod` only, so a tree without one had no anchor and naming a subdirectory
-  keyed a second cache built from that subtree alone. It now falls back to the
-  nearest ancestor `.git`, keeping `go.mod` first so a nested module still
-  resolves to itself.
-- **Build output is excluded from the source walk**: `dist`, `build`, `target`
-  and `__pycache__` join the existing dotdir/`vendor`/`node_modules`
-  exclusions, so a build no longer moves the staleness stamp.
-- **`graph_symbol` answers "where does this send the user?" for Next.js.**
-  Proven navigation sites (`<Link>` from `next/link`, `redirect` /
-  `permanentRedirect` and `router.push` / `replace` from `next/navigation`)
-  resolve literal, constant, concatenated, template and finite-conditional
-  destinations against the App Router route inventory and appear as
-  `destinations`; computed or unmatched destinations stay visible as
-  `unresolved_destinations` with a reason instead of guessing. Navigation
-  lives in parallel tables — callers, call paths and `transitive_callers`
-  keep their call-only meaning.
-- **Inherited `tsconfig` aliases now resolve against the file that defined
-  them.** Extending `config/base.json` with `baseUrl: "."` used to probe
-  `./src/*` from the repo root; it now probes `config/src/*`, matching
-  TypeScript. A regression test with the real target and a root distractor
-  pins the edge to the real callee.
-- **Unreadable single-symbol files no longer vanish from the graph.** The
-  carry trigger compared with integer division, so zero fresh definitions
-  against one previous definition (`0 < 0`) never carried. It now compares
-  `defCount*2 < prevDefCount`, with one- and three-symbol regression cases.
-- **Alias config reads are bounded like mapper source reads.** Root and
-  `extends` configs were read unbounded with symlinks followed, so a
-  committed config could OOM the server. They now go through a regular-file,
-  2 MiB-capped helper; rejected-but-present files are still tracked so the
-  stamp invalidates on them.
+- **Released binaries now detect upgrades correctly.** Version comparison
+  accepts the workflow-injected `v` prefix instead of constructing invalid
+  `vv...` semver values, so both `droids-mem upgrade` and the TUI banner can see
+  a newer stable release.
+- **Graph caches and rebuilds stay coherent.** Cache stamps include graph schema
+  and indexed-extension changes; non-Go repositories anchor to the nearest
+  `.git`; build-output directories are excluded; unreadable single-symbol
+  mapper files carry forward correctly; and inherited `tsconfig` aliases resolve
+  relative to the config that defined them. Alias configs use bounded,
+  regular-file reads and still participate in invalidation when rejected.
+- **Graph failure guidance is consistent.** `graph index`, `graph symbol`, and
+  `graph package` report build/type-check failures as `retryable:false`, because
+  rerunning unchanged source cannot succeed.
+- **`prune --suggest-dupes` uses the save path's tokenizer.** Punctuation now
+  splits identifiers consistently with FTS5 instead of collapsing terms such as
+  `store.Save` into an unmatchable token.
+- **The phone scrub detector follows the E.164 minimum.** Its seven-digit floor
+  no longer irreversibly redacts common signed deltas such as `+370 bytes` and
+  `+46%`; longer numeric deltas remain a documented residual.
+
+### Security
+- **Daemon shutdown and replacement require PID-bound proof.** `/identity`
+  returns the serving version, PID, and an HMAC `pid_proof` bound to that PID.
+  `uninstall --all` and `ensure-server` signal only when the listener proves it
+  is the pidfile process; otherwise they return `not_verified`, preserve the
+  pidfile, and leave the process running. A proven superseded daemon is replaced
+  before the old process finishes draining; clients with a live MCP stream must
+  reconnect.
 
 ## [1.2.1] — 2026-08-10
 
@@ -588,7 +443,8 @@ normally.
 - `workspace.yml` / inline scrub config → v1.1. v1.0 pattern set + order are
   hardcoded.
 
-[Unreleased]: https://github.com/SamuelMolero26/droids-mem/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/SamuelMolero26/droids-mem/compare/v1.3.0-beta.1...HEAD
+[1.3.0-beta.1]: https://github.com/SamuelMolero26/droids-mem/compare/v1.2.1...v1.3.0-beta.1
 [1.2.1]: https://github.com/SamuelMolero26/droids-mem/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/SamuelMolero26/droids-mem/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/SamuelMolero26/droids-mem/compare/v1.1.0...v1.1.1
