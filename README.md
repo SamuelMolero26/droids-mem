@@ -26,6 +26,14 @@ verifies its published SHA-256 checksum, and installs it to `/usr/local/bin` or
 `~/.local/bin`. Set `DROIDS_MEM_VERSION` to a `v`-prefixed release tag or
 `DROIDS_MEM_PREFIX` to another install directory.
 
+Beta releases (`vX.Y.Z-beta.N`) are GitHub prereleases: they are never marked
+latest, never published to Homebrew, and not offered by `droids-mem upgrade` or
+the TUI update check. Install one only by pinning its tag:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/SamuelMolero26/droids-mem/main/install.sh | DROIDS_MEM_VERSION=v1.3.0-beta.1 sh
+```
+
 Release binaries also carry SLSA provenance attestations:
 
 ```sh

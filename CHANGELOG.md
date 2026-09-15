@@ -66,6 +66,11 @@ self-updates and daemon replacement, and provenance-preserving shared memory.
   edits invalidate the graph, and production callers sort ahead of tests at the
   neighbour cap. `graph_package` keeps test declarations out of the public
   surface, reports `tests_count`, and leaves them queryable by name.
+- **Beta release channel.** The release workflow accepts `vX.Y.Z-beta.N` tags
+  alongside stable tags under the same validation gates, publishes them as
+  GitHub prereleases that are not marked latest, skips the Homebrew formula,
+  and prints a pinned install-script command in the release notes. The release
+  binary size cap rose from 20 MB to 32 MB to fit the mapper tier's grammars.
 - **README rewritten around the current user path:** installation, agent
   connection, the eight MCP tools, graph precision, data safety, and operations.
 
