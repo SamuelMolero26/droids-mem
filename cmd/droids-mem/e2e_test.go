@@ -35,8 +35,7 @@ func cli(t *testing.T, dbPath string, allowedExits []int, args ...string) []byte
 	cmd.Env = append(os.Environ(), "DROIDS_MEM_DB="+dbPath)
 	out, err := cmd.Output()
 	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
+		if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 			code := ee.ExitCode()
 			if slices.Contains(allowedExits, code) {
 				return out

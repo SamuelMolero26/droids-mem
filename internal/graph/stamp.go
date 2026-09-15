@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -14,7 +15,7 @@ import (
 // input to the stamp generation, so widening it invalidates every cached
 // graph — a graph built before the set grew was built from fewer files.
 func indexedExtensions() []string {
-	return []string{".go", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".py"}
+	return []string{".go", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cts", ".mts", ".py"}
 }
 
 // indexerGen is the third stampGen input: a build-semantics generation that
@@ -36,8 +37,17 @@ func indexedExtensions() []string {
 // build writes — a graph indexed before it holds edges resolved without
 // import scoping, which is not merely less complete but differently
 // attributed. That is the line: bump when a stored graph becomes wrong, not
-// when it merely lacks data no one reads.
-const indexerGen = "5"
+// when it merely lacks data no one reads. P2 (alias) bumps it again because
+// "@/..." imports previously fell to the lossy repo-wide rung 5 instead of
+// the precise import-scoped rung 2a. Bare and namespace import narrowing also
+// changes stored edge attribution, so it advances the generation once more.
+// Generation 8 carries file directives with last-good mapper symbols instead
+// of writing metadata from an untrustworthy current parse. Generation 9 adds
+// meta.tests_skipped: a graph built before it has no such row, so the
+// answer omits the disclosure — a silent under-report on any mapper repo with
+// tests. That is the bump line exactly: the stored graph became wrong, not
+// merely incomplete.
+const indexerGen = "9"
 
 // stampGen derives the stamp's generation prefix from the things that change
 // what a cached graph MEANS: the schema its rows were written under, the file
@@ -81,7 +91,7 @@ func skipDir(name string) bool {
 		return true
 	}
 	switch name {
-	case "vendor", "node_modules", "dist", "build", "target", "__pycache__":
+	case "vendor", "node_modules", "dist", "build", "target", "__pycache__", "out":
 		return true
 	}
 	return false
@@ -89,10 +99,11 @@ func skipDir(name string) bool {
 
 // stamp fingerprints the repo's indexed source state: count, total size, and
 // max mtime of every file under indexedExtensions() (including _test.go)
-// plus Go module files (go.mod/go.sum/go.work), since dependency changes
-// alter go/packages analysis and call edges. Any edit, add, or delete moves
-// it. Deliberately not git-aware — uncommitted edits must invalidate the
-// graph too, and the same path covers non-git repos.
+// plus Go module files (go.mod/go.sum/go.work) and the exact alias-config
+// inputs loadAliasConfig can consume, since both dependency and alias changes
+// alter call edges. Any normal edit, add, or delete moves it. Deliberately not
+// git-aware — uncommitted edits must invalidate the graph too, and the same
+// path covers non-git repos.
 //
 // The census covers every indexed extension, not just .go: a mapper-only
 // (.ts/.py/etc.) file change must move the stamp too, or an edit to a
@@ -104,19 +115,30 @@ func skipDir(name string) bool {
 // would mean editing a test file never moves the stamp, so a new test caller
 // is silently never picked up.
 //
-// Known blind spot (accepted): the count+size+maxMtime triple cannot see a
-// content swap between two files that preserves the aggregate — file A takes
-// B's bytes and B takes A's, keeping total count, total size, and the latest
-// mtime unchanged. Since a normal edit bumps mtime to "now", this only fires
-// when mtimes are also preserved (touch -r, tar/rsync --times) alongside a
-// size-preserving swap: astronomically rare. Closing it would require reading
-// content bytes from every indexed file on every query (stamp runs per graph
-// call, not just on rebuild), so we accept the gap rather than pay that
-// hot-path IO.
+// The aggregate remains readable in the stamp, but invalidation uses a second
+// deterministic digest over each input's repo-relative path, size, and mtime.
+// This detects path renames and add/delete swaps without reading source bytes
+// on the query hot path.
+//
+// Inputs are hashed as they are visited, so memory stays O(1) in the number
+// of files. WalkDir visits in lexical order, which makes the digest
+// deterministic for a given tree without collecting and sorting the census.
 func stamp(repo string) (string, error) {
 	exts := indexedExtensions()
+	h := sha256.New()
 	var count int
 	var size, maxMtime int64
+	add := func(name string, info fs.FileInfo) {
+		rel, err := filepath.Rel(repo, name)
+		if err != nil {
+			rel = name
+		}
+		mtime := info.ModTime().UnixNano()
+		count++
+		size += info.Size()
+		maxMtime = max(maxMtime, mtime)
+		fmt.Fprintf(h, "%s\x00%d\x00%d\x00", filepath.ToSlash(rel), info.Size(), mtime)
+	}
 	err := filepath.WalkDir(repo, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil //nolint:nilerr // unreadable entries don't invalidate the walk
@@ -135,17 +157,25 @@ func stamp(repo string) (string, error) {
 		if err != nil {
 			return nil //nolint:nilerr // racing deletes don't invalidate the walk
 		}
-		count++
-		size += info.Size()
-		if mt := info.ModTime().UnixNano(); mt > maxMtime {
-			maxMtime = mt
-		}
+		add(p, info)
 		return nil
 	})
 	if err != nil {
 		return "", fmt.Errorf("stamp %s: %w", repo, err)
 	}
-	return fmt.Sprintf("%s:%d:%d:%d", currentGen, count, size, maxMtime), nil
+	// Alias configs are .json, so the census walk above can never have counted
+	// one — but aliasConfigFiles may name the same path twice (a config that
+	// extends a sibling which extends it back), so dedupe within that short
+	// slice rather than tracking every walked file.
+	for _, p := range slices.Compact(slices.Sorted(slices.Values(aliasConfigFiles(repo)))) {
+		info, err := os.Stat(p) // #nosec G304 -- fixed config names under the checkout, discovered by aliasConfigFiles
+		if err != nil {
+			continue
+		}
+		add(p, info)
+	}
+	digest := hex.EncodeToString(h.Sum(nil)[:8])
+	return fmt.Sprintf("%s:%d:%d:%d:%s", currentGen, count, size, maxMtime, digest), nil
 }
 
 // isModuleFile reports whether name is a Go module manifest whose changes can

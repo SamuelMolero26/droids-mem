@@ -2,8 +2,11 @@ package graph
 
 import (
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/odvcencio/gotreesitter/grammars"
 )
 
 // TOON rendering of graph responses (ADR-0027). The code-graph surface answers
@@ -14,8 +17,9 @@ import (
 //
 // The render is hybrid, not a pure TOON document: scalars are `key: value`
 // lines, uniform arrays are TOON tables, and the multiline `source` body is a
-// fenced code block — an agent reads real Go, not a \n-escaped string, which is
-// both fewer tokens and more readable than the old JSON.
+// fenced code block, tagged with the symbol's own language — an agent reads
+// real source, not a \n-escaped string, which is both fewer tokens and more
+// readable than the old JSON.
 
 // RenderSymbol encodes a symbol-anchored response.
 func RenderSymbol(r *SymbolResponse) string {
@@ -31,7 +35,7 @@ func RenderSymbol(r *SymbolResponse) string {
 			fmt.Fprintf(&b, "doc: %s\n", s.Doc)
 		}
 		if s.Source != "" {
-			fmt.Fprintf(&b, "source:\n%s\n", fence(s.Source))
+			fmt.Fprintf(&b, "source:\n%s\n", fence(s.Source, s.File))
 		}
 	}
 
@@ -41,6 +45,8 @@ func RenderSymbol(r *SymbolResponse) string {
 	writeNeighbors(&b, "matches", r.Matches)
 	writeNeighbors(&b, "implementers", r.Implementers)
 	writeNeighbors(&b, "satisfies", r.Satisfies)
+	writeNavigationDestinations(&b, r.Destinations)
+	writeUnresolvedNavigationDestinations(&b, r.UnresolvedDestinations)
 
 	// Caller-fidelity splits (issue #48/#49, decision 7a/2 amended): response-
 	// level only — no per-row test/dispatch field exists on Neighbor.
@@ -52,6 +58,16 @@ func RenderSymbol(r *SymbolResponse) string {
 	}
 	if r.Carried {
 		b.WriteString("carried: true\n")
+	}
+
+	// True neighbor counts behind a capped list. Set only on truncation
+	// (query.go), so a zero here means "not truncated" and stays unprinted —
+	// this is the field truncatedHint's "see *_total" points at.
+	if r.CallersTotal > 0 {
+		fmt.Fprintf(&b, "callers_total: %d\n", r.CallersTotal)
+	}
+	if r.CalleesTotal > 0 {
+		fmt.Fprintf(&b, "callees_total: %d\n", r.CalleesTotal)
 	}
 
 	if r.TransitiveCallers != nil {
@@ -69,6 +85,48 @@ func RenderSymbol(r *SymbolResponse) string {
 		fmt.Fprintf(&b, "hint: %s\n", r.Hint)
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func writeNavigationDestinations(b *strings.Builder, destinations []NavigationDestination) {
+	if len(destinations) == 0 {
+		return
+	}
+	keys := []string{"operation", "evidence", "certainty", "raw", "destination", "route", "target_file", "target_qname", "loc"}
+	b.WriteString(header("destinations", len(destinations), keys))
+	for _, destination := range destinations {
+		b.WriteString(row(
+			destination.Operation,
+			destination.Evidence,
+			destination.Certainty,
+			destination.RawDestination,
+			destination.Destination,
+			destination.Route,
+			destination.TargetFile,
+			destination.TargetQName,
+			loc(destination.File, destination.Line),
+		))
+	}
+}
+
+func writeUnresolvedNavigationDestinations(
+	b *strings.Builder,
+	destinations []UnresolvedNavigationDestination,
+) {
+	if len(destinations) == 0 {
+		return
+	}
+	keys := []string{"operation", "evidence", "raw", "destination", "reason", "loc"}
+	b.WriteString(header("unresolved_destinations", len(destinations), keys))
+	for _, destination := range destinations {
+		b.WriteString(row(
+			destination.Operation,
+			destination.Evidence,
+			destination.RawDestination,
+			destination.Destination,
+			destination.Reason,
+			loc(destination.File, destination.Line),
+		))
+	}
 }
 
 // RenderPackage encodes a scope-anchored (package surface) response.
@@ -89,8 +147,16 @@ func RenderPackage(r *PackageResponse) string {
 	}
 
 	fmt.Fprintf(&b, "unexported: %d\n", r.Unexported)
+	// Test declarations are a count, never rows — they are indexed and still
+	// reachable by name via graph_symbol.
+	if r.Tests > 0 {
+		fmt.Fprintf(&b, "tests: %d\n", r.Tests)
+	}
 	if r.Truncated {
 		b.WriteString("truncated: true\n")
+		if r.SymbolsTotal > 0 {
+			fmt.Fprintf(&b, "symbols_total: %d\n", r.SymbolsTotal)
+		}
 	}
 	if r.Hint != "" {
 		fmt.Fprintf(&b, "hint: %s\n", r.Hint)
@@ -142,6 +208,14 @@ func writeFreshness(b *strings.Builder, f Freshness) {
 	if f.FanoutCapped > 0 {
 		msgs = append(msgs, fmt.Sprintf("fanout_capped: %d (callsite(s) truncated at the repo-wide resolution cap)", f.FanoutCapped))
 	}
+	// Mapper-tier only, and it names the CONSEQUENCE, not just the count: an
+	// agent reading "12 files skipped" cannot infer that its caller numbers are
+	// low, which is the one thing that changes what it should do next. The Go
+	// tier never sets this — its test declarations ARE indexed (see
+	// PackageResponse.Tests for that half of the story).
+	if f.TestsSkipped > 0 {
+		msgs = append(msgs, fmt.Sprintf("tests_skipped: %d test file(s) were not indexed, so caller counts and transitive_callers understate — grep for test callers if that matters", f.TestsSkipped))
+	}
 	if len(msgs) == 0 {
 		return
 	}
@@ -185,11 +259,27 @@ func loc(file string, line int) string {
 	return file + ":" + strconv.Itoa(line)
 }
 
-// fence wraps a Go source body in a ```go code block. The fence length adapts
-// to the longest backtick run inside the body (Go raw-string literals contain
-// backticks), so a body containing a raw-string regex still closes cleanly
-// instead of terminating the fence early.
-func fence(src string) string {
+// fenceTag names the code-fence language for a symbol's source file, reusing
+// the indexer's own detection and allowlist so the tag can never claim a
+// language the graph did not parse. Go is answered directly: the semantic tier
+// owns it, so it is deliberately absent from mapperLanguages (ADR-0034
+// decision 8). Unknown extension: untagged fence, never a wrong one.
+func fenceTag(file string) string {
+	if filepath.Ext(file) == ".go" {
+		return "go"
+	}
+	if e := grammars.DetectLanguage(filepath.Base(file)); e != nil && mapperLanguages[e.Name] {
+		return e.Name
+	}
+	return ""
+}
+
+// fence wraps a source body in a code block tagged with the file's language.
+// The fence length adapts to the longest backtick run inside the body (Go
+// raw-string literals contain backticks, and so do JS/TS template literals),
+// so a body containing one still closes cleanly instead of terminating the
+// fence early.
+func fence(src, file string) string {
 	longest, run := 0, 0
 	for _, c := range src {
 		if c == '`' {
@@ -202,5 +292,5 @@ func fence(src string) string {
 		}
 	}
 	ticks := strings.Repeat("`", max(3, longest+1))
-	return ticks + "go\n" + src + "\n" + ticks
+	return ticks + fenceTag(file) + "\n" + src + "\n" + ticks
 }

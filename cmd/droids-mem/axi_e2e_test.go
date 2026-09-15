@@ -28,8 +28,7 @@ func cliStderr(t *testing.T, dbPath string, args ...string) ([]byte, []byte, int
 	err := cmd.Run()
 	code := 0
 	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
+		if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 			code = ee.ExitCode()
 		} else {
 			t.Fatalf("cli %v: %v", args, err)

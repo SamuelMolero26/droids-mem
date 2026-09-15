@@ -76,6 +76,41 @@ CREATE TABLE imports (
   precision       TEXT NOT NULL,
   PRIMARY KEY (importer_file, imported_module)
 ) WITHOUT ROWID;
+-- Next.js file-level directive (P3): a "use client" / "use server" pragma in the
+-- file's directive prologue, outside any OutlineSymbol.Range — detected by
+-- detectDirective (mapper_scan.go), which walks the parsed prologue rather than
+-- scanning a byte prefix, so comments, a shebang, and unrelated string
+-- directives before it are handled the way JavaScript defines them.
+-- One row per file that has a directive; absence means no directive.
+CREATE TABLE file_directives (
+  file      TEXT PRIMARY KEY,
+  directive TEXT NOT NULL
+) WITHOUT ROWID;
+-- Next.js App Router endpoints are stable route identities, separate from
+-- symbols because an anonymous page may have no symbol row at all.
+CREATE TABLE routes (
+  id           INTEGER PRIMARY KEY,
+  pattern      TEXT NOT NULL,
+  kind         TEXT NOT NULL,
+  file         TEXT NOT NULL,
+  target_qname TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX idx_routes_pattern ON routes(pattern);
+-- Navigation is parallel to call edges. A nullable route_id records explicit
+-- unresolved evidence without inventing a symbol-to-symbol call relationship.
+CREATE TABLE navigations (
+  source_symbol  INTEGER NOT NULL,
+  ordinal        INTEGER NOT NULL,
+  operation      TEXT NOT NULL,
+  evidence       TEXT NOT NULL,
+  raw_destination TEXT NOT NULL,
+  destination    TEXT NOT NULL,
+  certainty      TEXT NOT NULL,
+  route_id       INTEGER,
+  reason         TEXT NOT NULL DEFAULT '',
+  line           INTEGER NOT NULL,
+  PRIMARY KEY (source_symbol, ordinal)
+) WITHOUT ROWID;
 -- Ranks symbols by relevance to a free-text task phrase (the graph_symbol
 -- search fallback). rowid == symbols.id, so a MATCH joins straight back.
 -- Populated wholesale in writeGraphDB — the graph never updates in place, so
@@ -87,6 +122,9 @@ CREATE VIRTUAL TABLE symbols_fts USING fts5(
 
 // ErrNotFound reports a symbol or package with no match in the graph.
 var ErrNotFound = errors.New("not found")
+
+// ErrInvalidArgument reports a bad request (missing repo or package).
+var ErrInvalidArgument = errors.New("invalid argument")
 
 // staleUnitsCap bounds how many carried-unit names Freshness inlines. An
 // unbounded list is the one measured unbounded field in the design (a
@@ -124,6 +162,17 @@ type Freshness struct {
 	// partiality fact, not a per-edge one. Zero (the JSON-omitted default)
 	// means no callsite in this build hit the cap.
 	FanoutCapped int `json:"fanout_capped,omitempty"`
+	// TestsSkipped is the count of mapper-tier test FILES excluded from the
+	// index at walk time (isMapperTestFile). This is the mapper tier's test
+	// policy and it differs from the Go tier's: Go indexes _test.go
+	// declarations and merely keeps them out of a package surface, so they
+	// stay queryable by name, whereas these files are absent from the graph
+	// entirely — which makes every caller count and transitive_callers on a
+	// mapper symbol understate. A build-level partiality fact like
+	// FanoutCapped, hence its home on Freshness: it qualifies symbol answers
+	// as much as package ones. Zero (JSON-omitted) means nothing was skipped,
+	// which is always the case on a pure Go repo.
+	TestsSkipped int `json:"tests_skipped,omitempty"`
 	// carriedUnits is the FULL list (unexported, never serialized) backing the
 	// per-symbol Carried flag (query.go) — membership can fall outside the
 	// capped StaleUnits list above.
@@ -524,6 +573,14 @@ func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, func()
 		releaseLock(lock)
 		return conn, release, fresh, nil
 	}
+	// A graph from another generation was written under a different schema or
+	// indexer semantics: this binary's queries cannot read it, so it is no
+	// fallback. Treat it as absent — the caller waits for a first build rather
+	// than being warm-served a graph that errors or answers wrongly.
+	if conn != nil && !strings.HasPrefix(fresh.Stamp, currentGen+":") {
+		release()
+		conn, release = nil, noopRelease
+	}
 
 	// First build: the caller waits, because there is no prior graph to serve
 	// stale. Who waits and what the build runs on are separate concerns:
@@ -791,7 +848,7 @@ func (m *Manager) open(path string) (*sql.DB, func(), Freshness, error) {
 	// through freshnessNow and its callers for a two-row read off an
 	// already-cached local handle. The cancellation that matters is on the
 	// walks and the build, both of which are context-bound.
-	rows, err := entry.db.Query(`SELECT key, value FROM meta WHERE key IN ('stamp','indexed_at','carried_units','empty_reason','fanout_capped')`) //nolint:noctx // see above
+	rows, err := entry.db.Query(`SELECT key, value FROM meta WHERE key IN ('stamp','indexed_at','carried_units','empty_reason','fanout_capped','tests_skipped')`) //nolint:noctx // see above
 	if err != nil {
 		release()
 		return nil, noopRelease, Freshness{}, fmt.Errorf("read graph meta: %w", err)
@@ -823,6 +880,12 @@ func (m *Manager) open(path string) (*sql.DB, func(), Freshness, error) {
 			// than an error, since a missing/empty row is not a build failure.
 			if n, err := strconv.Atoi(v); err == nil {
 				fresh.FanoutCapped = n
+			}
+		case "tests_skipped":
+			// Same best-effort parse as fanout_capped above: a graph.db built
+			// before this row existed simply reports 0.
+			if n, err := strconv.Atoi(v); err == nil {
+				fresh.TestsSkipped = n
 			}
 		}
 	}

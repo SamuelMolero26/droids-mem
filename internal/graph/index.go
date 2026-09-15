@@ -146,10 +146,23 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	var mapperFileList []mapperFile
 	var mapperSyms []mapperSym
 	var mapperCarriedUnits []string
-	if mFiles, _, mErr := mapperFiles(repo); mErr == nil {
+	var mapperCarriedDirectives map[string]string
+	// One scan produces the symbols, calls, imports and parse-trust verdicts
+	// that used to cost four separate read-and-parse passes over the same
+	// files — see mapper_scan.go for the profile that motivated it.
+	var mapperScan mapperScanResult
+	// testsSkipped counts mapper test FILES dropped at walk time
+	// (isMapperTestFile). Unlike the Go tier — which indexes _test.go
+	// declarations and merely keeps them out of a package surface — these
+	// files never enter the graph, so every caller count on a mapper symbol
+	// understates by whatever they contained. Persisted as meta.tests_skipped
+	// so the answer can say so instead of silently under-reporting.
+	var testsSkipped int
+	if mFiles, mStats, mErr := mapperFiles(repo); mErr == nil {
 		mapperFileList = mFiles
-		freshMapperSyms, _ := mapperSymbols(mFiles)
-		mapperSyms, mapperCarriedUnits = mapperCarry(dbPath, mFiles, freshMapperSyms)
+		testsSkipped = mStats.skippedTest
+		mapperScan = scanMapperFiles(mFiles)
+		mapperSyms, mapperCarriedUnits, mapperCarriedDirectives = mapperCarry(dbPath, mFiles, mapperScan.syms, mapperScan.hasError)
 	}
 
 	// Mapper-tier imports (Python via gts.ExtractImports, the JS family via
@@ -157,7 +170,14 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	// independent of both mapper symbols and carry-forward, so it
 	// runs unconditionally off the same discovered file list. Best-effort, same
 	// policy as the symbols/calls passes: a failure here never fails the build.
-	mapperImportRows, mapperBindings, _ := mapperImports(mapperFileList)
+	mapperImportRows, mapperBindings := mapperScan.importRows, mapperScan.bindings
+	mapperDirectives := mapperScan.fileDirectives
+	for file, directive := range mapperCarriedDirectives {
+		delete(mapperDirectives, file)
+		if directive != "" {
+			mapperDirectives[file] = directive
+		}
+	}
 
 	// C.10: a repo with neither a usable Go package nor a single mapper-tier
 	// symbol has nothing to build from at all.
@@ -230,6 +250,13 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	for i, s := range symbols {
 		s.id = int64(i + 1)
 	}
+	navigationGraph := buildNextNavigationGraph(
+		repo,
+		mapperFileList,
+		nextFreshMapperSymbols(mapperScan.syms, mapperScan.hasError),
+		mapperScan.navigationSites,
+		mapperScan.defaultExportNames,
+	)
 
 	// byQName is built from ALL symbols (Go + mapper) unconditionally, not
 	// just when broken packages exist — mapper qnames can collide with each
@@ -261,7 +288,8 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	// can never collide. fanoutCapped counts CALLSITES whose rung-5 candidate
 	// set exceeded fanoutCap (design D5/D6) — a build-level partiality fact,
 	// not a per-edge one, persisted below as meta.fanout_capped.
-	mapperEdgeSet, fanoutCapped := mapperEdges(mapperFileList, mapperSyms, mapperBindings)
+	aliasCfg := loadAliasConfig(repo)
+	mapperEdgeSet, fanoutCapped := mapperEdges(mapperFileList, mapperSyms, mapperBindings, mapperScan.fileCalls, aliasCfg)
 	for k, m := range mapperEdgeSet {
 		edges.add(k, m)
 	}
@@ -330,7 +358,23 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 		slices.Sort(carriedUnits)
 	}
 
-	return writeGraphDB(ctx, dbPath, repo, module, stampVal, symbols, edges, impls, carriedUnits, emptyReason, fanoutCapped, mapperImportRows)
+	return writeGraphDBWithNavigation(
+		ctx,
+		dbPath,
+		repo,
+		module,
+		stampVal,
+		symbols,
+		edges,
+		impls,
+		carriedUnits,
+		emptyReason,
+		fanoutCapped,
+		testsSkipped,
+		mapperImportRows,
+		mapperDirectives,
+		navigationGraph,
+	)
 }
 
 // goSymbols extracts symbol rows from the type-checked Go packages,
@@ -749,8 +793,29 @@ func implementsEdges(pkgs []*packages.Package, byPos map[string]*symRow) map[[2]
 // be interpreted as "unknown" vs "none". imports is the mapper tier's
 // import rows (mapper_imports.go — Python and the JS family), each
 // carrying its own explicit precision (the imports.precision column has no
-// DDL default, unlike edges/implements).
-func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string, emptyReason string, fanoutCapped int, imports []importRow) error {
+// DDL default, unlike edges/implements). fileDirectives maps repo-relative
+// file → "client" | "server" (P3); persisted to file_directives table.
+func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string, emptyReason string, fanoutCapped, testsSkipped int, imports []importRow, fileDirectives map[string]string) error {
+	return writeGraphDBWithNavigation(
+		ctx,
+		dbPath,
+		repo,
+		module,
+		stampVal,
+		symbols,
+		edges,
+		impls,
+		carriedUnits,
+		emptyReason,
+		fanoutCapped,
+		testsSkipped,
+		imports,
+		fileDirectives,
+		nextNavigationGraph{},
+	)
+}
+
+func writeGraphDBWithNavigation(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string, emptyReason string, fanoutCapped, testsSkipped int, imports []importRow, fileDirectives map[string]string, navigation nextNavigationGraph) error {
 	if err := ctx.Err(); err != nil {
 		return err // cancelled before work started
 	}
@@ -822,6 +887,22 @@ func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, sy
 				return fmt.Errorf("insert import %s -> %s: %w", r.importerFile, r.importedModule, err)
 			}
 		}
+		dirIns, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO file_directives (file, directive) VALUES (?,?)`)
+		if err != nil {
+			return err
+		}
+		defer dirIns.Close()
+		for f, d := range fileDirectives {
+			if d == "" {
+				continue
+			}
+			if _, err := dirIns.ExecContext(ctx, f, d); err != nil {
+				return fmt.Errorf("insert file_directive %s -> %s: %w", f, d, err)
+			}
+		}
+		if err := writeNextNavigation(ctx, tx, navigation); err != nil {
+			return fmt.Errorf("insert Next.js navigation: %w", err)
+		}
 		// FTS mirror for the search fallback; rowid == symbols.id for the join back.
 		if _, err := tx.ExecContext(ctx, `INSERT INTO symbols_fts(rowid, qname, name, doc, signature)
 			SELECT id, qname, name, doc, signature FROM symbols`); err != nil {
@@ -832,6 +913,7 @@ func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, sy
 			"carried_units": strings.Join(carriedUnits, "\n"),
 			"empty_reason":  emptyReason,
 			"fanout_capped": strconv.Itoa(fanoutCapped),
+			"tests_skipped": strconv.Itoa(testsSkipped),
 		} {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO meta (key, value) VALUES (?,?)`, k, v); err != nil {
 				return err

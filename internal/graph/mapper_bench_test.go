@@ -98,21 +98,6 @@ func BenchmarkMapperSymbols(b *testing.B) {
 	}
 }
 
-// BenchmarkMapperCarryScan measures mapperCarry over a tree where NO file is
-// broken — the overwhelmingly common case. Nothing is carried, so every
-// nanosecond here is the HasError probe re-reading and re-parsing each file
-// purely to ask a yes/no question.
-func BenchmarkMapperCarryScan(b *testing.B) {
-	repo := benchMapperRepo(b, 200)
-	files := benchMapperFiles(b, repo)
-	syms, _ := mapperSymbols(files)
-	dbPath := filepath.Join(b.TempDir(), "graph.db")
-	b.ReportAllocs()
-	for b.Loop() {
-		mapperCarry(dbPath, files, syms)
-	}
-}
-
 func BenchmarkMapperImports(b *testing.B) {
 	files := benchMapperFiles(b, benchMapperRepo(b, 200))
 	b.ReportAllocs()
@@ -142,7 +127,7 @@ func BenchmarkMapperLadderResolve(b *testing.B) {
 	fileCalls, _ := collectMapperCalls(files)
 	callsites := attributeMapperCalls(syms, fileCalls)
 	_, bindings, _ := mapperImports(files)
-	idx := buildMapperLadderIndex(syms, resolveBindings(files, bindings))
+	idx := buildMapperLadderIndex(syms, resolveBindings(files, bindings, nil))
 	if len(callsites) == 0 {
 		b.Fatal("no callsites attributed")
 	}

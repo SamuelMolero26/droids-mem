@@ -150,8 +150,7 @@ func (s *Store) importLine(ctx context.Context, line []byte, res *ImportResult) 
 		AuthoredAt: m.AuthoredAt,
 	})
 	if err != nil {
-		var ve *ValidationError
-		if errors.As(err, &ve) {
+		if _, ok := errors.AsType[*ValidationError](err); ok {
 			// A validation/scrub rejection is a bad row, not a batch failure:
 			// count it and keep going so one poisoned line can't halt the pool.
 			res.Failed++

@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -83,7 +84,7 @@ Save only a genuinely reusable lesson, not routine steps. Re-saving the same les
 
 AFTER EVERY TOOL CALL, state briefly what you learned and how it affects your approach. For example: "mem_search found a prior fix for HTTP 429 retries — reusing that approach" or "graph_symbol shows Store.Save has 15 transitive callers — preserving the interface". This is the only way the user sees that your decisions come from memory and graph data, not just reasoning. A one-liner after the tool result is enough.
 
-FOR CODE QUESTIONS in a Go repo, prefer the graph tools over grep and file reading — they answer from a pre-built call graph in one call. graph_package orients you in an area (exported surface, signatures only); graph_symbol shows one symbol's source plus callers/callees as signature stubs, blast radius via direction=up depth>1, call paths via 'to'. Expand a stub by re-querying its exact qname. Pass your project root as 'repo'.
+FOR CODE QUESTIONS in a Go, Python, TypeScript, or JavaScript repo, prefer the graph tools over grep and file reading — they answer from a pre-built call graph in one call. graph_package orients you in an area (exported surface, signatures only); graph_symbol shows one symbol's source plus callers/callees as signature stubs, blast radius via direction=up depth>1, call paths via 'to'. Expand a stub by re-querying its exact qname. Pass your project root as 'repo'.
 `
 
 const summaryPolicyHTTP = `Do NOT save session summaries here — your host may record those automatically at session end; saving one yourself would duplicate it.`
@@ -94,7 +95,7 @@ const instructionsTail = `Never put secrets, tokens, or keys in any field; the s
 
 BEFORE EDITING a function, call graph_symbol with direction=up depth=3 to check its blast radius. The transitive_callers count tells you how many symbols depend on it. Mention this count when you state what you learned — it is the single most useful signal the graph gives you.
 
-When a graph response includes freshness.stale: true, a genuine build failure means the whole previous index is being served. A single package that does not type-check degrades alone instead: carried: true on a symbol, and freshness.stale_units naming the packages riding on the previous build's edges. Verify critical findings against actual source files before acting on either.`
+When a graph response includes freshness.stale: true, a genuine build failure means the whole previous index is being served. A single package that does not type-check degrades alone instead: carried: true on a symbol, and freshness.stale_units naming the packages riding on the previous build's edges. Verify critical findings against actual source files before acting on either. When precision is 'syntactic' (Python/TS/JS), callers/callees are heuristic — treat as approximate and cross-check with grep for constants/tests/notebooks.`
 
 // instructions assembles the transport-appropriate protocol string. The HTTP
 // variant is byte-identical to the pre-split serverInstructions const.
@@ -112,6 +113,9 @@ type Config struct {
 	Token    string // required bearer token; Run errors if empty
 	Logger   *log.Logger
 	Graphs   *graph.Manager // optional code-graph subsystem (ADR-0020); nil skips graph tools
+	// Version is the binary's build-time release version, advertised on
+	// /identity so ensure-server can replace a daemon running other code.
+	Version string
 }
 
 // Run starts the MCP bridge and blocks until ctx is canceled or the server
@@ -146,7 +150,7 @@ func Run(ctx context.Context, cfg Config, st *store.Store) error {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
-	mux.HandleFunc("/identity", identityHandler(cfg.Token))
+	mux.HandleFunc("/identity", identityHandler(cfg.Token, cfg.Version))
 
 	wrapped := bearerAuth(cfg.Token, cfg.Endpoint, limitBody(mux))
 
@@ -249,20 +253,27 @@ func shareRepo() string {
 }
 
 // identityHandler answers a challenge–response proof of token knowledge:
-// GET /identity?nonce=<client nonce> → {"server":..., "proof": hex(HMAC-SHA256(token, nonce))}.
-// Unauthenticated by design — the proof reveals nothing about the token, and it
-// lets ensure-server verify that whatever answers on this port actually holds
-// the shared token before reporting "already_running" (anti port-squatting).
-// A fresh client nonce per check makes replay of old proofs useless.
-func identityHandler(token string) http.HandlerFunc {
+// GET /identity?nonce=<client nonce> → {"server", "proof", "version", "pid", "pid_proof"}.
+// Unauthenticated by design — the proofs reveal nothing about the token, and
+// they let ensure-server verify that whatever answers on this port actually
+// holds the shared token before reporting "already_running" (anti
+// port-squatting). A fresh client nonce per check makes replay useless.
+//
+// "proof" answers "does this listener hold the token"; "pid_proof" additionally
+// answers "which process is it", which a caller about to send a signal needs
+// and the token alone cannot establish.
+func identityHandler(token, version string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		nonce := r.URL.Query().Get("nonce")
 		if nonce == "" || len(nonce) > maxIdentityNonceLen {
 			http.Error(w, `{"error":"nonce required"}`, http.StatusBadRequest)
 			return
 		}
+		pid := os.Getpid()
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"server":%q,"proof":%q}`, ServerName, IdentityProof(token, nonce))
+		fmt.Fprintf(w, `{"server":%q,"proof":%q,"version":%q,"pid":%d,"pid_proof":%q}`,
+			ServerName, IdentityProof(token, nonce), version, pid,
+			IdentityPidProof(token, nonce, pid))
 	}
 }
 
@@ -272,6 +283,17 @@ func identityHandler(token string) http.HandlerFunc {
 func IdentityProof(token, nonce string) string {
 	mac := hmac.New(sha256.New, []byte(token))
 	mac.Write([]byte(nonce))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// IdentityPidProof binds the PID into a proof under a token-derived key.
+// Separate from IdentityProof so older daemons still pass ensure-server;
+// derived key so a plain proof of nonce "N:pid" can't double as this one.
+func IdentityPidProof(token, nonce string, pid int) string {
+	kmac := hmac.New(sha256.New, []byte(token))
+	kmac.Write([]byte("droids-mem/pid_proof"))
+	mac := hmac.New(sha256.New, kmac.Sum(nil))
+	mac.Write([]byte(nonce + ":" + strconv.Itoa(pid)))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 

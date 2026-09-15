@@ -12,10 +12,11 @@ import (
 )
 
 const (
-	maxDepth      = 5
-	maxPathDepth  = 10
-	maxMatches    = 20
-	maxPkgSymbols = 200
+	maxDepth             = 5
+	maxPathDepth         = 10
+	maxMatches           = 20
+	maxPkgSymbols        = 200
+	maxNavigationResults = 32
 	// Hints are surface-neutral (ADR-0027): they name the action + the qname to
 	// re-query with, never a specific invocation ("graph_symbol" vs
 	// "droids-mem graph symbol"). The agent already holds the surface it just
@@ -29,8 +30,15 @@ const (
 	// also covers a benign in-flight rebuild with no failure at all (a partial
 	// build that itself succeeds is never stale; see graph.go's Freshness doc).
 	// freshness.index_error, when present, carries the real failure reason.
-	staleGraphHint  = "graph is stale: serving the last good index while it updates (see freshness.index_error if the last build failed)"
-	pkgSymbolsLimit = "exported symbols only; re-query an unexported symbol by its name"
+	staleGraphHint = "graph is stale: serving the last good index while it updates (see freshness.index_error if the last build failed)"
+	// The two tiers exclude tests for different reasons and leave the agent
+	// different escape hatches, so they cannot share one wording. Go indexes
+	// _test.go declarations (packages.Load Tests:true) and merely keeps them
+	// out of this surface, so a re-query by name still finds them. The mapper
+	// tier drops test FILES at walk time (isMapperTestFile), so the same
+	// re-query returns nothing — promising it there would be a lie.
+	pkgSymbolsLimitGo     = "exported non-test symbols only (see unexported/tests counts); test and unexported symbols are indexed — re-query either by its name"
+	pkgSymbolsLimitMapper = "exported symbols only (see unexported count); test files are not indexed at all, so they are not queryable by name either — re-query an unexported symbol by its name"
 	// blast radius rides entirely on call edges, and only func/method symbols are
 	// edge endpoints (byPos maps FuncDecls only). So transitive_callers is a
 	// structural 0 for a type/const/var — omitting it (issue #47) stops an agent
@@ -66,6 +74,13 @@ const (
 	// Symbol() (design D5/D7). Attached only when Precision == "syntactic";
 	// a "resolved" (Go) answer needs no caveat.
 	syntacticHint = "this symbol is mapper-tier (non-Go): its callers/callees are syntactically resolved from names and lexical containment, not type-checked — treat an ambiguous call site's candidates as approximate, not exact"
+	// directiveHints surface Next.js file-level pragmas that sit outside
+	// OutlineSymbol.Range (P3). Detected by detectDirective's walk of the
+	// JavaScript directive prologue (mapper_scan.go) and persisted to
+	// file_directives; appended via the same hint chain as
+	// syntacticHint/carriedHint.
+	clientDirectiveHint = "client component (\"use client\" directive)"
+	serverDirectiveHint = "server component (\"use server\" directive)"
 	// precisionResolved/precisionSyntactic name SymbolResponse.Precision's two
 	// values (design D7). The rest of the mapper tier (edgeSet, mapper_calls.go)
 	// uses the same two values as bare string literals; named here because
@@ -109,6 +124,34 @@ type Neighbor struct {
 	File      string `json:"file"`
 	Line      int    `json:"line"`
 	Depth     int    `json:"depth"`
+}
+
+// NavigationDestination is a proven Next.js navigation outcome projected for
+// the exact source symbol. Precision remains response-level and syntactic;
+// evidence and certainty describe independent properties of this site.
+type NavigationDestination struct {
+	Operation      string `json:"operation"`
+	Evidence       string `json:"evidence"`
+	Certainty      string `json:"certainty"`
+	RawDestination string `json:"raw_destination"`
+	Destination    string `json:"destination"`
+	Route          string `json:"route"`
+	TargetFile     string `json:"target_file"`
+	TargetQName    string `json:"target_qname,omitempty"`
+	File           string `json:"file"`
+	Line           int    `json:"line"`
+}
+
+// UnresolvedNavigationDestination keeps a proven navigation site visible when
+// its destination cannot be matched safely.
+type UnresolvedNavigationDestination struct {
+	Operation      string `json:"operation"`
+	Evidence       string `json:"evidence"`
+	RawDestination string `json:"raw_destination"`
+	Destination    string `json:"destination,omitempty"`
+	Reason         string `json:"reason"`
+	File           string `json:"file"`
+	Line           int    `json:"line"`
 }
 
 // SymbolResponse answers a symbol-anchored query.
@@ -165,8 +208,10 @@ type SymbolResponse struct {
 	// Satisfies lists the repo-defined interfaces a concrete type implements.
 	// Absent means it satisfies none (no *_total: a concrete type satisfies few
 	// interfaces, never near the neighbor cap, so the list is its own count).
-	Satisfies []Neighbor `json:"satisfies,omitempty"`
-	Hint      string     `json:"hint,omitempty"`
+	Satisfies              []Neighbor                        `json:"satisfies,omitempty"`
+	Destinations           []NavigationDestination           `json:"destinations,omitempty"`
+	UnresolvedDestinations []UnresolvedNavigationDestination `json:"unresolved_destinations,omitempty"`
+	Hint                   string                            `json:"hint,omitempty"`
 }
 
 // addHint appends extra to the "; "-joined hint chain h, empty-safe.
@@ -177,12 +222,22 @@ func addHint(h, extra string) string {
 	return h + "; " + extra
 }
 
+// escapeLike escapes LIKE wildcards so a literal '_' or '%' in package/qname
+// does not become a wildcard (W4). Backslash is escaped first so the
+// subsequent replacements do not double-escape.
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
+
 // mapperFileExtensions is the syntactic (mapper) tier's extension set,
 // mirroring mapperLanguages (mapper.go) but keyed by extension instead of
 // grammar name — the only lookup Precision derivation needs. Any extension
 // outside this set (in practice, only ".go") is the resolved tier.
 var mapperFileExtensions = map[string]bool{
-	".ts": true, ".tsx": true, ".js": true, ".jsx": true, ".mjs": true, ".py": true,
+	".ts": true, ".tsx": true, ".js": true, ".jsx": true, ".mjs": true, ".cjs": true, ".cts": true, ".mts": true, ".py": true,
 }
 
 // symbolPrecision derives a symbol's precision class from its OWN file
@@ -209,16 +264,20 @@ func symbolPrecision(file string) string {
 // per-edge `SELECT precision FROM edges WHERE ...` fed through this same
 // function. An empty/all-resolved input returns "resolved".
 func weakestPrecision(precisions []string) string {
-	for _, p := range precisions {
-		if p == precisionSyntactic {
-			return precisionSyntactic
-		}
+	if slices.Contains(precisions, precisionSyntactic) {
+		return precisionSyntactic
 	}
 	return precisionResolved
 }
 
 // Symbol resolves and answers a symbol-anchored query against repo's graph.
 func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolResponse, error) {
+	if strings.TrimSpace(req.Repo) == "" {
+		return nil, fmt.Errorf("repo is required: %w", ErrInvalidArgument)
+	}
+	if strings.TrimSpace(req.Symbol) == "" {
+		return nil, fmt.Errorf("symbol is required: %w", ErrInvalidArgument)
+	}
 	conn, release, fresh, err := m.ensureFresh(ctx, req.Repo)
 	if err != nil {
 		return nil, err
@@ -266,6 +325,15 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	resp.Symbol = &info
 	resp.Carried = slices.Contains(fresh.carriedUnits, info.Package)
 	resp.Precision = symbolPrecision(info.File)
+	var navTruncated bool
+	resp.Destinations, resp.UnresolvedDestinations, navTruncated, err = navigationRows(ctx, conn, id)
+	if err != nil {
+		return nil, err
+	}
+	if navTruncated {
+		resp.Truncated = true
+		resp.Hint = addHint(resp.Hint, "navigation results are a partial slice at the cap")
+	}
 
 	var blastHint string // see blastTypeHint/blastRefHint above for the why
 	switch info.Kind {
@@ -327,6 +395,16 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	}
 	if resp.Precision == precisionSyntactic {
 		resp.Hint = addHint(resp.Hint, syntacticHint)
+	}
+	directive, err := directiveForFile(ctx, conn, info.File)
+	if err != nil {
+		return nil, err
+	}
+	switch directive {
+	case "client":
+		resp.Hint = addHint(resp.Hint, clientDirectiveHint)
+	case "server":
+		resp.Hint = addHint(resp.Hint, serverDirectiveHint)
 	}
 
 	depth := min(max(req.Depth, 1), maxDepth)
@@ -419,14 +497,25 @@ func callerSplit(ctx context.Context, conn *sql.DB, id int64) (total, inTests, v
 
 // findSymbol resolves a name to symbol stubs: exact qname first, then short
 // name, then qname suffix (e.g. "Store.Save" or "store.Save").
+//
+// The suffix rung tries both separators the two tiers use: the Go tier joins
+// with '.' ("internal/store.Store.Save"), the mapper with ':' (modulePath +
+// ":" + container + "." + name, mapper_symbols.go). A dot-anchored LIKE alone
+// therefore never matches the receiver-qualified form the MCP schema
+// documents, on any mapper language — and missing here does not surface as an
+// error: the caller drops to the BM25 search fallback and answers with a menu
+// instead of the symbol's body, callers, and callees.
 func findSymbol(ctx context.Context, conn *sql.DB, name string) ([]Neighbor, error) {
+	suffix := strings.TrimPrefix(name, ".")
+	escapedSuffix := escapeLike(suffix)
 	queries := []struct {
 		where string
 		arg   string
 	}{
 		{"qname = ?", name},
 		{"name = ?", name},
-		{"qname LIKE ?", "%." + strings.TrimPrefix(name, ".")},
+		{"qname LIKE ? ESCAPE '\\'", "%." + escapedSuffix},
+		{"qname LIKE ? ESCAPE '\\'", "%:" + escapedSuffix},
 	}
 	for _, q := range queries {
 		rows, err := conn.QueryContext(ctx, `SELECT qname, signature, file, line FROM symbols
@@ -499,13 +588,11 @@ func transitiveCallers(ctx context.Context, conn *sql.DB, id int64) (int, error)
 // typeHasMethods reports whether the type named by qname has any indexed
 // methods, so a blast-radius query on it can point at them (a method's qname is
 // the type's qname + "." + method). A method-less type has no call-graph handle.
-// ponytail: LIKE prefix left unescaped — a '_' in the qname is a LIKE wildcard,
-// but a false match only swaps in the method-redirect hint (the agent finds no
-// methods and self-corrects), never a wrong answer, so no ESCAPE clause.
 func typeHasMethods(ctx context.Context, conn *sql.DB, qname string) (bool, error) {
 	var exists int
+	esc := escapeLike(qname)
 	err := conn.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM symbols
-		WHERE kind = 'method' AND qname LIKE ?)`, qname+".%").Scan(&exists)
+		WHERE kind = 'method' AND qname LIKE ? ESCAPE '\')`, esc+".%").Scan(&exists)
 	return exists == 1, err
 }
 
@@ -648,6 +735,25 @@ func idArgs(ids []int64) []any {
 	return args
 }
 
+// directiveForFile returns the file-level directive ("client" | "server") for
+// file, or "" when the file has none.
+//
+// Only ErrNoRows is swallowed. A graph.db predating the file_directives table
+// cannot reach here: stampGen hashes the schema DDL into currentGen, so an
+// older-schema db fails ensureFresh's stamp check and is rebuilt before any
+// query runs — tolerating a missing table would be a permanently dead branch
+// that also hid real query failures behind a silently absent hint.
+func directiveForFile(ctx context.Context, conn *sql.DB, file string) (string, error) {
+	var d string
+	switch err := conn.QueryRowContext(ctx, `SELECT directive FROM file_directives WHERE file = ?`, file).Scan(&d); {
+	case errors.Is(err, sql.ErrNoRows):
+		return "", nil // no directive in this file
+	case err != nil:
+		return "", err
+	}
+	return d, nil
+}
+
 // callPath BFSes caller→callee edges from start to the symbol named target,
 // returning the shortest call chain including both endpoints.
 func callPath(ctx context.Context, conn *sql.DB, start int64, targetQName string) ([]Neighbor, error) {
@@ -736,51 +842,212 @@ type PackageResponse struct {
 	Package    string          `json:"package"`
 	Symbols    []PackageSymbol `json:"symbols"`
 	Unexported int             `json:"unexported_count"`
-	Truncated  bool            `json:"truncated,omitempty"`
-	Hint       string          `json:"hint,omitempty"`
+	// Tests counts _test.go declarations (exported or not), which Symbols
+	// deliberately excludes and Unexported does not overlap, so rows +
+	// Unexported + Tests partition the package. They are indexed (packages.Load runs with Tests:true) and stay
+	// queryable by name through graph_symbol, but they are never rows here: on
+	// a real package they outnumber the API ~10:1 and, sorting first under
+	// `ORDER BY file, line`, they consumed the whole maxPkgSymbols cap and
+	// pushed the actual public surface out of the response.
+	Tests int `json:"tests_count,omitempty"`
+	// SymbolsTotal is the true count of listed-eligible symbols (exported,
+	// non-test) when the list was capped at maxPkgSymbols. Same convention as
+	// SymbolResponse.CallersTotal: set only on truncation, so 0 (omitted)
+	// unambiguously means "the list is complete".
+	SymbolsTotal int    `json:"symbols_total,omitempty"`
+	Truncated    bool   `json:"truncated,omitempty"`
+	Hint         string `json:"hint,omitempty"`
+}
+
+// isTestFile matches a Go _test.go path inside a SQL predicate. The backslash
+// escape is required: '_' is a LIKE single-character wildcard, so an unescaped
+// '%_test.go' would also match "mytest.go".
+const isTestFile = `file LIKE '%\_test.go' ESCAPE '\'`
+
+// pkgCount holds the scalars a package surface reports alongside its rows.
+// mapper is decided from every row in the package, not the listed ones: a
+// module with no exported symbols still needs the tier-correct hint.
+type pkgCount struct {
+	unexported, tests, total int
+	mapper                   bool
+}
+
+// pkgCounts computes pkgCount in one pass, for either resolution tier's WHERE
+// clause.
+func pkgCounts(ctx context.Context, conn *sql.DB, where string, args []any) (pkgCount, error) {
+	// where is a compile-time literal or placeholder ORs, never user text.
+	q := `SELECT
+		COUNT(CASE WHEN exported = 0 AND NOT ` + isTestFile + ` THEN 1 END),
+		COUNT(CASE WHEN ` + isTestFile + ` THEN 1 END),
+		COUNT(CASE WHEN exported = 1 AND NOT ` + isTestFile + ` THEN 1 END),
+		COUNT(CASE WHEN file LIKE '%.go' THEN 1 END)
+		FROM symbols WHERE ` + where
+	var c pkgCount
+	var goRows int
+	err := conn.QueryRowContext(ctx, q, args...).Scan(&c.unexported, &c.tests, &c.total, &goRows)
+	// ponytail: tiers are disjoint per package, so "no .go rows" is the mapper.
+	c.mapper = goRows == 0
+	return c, err
+}
+
+// resolvePackage maps a user-supplied package name onto a real `package`
+// value, accepting both shapes the MCP schema documents ("internal/store" or
+// just "store"). The Go tier stores slash-separated paths but the mapper
+// stores Python modules dotted, so a slash-anchored suffix alone answers
+// not_found for every documented form on a Python repo except the exact dotted
+// path. Two rungs, most literal first: the name as typed, then with '/'
+// rewritten to '.'. Shortest match wins per rung — the old tie-break.
+func resolvePackage(ctx context.Context, conn *sql.DB, name string) (string, error) {
+	const q = `SELECT package FROM symbols
+		WHERE package = ? OR package LIKE ? ESCAPE '\' OR package LIKE ? ESCAPE '\'
+		ORDER BY length(package) LIMIT 1`
+
+	pkg := strings.Trim(strings.TrimSpace(name), "/")
+	if pkg == "" {
+		return "", fmt.Errorf("package %q: %w", name, ErrInvalidArgument)
+	}
+	for _, cand := range []string{pkg, strings.ReplaceAll(pkg, "/", ".")} {
+		if cand == "" {
+			continue
+		}
+		esc := escapeLike(cand)
+		var resolved string
+		switch err := conn.QueryRowContext(ctx, q, cand, "%/"+esc, "%."+esc).Scan(&resolved); {
+		case err == nil:
+			return resolved, nil
+		case !errors.Is(err, sql.ErrNoRows):
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("package %q: %w", name, ErrNotFound)
+}
+
+// packageDirWhere builds a WHERE clause that matches directory-level packages
+// for JS/TS (slash) and Python (dot) mapper modules. A query for a directory
+// like "app/components/ui" has no symbol with package exactly that string —
+// children live at "app/components/ui/button", "app/components/ui/input", etc.
+// The clause matches:
+//
+//	package = dir
+//	package LIKE dir || '/%'          (prefix: dir is ancestor)
+//	package LIKE '%/' || dir           (suffix: bare leaf)
+//	package LIKE '%/' || dir || '/%'   (infix: qualified mid-path)
+//
+// plus the same three with '.' for Python. This lets "ui", "components/ui",
+// and "app/components/ui" all find "app/components/ui/button".
+func packageDirWhere(pkg string) (string, []any) {
+	pkg = strings.Trim(strings.TrimSpace(pkg), "/")
+	candidates := []string{pkg}
+	if dotted := strings.ReplaceAll(pkg, "/", "."); dotted != pkg {
+		candidates = append(candidates, dotted)
+	}
+	var usable []string
+	for _, c := range candidates {
+		if c != "" {
+			usable = append(usable, c)
+		}
+	}
+	if len(usable) == 0 {
+		return "1=0", nil
+	}
+	var clauses []string
+	var args []any
+	for _, cand := range usable {
+		esc := escapeLike(cand)
+		clauses = append(clauses, "package = ?")
+		args = append(args, cand)
+		clauses = append(clauses, "package LIKE (? || '/%') ESCAPE '\\'")
+		args = append(args, esc)
+		clauses = append(clauses, "package LIKE ('%/' || ?) ESCAPE '\\'")
+		args = append(args, esc)
+		clauses = append(clauses, "package LIKE ('%/' || ? || '/%') ESCAPE '\\'")
+		args = append(args, esc)
+		clauses = append(clauses, "package LIKE (? || '.%') ESCAPE '\\'")
+		args = append(args, esc)
+		clauses = append(clauses, "package LIKE ('%.' || ?) ESCAPE '\\'")
+		args = append(args, esc)
+		clauses = append(clauses, "package LIKE ('%.' || ? || '.%') ESCAPE '\\'")
+		args = append(args, esc)
+	}
+	return "(" + strings.Join(clauses, " OR ") + ")", args
 }
 
 // Package returns the exported surface of one package: signatures + first
 // doc line per symbol, never bodies.
 func (m *Manager) Package(ctx context.Context, req PackageRequest) (*PackageResponse, error) {
+	if strings.TrimSpace(req.Repo) == "" {
+		return nil, fmt.Errorf("repo is required: %w", ErrInvalidArgument)
+	}
+	if strings.TrimSpace(req.Package) == "" {
+		return nil, fmt.Errorf("package is required: %w", ErrInvalidArgument)
+	}
 	conn, release, fresh, err := m.ensureFresh(ctx, req.Repo)
 	if err != nil {
 		return nil, err
 	}
 	defer release() // hold the handle for every statement below, not just the first
 	m.bump(req.Repo, "package")
-	pkg := strings.Trim(req.Package, "/")
-	var resolved string
-	err = conn.QueryRowContext(ctx, `SELECT package FROM symbols
-		WHERE package = ? OR package LIKE ? ORDER BY length(package) LIMIT 1`,
-		pkg, "%/"+pkg).Scan(&resolved)
-	if errors.Is(err, sql.ErrNoRows) {
+
+	// First tier: exact or suffix (preserves Go and Python leaf behavior).
+	if resolved, err := resolvePackage(ctx, conn, req.Package); err == nil {
+		resp := &PackageResponse{Repo: req.Repo, Freshness: fresh, Package: resolved}
+		var counts pkgCount
+		if counts, err = pkgCounts(ctx, conn, `package = ?`, []any{resolved}); err != nil {
+			return nil, err
+		}
+		resp.Unexported, resp.Tests = counts.unexported, counts.tests
+		rows, err := conn.QueryContext(ctx, `SELECT qname, kind, signature, doc, file, line FROM symbols
+			WHERE package = ? AND exported = 1 AND NOT `+isTestFile+` ORDER BY file, line LIMIT ?`,
+			resolved, maxPkgSymbols+1)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var s PackageSymbol
+			var doc string
+			if err := rows.Scan(&s.QName, &s.Kind, &s.Signature, &doc, &s.File, &s.Line); err != nil {
+				return nil, err
+			}
+			s.Doc = firstLine(doc)
+			resp.Symbols = append(resp.Symbols, s)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		if len(resp.Symbols) > maxPkgSymbols {
+			resp.Symbols = resp.Symbols[:maxPkgSymbols]
+			resp.Truncated = true
+			resp.SymbolsTotal = counts.total
+		}
+		resp.Hint = packageHint(fresh, counts.mapper)
+		return resp, nil
+	} else if !errors.Is(err, ErrNotFound) {
+		return nil, err
+	}
+
+	// Second tier: directory-level prefix aggregation for JS/TS (and Python dirs).
+	// No exact/suffix package exists — treat the query as a directory path and
+	// aggregate symbols from all descendant modules.
+	pkgNorm := strings.Trim(strings.TrimSpace(req.Package), "/")
+	where, args := packageDirWhere(pkgNorm)
+	var total int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM symbols WHERE `+where, args...).Scan(&total); err != nil { // #nosec G202 -- where is built from placeholder ORs, not user string concatenation
+		return nil, err
+	}
+	if total == 0 {
 		return nil, fmt.Errorf("package %q: %w", req.Package, ErrNotFound)
 	}
+	resp := &PackageResponse{Repo: req.Repo, Freshness: fresh, Package: pkgNorm}
+	// Counts across the aggregated directory.
+	counts, err := pkgCounts(ctx, conn, where, args)
 	if err != nil {
 		return nil, err
 	}
-
-	resp := &PackageResponse{Repo: req.Repo, Freshness: fresh, Package: resolved, Hint: pkgSymbolsLimit}
-
-	var hints []string
-	if fresh.Stale {
-		hints = append(hints, staleGraphHint)
-	}
-	if fresh.Rebuilding {
-		hints = append(hints, rebuildingHint)
-	}
-	if len(hints) > 0 {
-		hints = append(hints, pkgSymbolsLimit)
-		resp.Hint = strings.Join(hints, "; ")
-	}
-	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM symbols WHERE package = ? AND exported = 0`,
-		resolved).Scan(&resp.Unexported); err != nil {
-		return nil, err
-	}
-	rows, err := conn.QueryContext(ctx, `SELECT qname, kind, signature, doc, file, line FROM symbols
-		WHERE package = ? AND exported = 1 ORDER BY file, line LIMIT ?`,
-		resolved, maxPkgSymbols+1)
+	resp.Unexported, resp.Tests = counts.unexported, counts.tests
+	sq := `SELECT qname, kind, signature, doc, file, line FROM symbols WHERE ` + where + ` AND exported = 1 AND NOT ` + isTestFile + ` ORDER BY file, line LIMIT ?` // #nosec G202 -- see above
+	sargs := append(append([]any{}, args...), maxPkgSymbols+1)
+	rows, err := conn.QueryContext(ctx, sq, sargs...)
 	if err != nil {
 		return nil, err
 	}
@@ -800,6 +1067,25 @@ func (m *Manager) Package(ctx context.Context, req PackageRequest) (*PackageResp
 	if len(resp.Symbols) > maxPkgSymbols {
 		resp.Symbols = resp.Symbols[:maxPkgSymbols]
 		resp.Truncated = true
+		resp.SymbolsTotal = counts.total
 	}
+	resp.Hint = packageHint(fresh, counts.mapper)
 	return resp, nil
+}
+
+// packageHint assembles a package surface's hint with the tier-correct
+// exclusion wording (see pkgCount.mapper).
+func packageHint(fresh Freshness, mapper bool) string {
+	limit := pkgSymbolsLimitGo
+	if mapper {
+		limit = pkgSymbolsLimitMapper
+	}
+	var hints []string
+	if fresh.Stale {
+		hints = append(hints, staleGraphHint)
+	}
+	if fresh.Rebuilding {
+		hints = append(hints, rebuildingHint)
+	}
+	return strings.Join(append(hints, limit), "; ")
 }
