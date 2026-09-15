@@ -36,8 +36,7 @@ func newSearchCmd(a *app) *cobra.Command {
 				AllProjects: allProjects,
 			})
 			if err != nil {
-				var ve *store.ValidationError
-				if errors.As(err, &ve) {
+				if ve, ok := errors.AsType[*store.ValidationError](err); ok {
 					writeError("validation_failed", ve.Message, false,
 						withField(ve.Field),
 						withSuggestion("provide --"+ve.Field),
