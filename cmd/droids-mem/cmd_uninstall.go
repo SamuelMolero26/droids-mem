@@ -9,9 +9,11 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/samuelmolero26/droids-mem/internal/mcpserver"
 	"github.com/samuelmolero26/droids-mem/internal/state"
 )
 
@@ -231,6 +233,9 @@ func removeClaudeSnippetStatus(project bool) string {
 // stopServerStatus SIGTERMs the daemon recorded in mcp.pid (server does a
 // graceful Shutdown) and clears the pidfile. The symmetric counterpart of
 // ensure-server's spawn.
+//
+// SIGTERM only a listener that proves it IS the pidfile PID; refuse anything
+// unproven. Only ensure-server writes the pidfile, so a recycled PID is real.
 func stopServerStatus() string {
 	dir, err := state.Dir()
 	if err != nil {
@@ -247,6 +252,25 @@ func stopServerStatus() string {
 	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
 	if err != nil {
 		return "error: bad pidfile: " + err.Error()
+	}
+	// kill(0)/kill(-1) hit a whole process group / every user process, and 0
+	// is also verifyServer's "no PID proven".
+	if pid <= 0 {
+		return fmt.Sprintf("error: bad pidfile: pid %d", pid)
+	}
+	tok, err := state.LoadOrCreateToken()
+	if err != nil {
+		return "error: load token: " + err.Error()
+	}
+	addr := envOr("DROIDS_MEM_MCP_ADDR", mcpserver.DefaultAddr)
+	// Keep the pidfile on every refusal below: erasing it hides the
+	// inconsistency that is the only evidence something went wrong.
+	id, err := verifyServer(baseURL(addr), tok, 500*time.Millisecond)
+	if err != nil {
+		return fmt.Sprintf("not_verified: nothing on %s answered the identity challenge; pid %d left alone (%v)", addr, pid, err)
+	}
+	if id.Pid != pid {
+		return fmt.Sprintf("not_verified: the server on %s proved pid %d (0 = none), pidfile names %d; left alone", addr, id.Pid, pid)
 	}
 	proc, err := os.FindProcess(pid)
 	if err != nil {

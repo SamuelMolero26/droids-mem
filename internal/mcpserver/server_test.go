@@ -5,9 +5,12 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -87,7 +90,7 @@ func TestIdentityProof(t *testing.T) {
 
 func TestIdentityHandler(t *testing.T) {
 	const token = "tok-xyz"
-	h := identityHandler(token)
+	h := identityHandler(token, "v9.9.9")
 
 	t.Run("empty nonce is rejected", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/identity", nil)
@@ -108,19 +111,30 @@ func TestIdentityHandler(t *testing.T) {
 		}
 	})
 
-	t.Run("valid nonce returns the proof", func(t *testing.T) {
+	// The stop path signals the PID this answer reports, so every field it
+	// decides on is asserted here rather than probed for a substring.
+	t.Run("valid nonce answers with the full identity", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/identity?nonce=n1", nil)
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", rec.Code)
 		}
-		body := rec.Body.String()
-		if !strings.Contains(body, IdentityProof(token, "n1")) {
-			t.Errorf("body %q missing expected proof", body)
+		type identity struct {
+			Server   string `json:"server"`
+			Proof    string `json:"proof"`
+			Version  string `json:"version"`
+			Pid      int    `json:"pid"`
+			PidProof string `json:"pid_proof"`
 		}
-		if !strings.Contains(body, ServerName) {
-			t.Errorf("body %q missing server name", body)
+		var got identity
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode body %q: %v", rec.Body.String(), err)
+		}
+		want := identity{ServerName, IdentityProof(token, "n1"), "v9.9.9",
+			os.Getpid(), IdentityPidProof(token, "n1", os.Getpid())}
+		if got != want {
+			t.Errorf("identity = %+v, want %+v", got, want)
 		}
 	})
 }
@@ -218,5 +232,33 @@ func TestInstructions_TransportFork(t *testing.T) {
 	}
 	if strings.Contains(stdioVar, "Do NOT save session summaries") {
 		t.Errorf("stdio variant carries the HTTP no-self-save policy")
+	}
+}
+
+func TestIdentityPidProof(t *testing.T) {
+	const token = "tok-abc"
+
+	// Independently recomputed HMAC — locks the construction so the stop path
+	// and the server can never drift on it.
+	want := func(nonce string, pid int) string {
+		kmac := hmac.New(sha256.New, []byte(token))
+		kmac.Write([]byte("droids-mem/pid_proof"))
+		mac := hmac.New(sha256.New, kmac.Sum(nil))
+		mac.Write([]byte(nonce + ":" + strconv.Itoa(pid)))
+		return hex.EncodeToString(mac.Sum(nil))
+	}
+
+	if got := IdentityPidProof(token, "n1", 42); got != want("n1", 42) {
+		t.Fatalf("pid proof = %q, want %q", got, want("n1", 42))
+	}
+	// Must not collide with the PID-less proof, or a caller could accept one
+	// where it required the other.
+	if IdentityPidProof(token, "n1", 42) == IdentityProof(token, "n1") {
+		t.Fatal("pid proof collided with the plain proof")
+	}
+	// A relay can ask any server for the plain proof of a crafted nonce. If
+	// that equals a pid proof, the relay forges a PID of its choosing.
+	if IdentityPidProof(token, "n1", 42) == IdentityProof(token, "n1:42") {
+		t.Fatal("pid proof is obtainable as the plain proof of nonce+\":\"+pid")
 	}
 }

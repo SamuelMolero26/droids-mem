@@ -82,8 +82,7 @@ or consolidate manually.`,
 }
 
 func writePruneError(err error) {
-	var ve *store.ValidationError
-	if errors.As(err, &ve) {
+	if ve, ok := errors.AsType[*store.ValidationError](err); ok {
 		writeError(ve.Code, ve.Message, ve.Retryable, withField(ve.Field), withSuggestion(ve.Suggestion))
 		exitWith(ExitUsage)
 	}

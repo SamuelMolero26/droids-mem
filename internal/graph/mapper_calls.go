@@ -61,7 +61,7 @@ func collectMapperCalls(files []mapperFile) ([]mapperFileCalls, mapperStats) {
 			continue
 		}
 
-		if refs := extractMapperCalls(eng, src, &stats); len(refs) > 0 {
+		if refs := callsFromMapperFile(eng, f, src, &stats); len(refs) > 0 {
 			out = append(out, mapperFileCalls{file: f.rel, lang: f.entry.Name, refs: refs})
 		}
 	}
@@ -89,6 +89,134 @@ func extractMapperCalls(eng *mapperEngine, src []byte, stats *mapperStats) []gts
 		return nil
 	}
 	return eng.calls.Extract(tree).Calls
+}
+
+var _ = extractMapperCalls // keep used: direct FactCalls testing even though collectMapperCalls now parses inline for JSX co-extraction
+
+// callsFromMapperFile is one file's parse-and-extract, scoped so
+// `defer tree.Release()` runs on every exit path — the same reason
+// outlineMapperFile and importsFromMapperFile are shaped this way.
+func callsFromMapperFile(eng *mapperEngine, f mapperFile, src []byte, stats *mapperStats) []gts.CallRef {
+	tree, err := eng.parsers.Parse(src) // pooled: see mapperEngine.parsers
+	if err != nil {
+		stats.parseErr++
+		return nil // unparsable file is skip-and-continue, not fatal
+	}
+	defer tree.Release()
+	return callsFromMapperTree(eng, f, src, tree, stats)
+}
+
+// callsFromMapperTree is the call extraction itself, over a tree the CALLER
+// owns and releases (see outlineMapperTree). Releasing while the returned
+// refs live on is safe: gts.CallRef is a pure value struct whose Name and
+// Receiver come from Node.Text, which is `string(source[a:b])` — a fresh copy
+// off the caller's own buffer, never arena memory. No *gts.Node escapes.
+func callsFromMapperTree(eng *mapperEngine, f mapperFile, src []byte, tree *gts.Tree, stats *mapperStats) []gts.CallRef {
+	var refs []gts.CallRef
+	if eng.calls != nil {
+		refs = eng.calls.Extract(tree).Calls
+	} else {
+		stats.outlineDecline++ // FactProgram failed to compile for this language
+	}
+	if jsxCapableLanguages[f.entry.Name] {
+		if jsx := jsxCallRefs(tree, eng.lang, f.entry.Name, src); len(jsx) > 0 {
+			refs = append(refs, jsx...)
+		}
+	}
+	return refs
+}
+
+// jsxCapableLanguages is the subset of jsFamilyLanguages whose grammar can
+// actually produce JSX nodes, and it is deliberately NOT jsFamilyLanguages.
+// The non-tsx `typescript` grammar cannot: in a .ts file `<Foo />` is a type
+// assertion, and parsing it yields ERROR nodes, never jsx_opening_element or
+// jsx_self_closing_element (probed against gotreesitter v0.49.0 — .ts gives
+// jsx=0/ERROR=2, .tsx and .js both give jsx=2/ERROR=0). Walking a .ts tree
+// for JSX is therefore provably dead work, and a pure-.ts repo is the common
+// case: gating on the full JS family cost +2.66% on a 200-file cold build
+// (p=0.005, n=10 interleaved) to find nothing. .js stays in — real-world
+// React ships JSX in .js constantly, and the javascript grammar parses it.
+var jsxCapableLanguages = map[string]bool{
+	"tsx":        true,
+	"javascript": true,
+}
+
+// jsxCallRefs walks tree for JSX component uses — jsx_opening_element and
+// jsx_self_closing_element — and emits a CallRef per use so the existing
+// containment attribution (innermostContainer) and resolution ladder apply
+// unchanged. FactCalls only sees call_expression, so <FadeIn /> etc never
+// produced a callsite before.
+//
+// Each JSX tag yields Name = last dotted segment, Receiver = prefix before
+// the last dot ("" for <Button />). Lowercase html tags (div, span) are
+// skipped — they would never resolve to a component symbol and would only
+// add noise. Namespaced tags (Foo:Bar) are skipped for now.
+func jsxCallRefs(tree *gts.Tree, lang *gts.Language, langName string, src []byte) []gts.CallRef {
+	root := tree.RootNode()
+	if root == nil {
+		return nil
+	}
+	var out []gts.CallRef
+	stack := []*gts.Node{root}
+	for len(stack) > 0 {
+		n := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		t := n.Type(lang)
+		if t == "jsx_opening_element" || t == "jsx_self_closing_element" {
+			if ref, ok := jsxTagCallRef(n, lang, langName, src, t); ok {
+				out = append(out, ref)
+			}
+		}
+		for i := n.ChildCount() - 1; i >= 0; i-- {
+			if c := n.Child(i); c != nil {
+				stack = append(stack, c)
+			}
+		}
+	}
+	return out
+}
+
+func jsxTagCallRef(n *gts.Node, lang *gts.Language, langName string, src []byte, nodeType string) (gts.CallRef, bool) {
+	nameNode := n.ChildByFieldName("name", lang)
+	if nameNode == nil {
+		return gts.CallRef{}, false
+	}
+	full := strings.TrimSpace(nameNode.Text(src))
+	if full == "" || strings.Contains(full, ":") {
+		return gts.CallRef{}, false
+	}
+	if full[0] < 'A' || full[0] > 'Z' {
+		return gts.CallRef{}, false
+	}
+	parts := strings.Split(full, ".")
+	name := parts[len(parts)-1]
+	if name == "" || name[0] < 'A' || name[0] > 'Z' {
+		return gts.CallRef{}, false
+	}
+	receiver := ""
+	if len(parts) > 1 {
+		receiver = strings.Join(parts[:len(parts)-1], ".")
+	}
+	idx := strings.LastIndex(full, name)
+	var nameStart, nameEnd uint32
+	if idx >= 0 {
+		nameStart = nameNode.StartByte() + uint32(idx) //nolint:gosec // G115: idx < 2<<20 (maxMapperFileBytes)
+		nameEnd = nameStart + uint32(len(name))        //nolint:gosec // G115: len(name) < file size
+	} else {
+		nameStart = nameNode.StartByte()
+		nameEnd = nameNode.EndByte()
+	}
+	return gts.CallRef{
+		Lang:          langName,
+		Kind:          "call",
+		Name:          name,
+		Receiver:      receiver,
+		NodeType:      nodeType,
+		StartByte:     n.StartByte(),
+		EndByte:       n.EndByte(),
+		NameStartByte: nameStart,
+		NameEndByte:   nameEnd,
+	}, true
 }
 
 // mapperCallsite is one attributed call, in exactly the shape the ladder
@@ -180,26 +308,14 @@ func callerChain(ms mapperSym) string {
 // written without one. Direct-file order matches the JS resolution order
 // TypeScript and bundlers use; ".mjs" is included because mapper discovery
 // indexes it, so omitting it would leave a real file unreachable.
-var specifierExtensions = []string{".ts", ".tsx", ".js", ".jsx", ".mjs"}
+var specifierExtensions = []string{".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cts", ".mts"}
 
-// resolveSpecifier maps a module specifier as written in importer (itself a
-// repo-relative, slash-separated path) to the repo-relative mapper file it
-// names, or "" when it names none.
-//
-// Only RELATIVE specifiers resolve. A bare one ("axios", "@scope/pkg") names
-// a dependency, not repo source, and nothing here tries to walk node_modules
-// for it. The empty result is not an error path: rung 2a expresses a miss
-// exactly this way, and a missed rung falls through un-narrowed.
-//
-// known is the set of repo-relative mapper files this build discovered, so
-// resolution never touches the filesystem — a specifier can only resolve to
-// a file the graph actually indexed, which is also what keeps a "../.."
-// escape from the repo root from resolving to anything.
-func resolveSpecifier(importer, spec string, known map[string]bool) string {
-	if !strings.HasPrefix(spec, "./") && !strings.HasPrefix(spec, "../") {
-		return ""
-	}
-	base := path.Join(path.Dir(importer), spec)
+// probeKnown resolves base — a repo-relative path written without an
+// extension — against the files this build discovered, trying the specifier
+// verbatim, then each candidate extension, then the directory's index file.
+// Returns "" when none is indexed. Shared by every specifier form so relative
+// and aliased imports cannot drift apart.
+func probeKnown(known map[string]bool, base string) string {
 	if known[base] {
 		return base // the specifier carried its own extension
 	}
@@ -216,13 +332,67 @@ func resolveSpecifier(importer, spec string, known map[string]bool) string {
 	return ""
 }
 
+// resolveSpecifier maps a module specifier as written in importer (itself a
+// repo-relative, slash-separated path) to the repo-relative mapper file it
+// names, or "" when it names none.
+//
+// Only RELATIVE and ALIAS specifiers resolve. A bare one ("axios",
+// "@scope/pkg", "next/link") names a dependency, not repo source, and nothing
+// here tries to walk node_modules for it. The empty result is not an error
+// path: rung 2a expresses a miss exactly this way, and a missed rung falls
+// through un-narrowed.
+//
+// known is the set of repo-relative mapper files this build discovered, so
+// resolution never touches the filesystem — a specifier can only resolve to
+// a file the graph actually indexed, which is also what keeps a "../.."
+// escape from the repo root from resolving to anything.
+//
+// alias is the repo's tsconfig/jsconfig paths mapping (tsconfig.go), loaded
+// once per build. When it is non-nil, ONLY its paths entries rewrite a
+// specifier — a repo that ships a config without an "@/" entry genuinely has
+// no "@/" alias, so falling back there would invent edges TypeScript itself
+// would reject. The naive "@/→./" fallback applies only when the repo has no
+// config at all (the create-next-app case). Multiple paths targets are probed
+// in order, first indexed hit wins, matching TS resolution.
+func resolveSpecifier(importer, spec string, known map[string]bool, alias *aliasConfig) string {
+	if strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../") {
+		return probeKnown(known, path.Join(path.Dir(importer), spec))
+	}
+	if alias != nil {
+		targets, remainder := alias.matchSpec(spec)
+		base := alias.baseUrl
+		if base == "" {
+			base = "."
+		}
+		for _, tmpl := range targets {
+			joined := path.Clean(strings.TrimPrefix(path.Join(base, strings.Replace(tmpl, "*", remainder, 1)), "./"))
+			if joined == "." {
+				joined = remainder
+			}
+			if hit := probeKnown(known, joined); hit != "" {
+				return hit
+			}
+		}
+		return ""
+	}
+	// No alias config: naive "@/→./" fallback.
+	if strings.HasPrefix(spec, "@/") {
+		return probeKnown(known, strings.TrimPrefix(spec, "@/"))
+	}
+	return ""
+}
+
 // resolveBindings turns mapperImports' raw binding -> SPECIFIER map into
 // rung 2a's binding -> repo FILE map, against the set of files this build
 // actually discovered. A binding whose specifier names no indexed file is
 // dropped here rather than carried as an unresolvable entry: the ladder's
 // only question is "which file", and no entry and an unresolvable entry mean
 // the same thing to it — a rung-2a miss.
-func resolveBindings(files []mapperFile, bindings mapperImportBindings) map[string]map[string]string {
+//
+// alias is the repo's tsconfig/jsconfig mapping, threaded straight through to
+// resolveSpecifier; nil means the repo has no config and the naive "@/→./"
+// fallback applies.
+func resolveBindings(files []mapperFile, bindings mapperImportBindings, alias *aliasConfig) mapperResolvedImports {
 	if len(bindings) == 0 {
 		return nil
 	}
@@ -230,28 +400,43 @@ func resolveBindings(files []mapperFile, bindings mapperImportBindings) map[stri
 	for _, f := range files {
 		known[f.rel] = true
 	}
-	out := make(map[string]map[string]string, len(bindings))
+	out := make(mapperResolvedImports, len(bindings))
 	for importer, byName := range bindings {
-		for name, spec := range byName {
-			target := resolveSpecifier(importer, spec, known)
+		for name, binding := range byName {
+			target := resolveSpecifier(importer, binding.specifier, known, alias)
 			if target == "" {
 				continue
 			}
 			if out[importer] == nil {
-				out[importer] = map[string]string{}
+				out[importer] = map[string]mapperResolvedImport{}
 			}
-			out[importer][name] = target
+			out[importer][name] = mapperResolvedImport{
+				target:        target,
+				imported:      binding.imported,
+				namespace:     binding.namespace,
+				defaultImport: binding.defaultImport,
+			}
 		}
 	}
 	return out
 }
 
+type mapperResolvedImports map[string]map[string]mapperResolvedImport
+
+type mapperResolvedImport struct {
+	target        string
+	imported      string
+	namespace     bool
+	defaultImport bool
+}
+
 // mapperLadderIndex is the repo-wide lookup the resolution ladder searches:
-// every mapper symbol from this build, grouped by bare name, plus the set of
-// names seen as class-like definitions (design D4).
+// every mapper symbol grouped by bare name and file, plus the set of names
+// seen as class-like definitions (design D4).
 type mapperLadderIndex struct {
 	syms    []mapperSym
 	byName  map[string][]int
+	byFile  map[string][]int
 	classes map[string]bool
 	// imports is rung 2a's input: importer file -> local binding name ->
 	// the repo-relative file that binding's specifier RESOLVED to. Already
@@ -259,16 +444,23 @@ type mapperLadderIndex struct {
 	// ladder never touches specifiers or the filesystem. Nil is a legitimate
 	// value — every rung-2a lookup then misses and the ladder behaves
 	// exactly as it did before this rung existed.
-	imports map[string]map[string]string
+	imports mapperResolvedImports
 }
 
 // buildMapperLadderIndex indexes syms for the ladder. classes mirrors the
 // spike's ix.classes: any symbol whose kind is class-like makes its NAME
 // resolvable as a receiver at rung 2b. importsByFile feeds rung 2a.
-func buildMapperLadderIndex(syms []mapperSym, importsByFile map[string]map[string]string) *mapperLadderIndex {
-	idx := &mapperLadderIndex{syms: syms, byName: map[string][]int{}, classes: map[string]bool{}, imports: importsByFile}
+func buildMapperLadderIndex(syms []mapperSym, importsByFile mapperResolvedImports) *mapperLadderIndex {
+	idx := &mapperLadderIndex{
+		syms:    syms,
+		byName:  map[string][]int{},
+		byFile:  map[string][]int{},
+		classes: map[string]bool{},
+		imports: importsByFile,
+	}
 	for i, s := range syms {
 		idx.byName[s.row.name] = append(idx.byName[s.row.name], i)
+		idx.byFile[s.row.file] = append(idx.byFile[s.row.file], i)
 		if isMapperClassLike(s.row.kind) {
 			idx.classes[s.row.name] = true
 		}
@@ -318,10 +510,22 @@ func topContainer(chain string) string {
 // returning, so a hit there narrows the set the REST of the ladder searches;
 // every other rung returns immediately on a hit.
 func (ix *mapperLadderIndex) resolve(c mapperCallsite) (hits []int, total int) {
-	cands := ix.byName[c.name]
-	if len(cands) == 0 {
+	allCands := ix.byName[c.name]
+	bareImport, hasBareImport := ix.imports[c.file][c.name]
+	if len(allCands) == 0 && (c.receiver != "" || !hasBareImport) {
 		return nil, 0
 	}
+	if c.receiver == "" && hasBareImport {
+		if local := ix.filter(allCands, func(s mapperSym) bool {
+			if s.row.file != c.file || s.container == "" {
+				return false
+			}
+			return s.container == c.container || strings.HasPrefix(c.container, s.container+".")
+		}); len(local) > 0 {
+			return local, len(local)
+		}
+	}
+	cands := allCands
 	// 0. Receiver-arity constraint: a member call (foo.get()) can only target
 	// a member, a bare call (get()) can only target a free function — purely
 	// syntactic, no type information needed. Skipped for go: a selector may be
@@ -346,20 +550,44 @@ func (ix *mapperLadderIndex) resolve(c mapperCallsite) (hits []int, total int) {
 			}
 		}
 	}
-	// 2a. receiver names something imported into THIS file: narrow to the
-	// members of classes defined in the file that import resolved to. Sits
+	// 2a. A bare imported name narrows to its exported name in the resolved
+	// file. A namespace receiver narrows to top-level symbols in that file;
+	// other receivers retain the existing imported-class member behavior. Sits
 	// above 2b rather than replacing it because 2b's repo-wide class match
 	// is still the right answer when nothing was imported — and because a
 	// receiver name can legitimately collide with an unrelated class
 	// elsewhere in the repo, which is exactly the case 2a gets right and 2b
 	// gets wrong. A miss falls through with cands untouched.
-	if c.receiver != "" {
-		if target := ix.imports[c.file][c.receiver]; target != "" {
-			if hit := ix.filter(cands, func(s mapperSym) bool {
-				return s.row.file == target && ix.classes[topContainer(s.container)]
+	if c.receiver == "" {
+		if hasBareImport {
+			importCands := allCands
+			if bareImport.imported != "" {
+				importCands = ix.byName[bareImport.imported]
+			}
+			if hit := ix.filter(importCands, func(s mapperSym) bool {
+				return s.row.file == bareImport.target && s.container == ""
 			}); len(hit) > 0 {
 				return hit, len(hit)
 			}
+			if bareImport.defaultImport {
+				if hit := ix.filter(ix.byFile[bareImport.target], func(s mapperSym) bool {
+					return s.container == ""
+				}); len(hit) > 0 {
+					return hit, len(hit)
+				}
+			}
+		}
+	} else if imported, ok := ix.imports[c.file][c.receiver]; ok {
+		if imported.namespace {
+			if hit := ix.filter(allCands, func(s mapperSym) bool {
+				return s.row.file == imported.target && s.container == ""
+			}); len(hit) > 0 {
+				return hit, len(hit)
+			}
+		} else if hit := ix.filter(cands, func(s mapperSym) bool {
+			return s.row.file == imported.target && ix.classes[topContainer(s.container)]
+		}); len(hit) > 0 {
+			return hit, len(hit)
 		}
 	}
 	// 2b. receiver names a known class, repo-wide (2a, above, is import-scoped)
@@ -395,10 +623,15 @@ func (ix *mapperLadderIndex) resolve(c mapperCallsite) (hits []int, total int) {
 // (index.go). fanoutCapped counts CALLSITES (not edges) whose rung-5
 // candidate set exceeded fanoutCap — a build-level partiality fact, feeding
 // meta.fanout_capped, not a per-edge one.
-func mapperEdges(files []mapperFile, mapperSyms []mapperSym, bindings mapperImportBindings) (edgeSet, int) {
-	fileCalls, _ := collectMapperCalls(files)
+// fileCalls comes from the caller rather than a collectMapperCalls call here:
+// buildIndex takes it from scanMapperFiles, which extracted it from the same
+// parse that produced mapperSyms.
+// alias holds the tsconfig/jsconfig paths mapping for this repo, loaded once
+// per build by buildIndex; nil means the repo has no config and the naive
+// "@/→./" fallback applies.
+func mapperEdges(files []mapperFile, mapperSyms []mapperSym, bindings mapperImportBindings, fileCalls []mapperFileCalls, alias *aliasConfig) (edgeSet, int) {
 	callsites := attributeMapperCalls(mapperSyms, fileCalls)
-	idx := buildMapperLadderIndex(mapperSyms, resolveBindings(files, bindings))
+	idx := buildMapperLadderIndex(mapperSyms, resolveBindings(files, bindings, alias))
 
 	edges := edgeSet{}
 	fanoutCapped := 0

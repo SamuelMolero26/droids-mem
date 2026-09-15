@@ -29,8 +29,7 @@ func sessStdin(t *testing.T, home, db, stdin string, args ...string) []byte {
 	cmd.Stdin = strings.NewReader(stdin)
 	out, err := cmd.Output()
 	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
+		if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 			t.Fatalf("hook %v exited %d (stderr: %s)", args, ee.ExitCode(), ee.Stderr)
 		}
 		t.Fatalf("hook %v: %v", args, err)

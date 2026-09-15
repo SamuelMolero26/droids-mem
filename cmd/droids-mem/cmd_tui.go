@@ -26,7 +26,7 @@ route through prune.`,
 			if err != nil {
 				return err
 			}
-			p := tea.NewProgram(tui.New(s), tea.WithAltScreen())
+			p := tea.NewProgram(tui.New(s, version), tea.WithAltScreen())
 			_, err = p.Run()
 			return err
 		},

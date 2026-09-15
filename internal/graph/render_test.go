@@ -46,7 +46,7 @@ func TestRenderSymbol_TableAndFence(t *testing.T) {
 	// The fence must be at least 3 backticks and strictly longer than the
 	// longest backtick run in the body (here 1), and must close.
 	src := r.Symbol.Source
-	fenced := fence(src)
+	fenced := fence(src, r.Symbol.File)
 	openLen := len(fenced) - len(strings.TrimLeft(fenced, "`"))
 	if openLen < 3 {
 		t.Errorf("fence shorter than 3 backticks: %d", openLen)
@@ -82,6 +82,39 @@ func TestRenderSymbol_CallerSplitsAndCarried(t *testing.T) {
 	}
 	if !strings.Contains(out, "carried: true") {
 		t.Errorf("missing carried flag:\n%s", out)
+	}
+}
+
+func TestRenderSymbol_NavigationIsCompactAndDeterministic(t *testing.T) {
+	r := &SymbolResponse{
+		Repo: "/repo",
+		Symbol: &SymbolInfo{
+			QName: "app/source:Send", Kind: "func", File: "app/source.tsx", Line: 3, Signature: "function Send()",
+		},
+		Destinations: []NavigationDestination{
+			{
+				Operation: "push", Evidence: "direct", Certainty: "conditional",
+				RawDestination: "`/blog/${slug}`", Destination: "/blog/${slug}", Route: "/blog/[slug]",
+				TargetFile: "app/blog/[slug]/page.tsx", TargetQName: "app/blog/[slug]/page:Post",
+				File: "app/source.tsx", Line: 6,
+			},
+		},
+		UnresolvedDestinations: []UnresolvedNavigationDestination{
+			{
+				Operation: "redirect", Evidence: "direct", RawDestination: "makePath()",
+				Reason: "unsupported_expression", File: "app/source.tsx", Line: 7,
+			},
+		},
+	}
+	want := `repo: /repo
+symbol: app/source:Send  func  app/source.tsx:3
+signature: function Send()
+destinations[1]{operation,evidence,certainty,raw,destination,route,target_file,target_qname,loc}:
+  push,direct,conditional,` + "`/blog/${slug}`" + `,/blog/${slug},/blog/[slug],app/blog/[slug]/page.tsx,app/blog/[slug]/page:Post,app/source.tsx:6
+unresolved_destinations[1]{operation,evidence,raw,destination,reason,loc}:
+  redirect,direct,makePath(),,unsupported_expression,app/source.tsx:7`
+	if got := RenderSymbol(r); got != want {
+		t.Fatalf("RenderSymbol() =\n%s\nwant\n%s", got, want)
 	}
 }
 
@@ -173,5 +206,105 @@ func TestRenderPackage_EmptyAndStale(t *testing.T) {
 	}
 	if !strings.Contains(out, "symbols: none") {
 		t.Errorf("empty symbol set not definitive:\n%s", out)
+	}
+}
+
+// TestRenderSymbol_NeighborTotals pins the AXI §4 contract that a capped
+// neighbor list ships its true total. truncatedHint tells the agent to "see
+// *_total"; before this, query.go computed CallersTotal/CalleesTotal and the
+// renderer dropped them, so the hint pointed at a field no agent ever saw.
+func TestRenderSymbol_NeighborTotals(t *testing.T) {
+	out := RenderSymbol(&SymbolResponse{
+		Repo:         "/r",
+		Symbol:       &SymbolInfo{QName: "p.F", Kind: "func", File: "p/f.go", Line: 1, Signature: "func F()"},
+		Callers:      []Neighbor{{QName: "p.A", Signature: "func A()", File: "p/a.go", Line: 2}},
+		Callees:      []Neighbor{{QName: "p.B", Signature: "func B()", File: "p/b.go", Line: 3}},
+		CallersTotal: 91,
+		CalleesTotal: 60,
+		Truncated:    true,
+	})
+	for _, want := range []string{"callers_total: 91", "callees_total: 60"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestRenderSymbol_NeighborTotalsOmittedWhenNotTruncated keeps the field
+// definitive: 0 means "not truncated", so it must not print as a bare zero.
+func TestRenderSymbol_NeighborTotalsOmittedWhenNotTruncated(t *testing.T) {
+	out := RenderSymbol(&SymbolResponse{
+		Repo:    "/r",
+		Symbol:  &SymbolInfo{QName: "p.F", Kind: "func", File: "p/f.go", Line: 1, Signature: "func F()"},
+		Callers: []Neighbor{{QName: "p.A", Signature: "func A()", File: "p/a.go", Line: 2}},
+	})
+	if strings.Contains(out, "callers_total") || strings.Contains(out, "callees_total") {
+		t.Errorf("totals leaked on an untruncated response:\n%s", out)
+	}
+}
+
+// TestRenderPackage_TestsCountAndTotal pins the two package-surface counts:
+// test symbols are a scalar (never rows), and a capped list carries its total.
+func TestRenderPackage_TestsCountAndTotal(t *testing.T) {
+	out := RenderPackage(&PackageResponse{
+		Repo:         "/r",
+		Package:      "p",
+		Symbols:      []PackageSymbol{{QName: "p.F", Kind: "func", Signature: "func F()", File: "p/f.go", Line: 1}},
+		Unexported:   245,
+		Tests:        184,
+		SymbolsTotal: 445,
+		Truncated:    true,
+	})
+	for _, want := range []string{"unexported: 245", "tests: 184", "symbols_total: 445"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestRenderPackage_ZeroCountsOmitted keeps the common case free: a package
+// with no tests and no truncation pays nothing for either field.
+func TestRenderPackage_ZeroCountsOmitted(t *testing.T) {
+	out := RenderPackage(&PackageResponse{
+		Repo:    "/r",
+		Package: "p",
+		Symbols: []PackageSymbol{{QName: "p.F", Kind: "func", Signature: "func F()", File: "p/f.go", Line: 1}},
+	})
+	if strings.Contains(out, "tests:") || strings.Contains(out, "symbols_total") {
+		t.Errorf("zero counts leaked:\n%s", out)
+	}
+}
+
+// TestRenderFreshness_TestsSkipped pins the mapper tier's half of the test
+// story. Go indexes _test.go declarations and reports them as a package count;
+// the mapper tier skips test FILES at walk time (mapper.go isMapperTestFile),
+// so they are absent from every answer, including caller counts on symbol
+// queries. That is a build-level partiality fact like fanout_capped, so it
+// rides on freshness and shows up on both tools.
+func TestRenderFreshness_TestsSkipped(t *testing.T) {
+	out := RenderSymbol(&SymbolResponse{
+		Repo:      "/r",
+		Freshness: Freshness{TestsSkipped: 12},
+		Symbol:    &SymbolInfo{QName: "src/api:real", Kind: "func", File: "src/api.ts", Line: 1, Signature: "function real()"},
+	})
+	if !strings.Contains(out, "tests_skipped: 12") {
+		t.Errorf("missing tests_skipped in:\n%s", out)
+	}
+	// The count alone is a bare fact; the agent needs to know it makes caller
+	// counts understate, not just that some files were skipped.
+	if !strings.Contains(out, "understate") {
+		t.Errorf("tests_skipped must say what it costs the agent:\n%s", out)
+	}
+}
+
+// TestRenderFreshness_TestsSkippedAbsentOnGo keeps the common Go path free:
+// nothing is skipped there, so the line must not appear at all.
+func TestRenderFreshness_TestsSkippedAbsentOnGo(t *testing.T) {
+	out := RenderSymbol(&SymbolResponse{
+		Repo:   "/r",
+		Symbol: &SymbolInfo{QName: "p.F", Kind: "func", File: "p/f.go", Line: 1, Signature: "func F()"},
+	})
+	if strings.Contains(out, "tests_skipped") || strings.Contains(out, "freshness:") {
+		t.Errorf("clean Go response must carry no freshness line:\n%s", out)
 	}
 }

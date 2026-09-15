@@ -79,8 +79,7 @@ func runBinary(t *testing.T, dbPath string, args ...string) (stdout, stderr stri
 	cmd.Stderr = &errBuf
 	err := cmd.Run()
 	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
+		if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 			return outBuf.String(), errBuf.String(), ee.ExitCode()
 		}
 		t.Fatalf("run %v: %v", args, err)
