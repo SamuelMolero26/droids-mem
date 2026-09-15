@@ -1,382 +1,138 @@
-![droids-mem Logo](assets/droids-mem-logo.png)
+![droids-mem logo](assets/droids-mem-logo.png)
 
 # droids-mem
 
-**An AI agent's memory, stored in a single SQLite file, zero external services.**
-
-Every time your agent learns something — a fix that worked, a project convention,
-a hard-won error resolution — droids-mem keeps it. Next session, that lesson is
-there when it's needed, retrieved by meaning not keywords.
-
-One binary. One database. One `brew install`. No vector DB, no API key, no
-third-party service.
-
----
-
-## Where to go
-
-| I want to… | Go to |
-|---|---|
-| Install droids-mem and wire it to my agent | [Install](#install) |
-| Try it in 30 seconds | [Quick start](#quick-start) |
-| Understand how it works | [What it does](#what-it-does) |
-| See how well retrieval actually performs | [Retrieval performance](#retrieval-performance) |
-| Use the MCP tools from an agent | [MCP tools](#mcp-tools) |
-| See every CLI command | [CLI reference](#cli-reference) |
-| Share memories with teammates | [Shared context](#shared-context) |
-| Know how secrets are scrubbed | [Secret scrub](#secret-scrub) |
-| Tune or troubleshoot | [Configuration](#configuration) · [Troubleshooting](#troubleshooting) |
-
----
+droids-mem gives coding agents persistent local memory and a code graph from one
+binary. Memories live in SQLite with FTS5; no vector database, API key, or
+external service is required.
 
 ## Install
 
-### Homebrew (macOS / Linux)
+### Homebrew (macOS and Linux)
 
-```shell
+```sh
 brew tap samuelmolero26/tap
 brew install droids-mem
 ```
 
-If Homebrew refuses the tap as untrusted: `brew trust samuelmolero26/tap`.
+### Install script (macOS and Linux)
 
-### Install script (macOS / Linux)
-
-```shell
+```sh
 curl -fsSL https://raw.githubusercontent.com/SamuelMolero26/droids-mem/main/install.sh | sh
 ```
 
-Downloads the release binary for your platform, verifies it against the
-published `.sha256`, and installs it to `/usr/local/bin` — or `~/.local/bin`
-when that is not writable. Set `DROIDS_MEM_PREFIX` to choose a directory, or
-`DROIDS_MEM_VERSION` to pin a tag.
+The script downloads the release for `darwin` or `linux` on `amd64` or `arm64`,
+verifies its published SHA-256 checksum, and installs it to `/usr/local/bin` or
+`~/.local/bin`. Set `DROIDS_MEM_VERSION` to a `v`-prefixed release tag or
+`DROIDS_MEM_PREFIX` to another install directory.
 
-Every release asset also carries a SLSA provenance attestation:
+Release binaries also carry SLSA provenance attestations:
 
-```shell
+```sh
 gh attestation verify "$(command -v droids-mem)" --repo SamuelMolero26/droids-mem
 ```
 
-### Prebuilt binary
+## Connect an Agent
 
-Grab one for `linux/{amd64,arm64}` or `darwin/{amd64,arm64}` from the
-[Releases page](https://github.com/SamuelMolero26/droids-mem/releases).
+For Claude Code, install the lifecycle hooks, user-scoped MCP registration, and
+managed guidance block:
 
-### From source
-
-Requires Go 1.25+. Pure-Go (`modernc.org/sqlite`) — builds without CGO.
-
-```shell
-git clone https://github.com/SamuelMolero26/droids-mem
-cd droids-mem && go build ./cmd/droids-mem
-./droids-mem --version
-```
-
-### Wire it to your agent
-
-```shell
-# One-shot: hooks, stdio MCP registration, and CLAUDE.md block
+```sh
 droids-mem install --all
+```
 
-# Or per host
-droids-mem install --host opencode
+For Codex or OpenCode, register the MCP server with that host:
+
+```sh
 droids-mem install --host codex
+droids-mem install --host opencode
 ```
 
-Done. Your agent now has persistent memory. Claude Code connects over **stdio**
-(`serve --stdio`) — no port, no token file; the host owns the server lifecycle.
+These integrations use MCP over stdio. The host starts and stops the process, so
+there is no daemon, port, or bearer token to manage.
 
----
+## Quick Start
 
-## Quick start
+Use one stable, lowercase `task_type` for each project or workflow:
 
-```shell
-# Save your first lesson
+```sh
 droids-mem save \
-  --task-type "my-project" \
+  --task-type example-project \
   --kind error_resolution \
-  --title "FTS5 deadlocks on trigger rebuild in same txn" \
-  --what "ALTER TABLE inside a transaction, then rebuilding memories_fts in the same txn causes SQLITE_BUSY" \
-  --learned "DROP the FTS table and INSERT-SELECT must run AFTER the parent ALTER commits"
+  --title "Retry transient write locks" \
+  --what "Concurrent writes returned SQLITE_BUSY" \
+  --learned "Retry the write after a short backoff" \
+  --tags "sqlite retry"
 
-# Search it later, even with different words
-droids-mem search --query "fts trigger rebuild" --limit 5
-
-# Browse everything interactively
+droids-mem search --query "database busy" --task-type example-project
+droids-mem context --task-type example-project
 droids-mem tui
 ```
 
-All output is JSON on stdout; errors are JSON on stderr. Exit codes: `0` ok,
-`1` runtime, `2` usage, `3` not found, `5` conflict/duplicate, `10` dry-run.
+The four memory kinds are `error_resolution`, `task_pattern`, `user_rule`, and
+`session_summary`. Run `droids-mem <command> --help` for flags and examples.
 
----
+## MCP Tools
 
-## What it does
-
-### Memory
-
-Agents save structured lessons — session summaries, task patterns, error
-resolutions, user rules. On save, droids-mem:
-
-1. **Scrubs secrets** — API keys, tokens, credentials, PII. Detects 15+
-   patterns (AWS/GitHub/Stripe/OpenAI keys, JWTs, PEMs, emails, phones, private
-   IPs). Rejects tags that match; redacts text fields.
-2. **Deduplicates** — SHA-256 fingerprint on content + near-duplicate detection
-   via BM25 + Jaccard similarity (≥ 0.85 threshold). Saving the same lesson
-   twice is harmless.
-3. **Stores** — one row in a local SQLite file.
-
-On load, droids-mem assembles a **two-tier context bundle** for the agent:
-always-tier (last session summary + standing user rules, full body) and
-browse-tier (relevant error resolutions and task patterns, ranked by BM25).
-
-### Code graph (Go, Python, TypeScript, JavaScript)
-
-For Go, Python, TypeScript, and JavaScript projects, droids-mem builds a
-per-repo index of symbols and call edges. Instead of grep to find "what calls
-X", you get:
-
-```shell
-droids-mem graph symbol Store.Save --repo /path/to/project --direction up --depth 3
-# → source + callers as signature stubs + transitive_callers count
-```
-
-Pre-built, signatures-first, agent-cheap. Auto-rebuilds on repo change; a build
-that fails outright serves the last good graph flagged `stale`, while a single
-unit that stops parsing or type-checking degrades alone (`carried`).
-
-Two tiers, and every response names which one answered it:
-
-- **Go** — `precision: resolved`. Type-checker backed (`go/packages` + CHA), so
-  interface dispatch is resolved and `implements` edges are exact.
-- **Python, TypeScript, JavaScript** — `precision: syntactic`. Resolved by name
-  from a tree-sitter parse, so callers and callees are heuristic; cross-check
-  constants and tests with grep.
-
-Slash, bare and dotted package paths and `Class.method` symbols all accepted.
-
-### TUI
-
-A three-pane terminal browser over the corpus — **KINDS** sidebar, a memory
-list, and a detail pane. Type to live-search (≥ 3 chars), `tab` cycles focus,
-`ctrl+d` deletes with confirmation. A **CONNECTIONS** view surfaces links
-between memories and their source files.
-
-```shell
-droids-mem tui
-```
-
-![droids-mem TUI](assets/tui.png)
-
-### Session memory (Claude Code)
-
-droids-mem hooks into Claude Code's lifecycle natively:
-
-| Event | What happens |
+| Tool | Purpose |
 |---|---|
-| `SessionStart` | Recovers crashed-run summaries (the host spawns `serve --stdio` itself) |
-| `UserPromptSubmit` | Injects relevant prior memories for the prompt |
-| `PostToolUse` | Counts meaningful work (intake gate) |
-| `Stop` | Once enough is unstaged, asks the model to record progress |
-| `SessionEnd` | Saves the staged summary if the gate passes |
+| `mem_save` | Validate, scrub, deduplicate, and persist a lesson |
+| `mem_search` | Search memories with BM25 and token-overlap ranking |
+| `mem_context` | Load a two-tier context bundle and mint a session ID |
+| `mem_get` | Fetch one complete memory by ID |
+| `mem_corpus` | Summarize task types, memory kinds, and recent sessions |
+| `graph_symbol` | Return one symbol's source, callers, callees, and blast size |
+| `graph_package` | List a package's exported surface as signatures |
+| `graph_build_wait` | Wait for a repository graph to become fresh |
 
-Every hook fails open — a memory hiccup never breaks your session. Full
-reference: [`hooks/README.md`](hooks/README.md).
+The graph tools require an absolute repository path. They are signatures-first:
+neighboring symbols are compact stubs, while the requested symbol includes its
+source.
 
----
+## Code Graph
 
-## Retrieval performance
+Query a package before drilling into a symbol or checking its callers:
 
-The core bet: an agent should find a lesson later even when it's phrased
-*differently* than it was saved. This is measured, not asserted.
+```sh
+droids-mem graph package internal/store --repo "$PWD"
+droids-mem graph symbol Store.Save --repo "$PWD" --direction up --depth 3
+```
 
-A fixed benchmark of **24 memories** in seven distractor clusters (retrieval has
-to beat confusable neighbours) is queried by **33 hand-authored paraphrases**
-whose wording is independent of the target. Runs in CI
-(`internal/store/recall_benchmark_test.go`); full report in
-[`eval/RESULTS.md`](eval/RESULTS.md).
-
-| Query class | recall@1 | recall@5 |
+| Languages | Precision | Meaning |
 |---|---|---|
-| Word-order / partial reword | 100% | 100% |
-| Morphological ("cancel" → "cancelling") | 100% | 100% |
-| Synonym, **zero shared words** | 67% | 75% |
-| **Overall** | **88%** | **91%** |
+| Go | `resolved` | Type-checked call edges and resolved interface dispatch |
+| Python, TypeScript, JavaScript | `syntactic` | Tree-sitter name resolution; callers and callees are approximate |
 
-This is FTS5 + porter stemming — **no embeddings, no vector DB**. Pure-Go, no
-CGO. The honest ceiling is synonym substitution: a query that shares zero words
-with the memory (e.g. "too many requests" → a lesson titled "HTTP 429") can
-only be bridged by luck. Those misses are documented by name in the full report.
+Read each response's `precision`, `hint`, and `freshness` before relying on it.
+Mapper test files and notebooks are not indexed, so `transitive_callers` can
+undercount. A `stale` graph serves the last complete index;
+`carried` marks a unit whose prior edges were retained. Verify critical findings
+against source when either appears.
 
-Reproduce:
+## Data and Safety
 
-```shell
-go test ./internal/store -run TestRecallBenchmark -v
+The default database is `~/.droids-mem/mem.db`; set `DROIDS_MEM_DB` to move it.
+Memories default to `personal`. Sharing requires an explicit publish action in
+the TUI, which writes selected memories to a git-tracked pool. A teammate who
+already pulled a published copy keeps it even if the source is later unshared.
+
+Before storage, droids-mem redacts supported secrets and PII from `title`,
+`what`, and `learned`. Matching tags and identifiers are rejected rather than
+silently rewritten. Exact and near-duplicate saves are skipped unless the caller
+explicitly forces a correction.
+
+## Operations
+
+```sh
+droids-mem doctor             # Check and repair the memory index
+droids-mem upgrade            # Upgrade a non-Homebrew installation
+brew upgrade droids-mem       # Upgrade a Homebrew installation
+droids-mem serve --help       # Manual HTTP or stdio MCP operation
+droids-mem --help             # Complete command list
 ```
-
----
-
-## MCP tools
-
-Eight tools over the MCP bridge (bearer auth, or stdio for host-spawned
-servers):
-
-**Memory**
-- `mem_save` — persist a lesson (scrubs + dedupes).
-- `mem_search` — full-text search (BM25 ranked).
-- `mem_context` — two-tier context bundle for a `task_type`; mints a `session_id`.
-- `mem_get` — fetch one memory by ID.
-- `mem_corpus` — census of the corpus (task types, counts, recent summaries).
-
-**Code graph** (Go, Python, TypeScript, JavaScript)
-- `graph_symbol` — a symbol's source plus callers/callees as signature stubs
-  (interface↔concrete `implements` edges on Go).
-- `graph_package` — a package's exported surface, signatures only.
-- `graph_build_wait` — block until the repo's graph index is fresh.
-
-Every graph response carries `precision`: `resolved` on Go, `syntactic` on the
-mapper languages. Treat a syntactic answer as approximate.
-
-Graph responses render as **TOON** (Token-Oriented Object Notation) — one shared
-header per neighbor array instead of repeating JSON keys on every row — to keep
-"what calls X" answers cheap on hub symbols.
-
-Operator commands (`list`, `schema`, `doctor`, `migrate`, `prune`, `scrub`) are
-**not** exposed over MCP — they're CLI-only by design.
-
-```shell
-droids-mem ensure-server   # ping /healthz, spawn detached serve if down
-droids-mem serve           # foreground MCP bridge (Streamable HTTP)
-droids-mem serve --stdio   # MCP over stdin/stdout (for Claude Code, codex, opencode)
-```
-
-Auth: `Authorization: Bearer <token>` on every `/mcp` request.
-`/identity?nonce=<n>` answers `HMAC-SHA256(token, nonce)` — anti port-squatting.
-
----
-
-## CLI reference
-
-| Command | What it does |
-|---|---|
-| `save` | Save a structured memory (scrubs + dedupes) |
-| `search` | Full-text search across memories |
-| `context` | Load a start-of-run context bundle for a task type |
-| `get` | Fetch one memory by ID |
-| `list` | List recent memories |
-| `tui` | Interactive terminal browser |
-| `prune` | Delete memories or find duplicate clusters |
-| `graph` | Query a repo's code graph (index, symbol, package) — Go, Python, TypeScript, JavaScript |
-| `statusline` | Print `droids-mem:<tool>` when a graph tool ran in the last 60 s (for a Claude Code status line) |
-| `recent-sessions` | List auto-saved session summaries |
-| `session` | Session-memory plumbing (stage, check, flush, recover, hook) |
-| `install` | Wire into a host: Claude Code hooks + stdio MCP, or `--host codex\|opencode` |
-| `uninstall` | Reverse `install`: unwire hooks, deregister bridge, strip CLAUDE.md block |
-| `doctor` | FTS integrity/rebuild, optimize, VACUUM, scrub stats |
-| `schema` | Show parameter schema for a command |
-| `scrub` | Run the scrub engine ad-hoc (`--check`, `--test`) |
-| `migrate` | Establish the scrub baseline on an existing database |
-| `serve` / `ensure-server` | Run or start the MCP bridge |
-
-Every command supports `--help`.
-
----
-
-## Shared context
-
-Memory is local and private by default — every row has a `scope`
-(`personal` | `shared`) that defaults to `personal`, so nothing leaves your
-store implicitly. Opt in per memory from the TUI: flip rows to `shared`, then
-**publish** them into a dedicated **git-tracked pool** (`shared.jsonl`, one file
-per `task_type`) that teammates **pull** into their own store.
-
-- Sharing is explicit and per-row — never a whole-corpus dump.
-- Every shared copy is **scrubbed** at the trust boundary (local paths, session
-  ids, and timestamps are stripped; content, tags, and kind cross over).
-- Import **dedupes across sources** by fingerprint + Jaccard, so the same lesson
-  from two teammates lands once.
-
-Shared copies enter the git-tracked pool and can't be fully retracted — anyone
-who pulled keeps their copy. The TUI confirm dialog spells this out before push.
-
----
-
-## Secret scrub
-
-Every `save` runs text through a single-pass scrub pipeline before it touches
-the database. Detectors run in three classes:
-
-- **Provider tokens**: PEM keys, JWTs, AWS/GitHub/GitLab/Google/npm/Stripe/
-  Slack/Anthropic/OpenAI keys.
-- **Usage patterns**: bearer headers, `key = value` assignments, URL credentials
-  — gated on Shannon entropy so `password = changeme` survives but real secrets
-  don't.
-- **PII**: phone numbers, private IPv4 addresses, emails.
-
-Longer redaction span wins on overlap. Tags that match any pattern **reject**
-the save (no silent auto-strip).
-
-Field caps: `title=200`, `what=8192`, `learned=4096`, `tags=500` — exceeding
-any returns `field_too_large`.
-
-```shell
-droids-mem scrub --check /path/to/some.log   # ad-hoc, no DB write
-droids-mem scrub --test                       # run the fixture corpus
-droids-mem doctor --scrub-stats               # aggregate counts across the DB
-```
-
----
-
-## Configuration
-
-All optional. Defaults match a single-user laptop install.
-
-| Var | Default | Notes |
-|---|---|---|
-| `DROIDS_MEM_DB` | `~/.droids-mem/mem.db` | Database file path |
-| `DROIDS_MEM_HOME` | `~/.droids-mem/` | Token, pid, log files |
-| `DROIDS_MEM_MCP_TOKEN` | Auto-generated | Bearer token for `/mcp` |
-| `DROIDS_MEM_MCP_ADDR` | `127.0.0.1:7777` | Bind address (non-loopback logs a warning) |
-| `DROIDS_MEM_MCP_ENDPOINT` | `/mcp` | `/healthz` + `/identity` always unauthenticated |
-
-State directory: `mem.db` (0600), `token` (0600), `mcp.pid`, `mcp.log`.
-
----
-
-## Troubleshooting
-
-**Boot gate on start.** The database hasn't been through the scrub pipeline. The
-first non-bypassed command auto-runs `migrate --rescrub` (one-time write). If it
-fails, run `droids-mem migrate --rescrub` by hand.
-
-**`db_init_failed`.** Check `DROIDS_MEM_DB` and that `~/.droids-mem/` is
-writable.
-
-**`tag_contains_secret`.** A tag matched a scrub pattern. Tags aren't
-auto-stripped — fix the tag and retry.
-
-**`scrub_emptied_learned`.** The `learned` field was fully redacted. Rewrite
-the lesson without the PII.
-
-**MCP bridge won't bind.** Default `127.0.0.1:7777` conflicts if another
-listener holds the port. Verify using `/identity?nonce=...`.
-
-**Stale FTS results.** `droids-mem doctor` rebuilds `memories_fts` from
-`memories` if they diverge.
-
----
-
-## Contributing
-
-Found a bug? Have an idea? Open an issue or pull request on
-[GitHub](https://github.com/SamuelMolero26/droids-mem).
-
-This project is early and open to contributors who share its philosophy: local-
-first, no external dependencies, simple beats flexible. PRs that add new
-external services will be rejected.
-
----
 
 ## License
 
-[MIT](LICENSE). See [CHANGELOG.md](CHANGELOG.md) for release history.
+[MIT](LICENSE). See [CHANGELOG.md](CHANGELOG.md) for release history and the
+[Releases page](https://github.com/SamuelMolero26/droids-mem/releases) for
+prebuilt binaries.
