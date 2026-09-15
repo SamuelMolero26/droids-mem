@@ -61,7 +61,7 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -euo pipefail
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag must match vMAJOR.MINOR.PATCH"; exit 1; }
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-beta\.[1-9][0-9]*)?$ ]] || { echo "tag must match vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-beta.N (N >= 1)"; exit 1; }
           git fetch --tags --force origin
           git rev-parse --verify "$TAG^{commit}" >/dev/null || exit 1
           # The tree being built must BE the tag: on workflow_dispatch the
@@ -150,11 +150,12 @@ jobs:
         run: echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
 
       - name: Validate tag
+        id: validate
         env:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -euo pipefail
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag must match vMAJOR.MINOR.PATCH"; exit 1; }
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-beta\.[1-9][0-9]*)?$ ]] || { echo "tag must match vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-beta.N (N >= 1)"; exit 1; }
           git fetch --tags --force origin
           git rev-parse --verify "$TAG^{commit}" >/dev/null || exit 1
           # The tree being built must BE the tag: on workflow_dispatch the
@@ -164,11 +165,17 @@ jobs:
           # only merged-to-main commits release
           git merge-base --is-ancestor "$TAG" origin/main || { echo "tag $TAG is not an ancestor of origin/main"; exit 1; }
           grep -q "^## \[${TAG#v}\]" CHANGELOG.md || { echo "CHANGELOG.md missing ## [${TAG#v}]"; exit 1; }
+          if [[ "$TAG" == *-beta.* ]]; then
+            echo "channel=beta" >> "$GITHUB_OUTPUT"
+          else
+            echo "channel=stable" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Generate release notes
         id: notes
         env:
           TAG: ${{ steps.version.outputs.tag }}
+          CHANNEL: ${{ steps.validate.outputs.channel }}
         run: |
           {
             echo "## droids-mem $TAG"
@@ -178,10 +185,18 @@ jobs:
             echo "### Install"
             echo
             echo '```'
-            echo "brew tap samuelmolero26/tap && brew install droids-mem"
+            if [ "$CHANNEL" = beta ]; then
+              echo "curl -fsSL https://raw.githubusercontent.com/SamuelMolero26/droids-mem/$TAG/install.sh | DROIDS_MEM_VERSION=$TAG sh"
+            else
+              echo "brew tap samuelmolero26/tap && brew install droids-mem"
+            fi
             echo '```'
             echo
-            echo "Or download a prebuilt binary below."
+            if [ "$CHANNEL" = beta ]; then
+              echo "This pins the prerelease explicitly; the stable Homebrew formula is not updated for beta releases."
+            else
+              echo "Or download a prebuilt binary below."
+            fi
             echo
             echo "### Verify provenance"
             echo
@@ -207,13 +222,24 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.version.outputs.tag }}
+          CHANNEL: ${{ steps.validate.outputs.channel }}
         run: |
-          gh release create "$TAG" \
-            --title "$TAG" \
-            --notes-file release-notes.md \
-            dist/*
+          if [ "$CHANNEL" = beta ]; then
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --notes-file release-notes.md \
+              --prerelease \
+              --latest=false \
+              dist/*
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --notes-file release-notes.md \
+              dist/*
+          fi
 
       - name: Publish Homebrew formula
+        if: steps.validate.outputs.channel == 'stable'
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           TAG: ${{ steps.version.outputs.tag }}
