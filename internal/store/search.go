@@ -71,7 +71,17 @@ type SearchResult struct {
 type SearchResponse struct {
 	Results []SearchResult `json:"results"`
 	Total   int            `json:"total"`
+	// Message labels a definitive empty state and is set only when Total == 0.
+	// Total stays the machine-readable gate; Message is display-only.
+	Message string `json:"message,omitempty"`
 }
+
+// Definitive-empty messages for Search. Tests assert these literals, never the
+// const names, so a wording change fails loud instead of drifting silently.
+const (
+	msgNoSearchableText = "query contains no searchable text (no letters or digits); nothing can match"
+	msgNoMatch          = "no memories matched; try --all-projects or different keywords"
+)
 
 func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse, error) {
 	if strings.TrimSpace(req.Query) == "" {
@@ -89,11 +99,19 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 		limit = maxSearchLimit
 	}
 
+	// The hasSearchableText gate is load-bearing, not defensive: it mirrors the
+	// Context browse-tier gate, where punctuation-only input would otherwise
+	// become a MATCH expression of phrases that tokenize to nothing and match
+	// no row after two doomed SQL round-trips. Zero SQL runs on this path.
+	if !hasSearchableText(req.Query) {
+		return &SearchResponse{Results: []SearchResult{}, Total: 0, Message: msgNoSearchableText}, nil
+	}
+
 	ftsQuery := phraseFTSQuery(req.Query)
 	if ftsQuery == "" {
 		// Query had no searchable tokens (e.g. all punctuation). Nothing can
 		// match; return empty rather than run MATCH on an empty expression.
-		return &SearchResponse{Results: []SearchResult{}, Total: 0}, nil
+		return &SearchResponse{Results: []SearchResult{}, Total: 0, Message: msgNoSearchableText}, nil
 	}
 
 	// build WHERE clause — only hardcoded strings in the format string, user values in args
@@ -123,6 +141,10 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 	var total int
 	if err := s.db.QueryRowContext(ctx, countStmt, args...).Scan(&total); err != nil {
 		return nil, fmt.Errorf("search count: %w", err)
+	}
+	if total == 0 {
+		// Genuine no-match: nothing to rank, so skip the SELECT round-trip.
+		return &SearchResponse{Results: []SearchResult{}, Total: 0, Message: msgNoMatch}, nil
 	}
 
 	// Fetch more results than requested, then re-rank by a composite of BM25 +

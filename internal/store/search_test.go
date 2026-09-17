@@ -296,6 +296,9 @@ func TestSearch_TotalMatchesResultCount(t *testing.T) {
 	if resp.Total != len(resp.Results) {
 		t.Errorf("total %d != len(results) %d", resp.Total, len(resp.Results))
 	}
+	if resp.Message != "" {
+		t.Errorf("populated response must omit message, got %q", resp.Message)
+	}
 }
 
 // TestSearch_FTS5SpecialChars guards the regression where FTS5 syntax chars in a
@@ -331,8 +334,9 @@ func TestSearch_FTS5SpecialChars(t *testing.T) {
 	}
 }
 
-// TestSearch_OnlyPunctuation returns empty (no tokens) rather than crashing on an
-// empty MATCH expression.
+// TestSearch_OnlyPunctuation returns a definitive empty (no tokens) rather than
+// crashing on an empty MATCH expression. The gate returns zero SQL, total 0,
+// and the no_searchable_text message so agents stop re-querying to verify.
 func TestSearch_OnlyPunctuation(t *testing.T) {
 	s := newTestStore(t)
 	seedMemories(t, s)
@@ -346,5 +350,37 @@ func TestSearch_OnlyPunctuation(t *testing.T) {
 	}
 	if len(resp.Results) != 0 {
 		t.Errorf("expected 0 results, got %d", len(resp.Results))
+	}
+	if resp.Total != 0 {
+		t.Errorf("expected total 0, got %d", resp.Total)
+	}
+	const wantMessage = "query contains no searchable text (no letters or digits); nothing can match"
+	if resp.Message != wantMessage {
+		t.Errorf("message = %q, want %q", resp.Message, wantMessage)
+	}
+}
+
+// TestSearch_NoMatchMessage labels a genuine no-match with the scope hint so
+// agents try --all-projects or different keywords instead of re-running.
+func TestSearch_NoMatchMessage(t *testing.T) {
+	s := newTestStore(t)
+	seedMemories(t, s)
+
+	resp, err := s.Search(context.Background(), store.SearchRequest{Query: "xyznonexistentterm", AllProjects: true})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if resp.Results == nil {
+		t.Error("expected empty slice, got nil")
+	}
+	if len(resp.Results) != 0 {
+		t.Errorf("expected 0 results, got %d", len(resp.Results))
+	}
+	if resp.Total != 0 {
+		t.Errorf("expected total 0, got %d", resp.Total)
+	}
+	const wantMessage = "no memories matched; try --all-projects or different keywords"
+	if resp.Message != wantMessage {
+		t.Errorf("message = %q, want %q", resp.Message, wantMessage)
 	}
 }

@@ -119,7 +119,9 @@ func searchToolDef() mcp.Tool {
 
 Each result includes an overlap_score (0-1): the fraction of query tokens that appear literally in the title+learned. Higher overlap means the memory is about the same concrete topic. Results with low overlap may still be relevant (synonyms, rewording) — use your judgment, or expand them with mem_get to read the full body.
 
-Pass all_projects=true to search across ALL task_types, not just the current project. Use this when investigating a problem that may span repos, or when you don't yet know which project owns the relevant memory. For code-structure questions in Go, Python, TypeScript or JavaScript repos, prefer graph_symbol/graph_package over text search.`),
+Pass all_projects=true to search across ALL task_types, not just the current project. Use this when investigating a problem that may span repos, or when you don't yet know which project owns the relevant memory. For code-structure questions in Go, Python, TypeScript or JavaScript repos, prefer graph_symbol/graph_package over text search.
+
+When total is 0 the response carries a display-only message naming the empty state (no searchable text vs no match); treat total == 0 as the machine gate and message as hint text only.`),
 		mcp.WithString("query", mcp.Required(),
 			mcp.Description("Free-text search phrase.")),
 		mcp.WithString("task_type",

@@ -80,6 +80,43 @@ func TestE2E_BareInvocationShowsContent(t *testing.T) {
 	}
 }
 
+// AXI §5: a punctuation-only query is a definitive empty — exit 0 with
+// total 0 plus the no_searchable_text message, not an error or bare {}.
+func TestE2E_SearchPunctuationOnlyIsDefinitiveEmpty(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "mem.db")
+	cli(t, dbPath, nil, "save",
+		"--task-type", "crm_upload",
+		"--kind", "error_resolution",
+		"--title", "HubSpot phone field mapping",
+		"--what", "Upload failed: target field was phone_number",
+		"--learned", "Map Phone Number to phone",
+		"--tags", "hubspot phone field-mapping",
+	)
+
+	stdout, _, code := cliStderr(t, dbPath, "search", "--query", ",,, :::")
+	if code != 0 {
+		t.Fatalf("punctuation-only search exit = %d, want 0", code)
+	}
+	var resp struct {
+		Results []any  `json:"results"`
+		Total   int    `json:"total"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(stdout, &resp); err != nil {
+		t.Fatalf("stdout not JSON: %v\nraw: %s", err, stdout)
+	}
+	if resp.Results == nil {
+		t.Error("expected empty results slice, got nil")
+	}
+	if resp.Total != 0 {
+		t.Errorf("total = %d, want 0", resp.Total)
+	}
+	const wantMessage = "query contains no searchable text (no letters or digits); nothing can match"
+	if resp.Message != wantMessage {
+		t.Errorf("message = %q, want %q", resp.Message, wantMessage)
+	}
+}
+
 // The MCP graph_package arg name (`--package`) must work on the CLI too, matching
 // the positional form byte-for-byte in output (surface parity).
 func TestE2E_GraphPackageFlagParity(t *testing.T) {
