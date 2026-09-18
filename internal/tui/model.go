@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/samuelmolero26/droids-mem/internal/db"
 	"github.com/samuelmolero26/droids-mem/internal/share"
 	"github.com/samuelmolero26/droids-mem/internal/state"
 	"github.com/samuelmolero26/droids-mem/internal/store"
@@ -53,6 +55,7 @@ const (
 	modeNormal mode = iota
 	modeConfirm
 	modeShare // share-confirm dialog: flip selected memories into the shared pool
+	modeStats // full-body memory-usage pane: statsCmd on open + after prune
 )
 
 // sidebarKinds is the fixed KINDS rotation shown in the sidebar; "" is the
@@ -93,6 +96,11 @@ type countsMsg struct {
 	total  int
 	shared int
 	err    error
+}
+type statsMsg struct {
+	rows      []store.ProjectSize
+	fileBytes int64 // -1 when os.Stat(db.ResolvePath()) fails
+	err       error
 }
 type deletedMsg struct{ err error }
 type sharedMsg struct {
@@ -139,6 +147,17 @@ type Model struct {
 
 	confirmTarget listItem
 	status        string
+
+	// stats pane state (modeStats): live ProjectSizes rows, cursor, drill
+	// target ("" = project list), last query error, db-file bytes (-1 when
+	// the best-effort stat fails), and the pending project-prune target
+	// ("" = none — the confirm dialog then targets a single memory id).
+	stats          []store.ProjectSize
+	statsIdx       int
+	statsDrill     string
+	statsErr       error
+	statsFile      int64
+	confirmProject string
 
 	// push/pull do the git side of sharing; defaulted to the real git-shelling
 	// funcs, overridden in tests so the model logic runs without a live repo.
@@ -189,6 +208,7 @@ func New(s memStore, version string) Model {
 		counts:    map[string]int{},
 		selected:  selected,
 		version:   version,
+		statsFile: -1, // no sizes query ran yet — header renders payload only
 		// memStore is a superset of share.Store, so the wrappers just adapt the
 		// param type; the git transport lives in internal/share (ADR-0029 §5).
 		push: func(ctx context.Context, repo string, s memStore, n int) error {
@@ -251,6 +271,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case statsMsg:
+		if msg.err != nil { // fail closed: plain error, no stale rows as fresh
+			m.statsErr = msg.err
+			m.stats = nil
+		} else {
+			m.statsErr = nil
+			m.stats = msg.rows
+			m.statsFile = msg.fileBytes
+			if m.statsIdx >= len(m.stats) {
+				m.statsIdx = 0
+			}
+		}
+		return m, nil
+
 	case deletedMsg:
 		if msg.err != nil {
 			m.status = "delete failed: " + msg.err.Error()
@@ -309,6 +343,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.mode == modeConfirm {
 		switch msg.String() {
+		case "ctrl+g": // dead key: must not cancel the dialog
+			return m, nil
 		case "y", "Y":
 			id := m.confirmTarget.id
 			delete(m.selected, id) // drop the deleted row from the share selection
@@ -321,6 +357,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.mode == modeShare {
 		switch msg.String() {
+		case "ctrl+g": // dead key: must not touch the repo field
+			return m, nil
 		case "enter":
 			repo := strings.TrimSpace(m.repoInput.Value())
 			if repo == "" {
@@ -345,6 +383,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 	}
+	if m.mode == modeStats {
+		return m.handleStatsKey(msg)
+	}
 	return m.handleNormalKey(msg)
 }
 
@@ -358,6 +399,13 @@ func (m Model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		m.focus = focusDetail
+		return m, nil
+	case "ctrl+u": // usage pane: fresh sizes on every open, never per keystroke
+		m.mode = modeStats
+		m.statsDrill = ""
+		m.statsIdx = 0
+		return m, m.statsCmd()
+	case "ctrl+g": // dead key (graph tab removed): must do nothing
 		return m, nil
 	case "ctrl+d":
 		if it, ok := m.list.SelectedItem().(listItem); ok {
@@ -448,6 +496,43 @@ func (m Model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmd, debounceCmd(m.gen))
 	}
 	return m, cmd
+}
+
+// handleStatsKey routes keys while the usage pane owns the screen. Only pane
+// open and prune refresh the sizes — navigation and drill never re-query.
+func (m Model) handleStatsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		if m.statsDrill != "" { // back out of the drill before leaving the pane
+			m.statsDrill = ""
+			return m, nil
+		}
+		m.mode = modeNormal
+		return m, nil
+	case "up":
+		if m.statsIdx > 0 {
+			m.statsIdx--
+		}
+		return m, nil
+	case "down":
+		if m.statsIdx < len(m.stats)-1 {
+			m.statsIdx++
+		}
+		return m, nil
+	case "enter": // drill into the selected project's kind split
+		if len(m.stats) > 0 {
+			m.statsDrill = m.stats[min(m.statsIdx, len(m.stats)-1)].TaskType
+		}
+		return m, nil
+	case "ctrl+d": // prune only the selected project via the confirm flow
+		if len(m.stats) > 0 {
+			m.confirmProject = m.stats[min(m.statsIdx, len(m.stats)-1)].TaskType
+			m.mode = modeConfirm
+		}
+		return m, nil
+	default: // everything else is swallowed — the pane has no text input
+		return m, nil
+	}
 }
 
 // handleNav routes arrow/paging keys to the focused pane.
@@ -546,6 +631,26 @@ func (m Model) countsCmd() tea.Cmd {
 			return countsMsg{err: err}
 		}
 		return countsMsg{counts: resp.ByKind, total: resp.Total, shared: shared}
+	}
+}
+
+// statsCmd is the one-shot sizes load for the usage pane (mirrors
+// countsCmd): ProjectSizes on open and after each prune, never per keystroke.
+// The db-file size rides along best-effort — a stat failure just hides the
+// file number (fileBytes -1) instead of failing the pane.
+func (m Model) statsCmd() tea.Cmd {
+	s := m.store
+	return func() tea.Msg {
+		ctx := context.Background()
+		rows, err := s.ProjectSizes(ctx)
+		if err != nil {
+			return statsMsg{err: err}
+		}
+		var fb int64 = -1
+		if fi, serr := os.Stat(db.ResolvePath()); serr == nil {
+			fb = fi.Size()
+		}
+		return statsMsg{rows: rows, fileBytes: fb}
 	}
 }
 

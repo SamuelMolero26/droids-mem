@@ -18,6 +18,10 @@ type fakeStore struct {
 	getResp       *store.Memory
 	countsResp    *store.CountsResponse
 	neighborsResp []store.Neighbor
+	sizesResp     []store.ProjectSize
+	sizesErr      error
+
+	sizesCalls int
 
 	listCalls, searchCalls, getCalls, pruneCalls, countsCalls, neighborsCalls int
 	setScopeCalls                                                             int
@@ -63,6 +67,10 @@ func (f *fakeStore) Counts(_ context.Context) (*store.CountsResponse, error) {
 		return &store.CountsResponse{ByKind: map[string]int{}}, nil
 	}
 	return f.countsResp, nil
+}
+func (f *fakeStore) ProjectSizes(_ context.Context) ([]store.ProjectSize, error) {
+	f.sizesCalls++
+	return f.sizesResp, f.sizesErr
 }
 func (f *fakeStore) Neighbors(_ context.Context, id string, _ int) ([]store.Neighbor, error) {
 	f.neighborsCalls++
@@ -151,8 +159,8 @@ func key(s string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyDown}
 	case "ctrl+d":
 		return tea.KeyMsg{Type: tea.KeyCtrlD}
-	case "ctrl+g":
-		return tea.KeyMsg{Type: tea.KeyCtrlG}
+	case "ctrl+u":
+		return tea.KeyMsg{Type: tea.KeyCtrlU}
 	case "ctrl+s":
 		return tea.KeyMsg{Type: tea.KeyCtrlS}
 	case "ctrl+x":
