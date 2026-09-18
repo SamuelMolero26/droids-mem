@@ -22,6 +22,7 @@ type memStore interface {
 	GetRow(context.Context, string) (*store.Memory, error)
 	Prune(context.Context, store.PruneRequest) (*store.PruneResponse, error)
 	Counts(context.Context) (*store.CountsResponse, error)
+	ProjectSizes(context.Context) ([]store.ProjectSize, error)
 	Neighbors(context.Context, string, int) ([]store.Neighbor, error)
 	// Sharing (ADR-0028): SetScope flips one memory personal↔shared; CountShared
 	// feeds the sidebar SCOPE census. Share = flip into the git-tracked pool,
