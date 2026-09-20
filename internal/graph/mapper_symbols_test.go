@@ -310,3 +310,78 @@ func TestMapperSymbols_CarrierByteRangeAndContainer(t *testing.T) {
 			method.start, method.end, outer.start, outer.end)
 	}
 }
+
+// TestMapperSymbols_PythonModuleConstants pins the module-level assignment
+// rung: the (module ...) anchor keeps function locals out, and exportedness
+// is the underscore rule rather than a naming convention.
+func TestMapperSymbols_PythonModuleConstants(t *testing.T) {
+	dir := t.TempDir()
+	f := mapMapperFile(t, dir, "scorer.py", `DEFAULT_WEIGHTS = {"recency": 0.7}
+sep = "/"
+__all__ = ["score"]
+
+def score(item):
+    total = 0
+    return total
+`, "scorer")
+
+	rows, _ := mapperSymbols([]mapperFile{f})
+
+	for _, name := range []string{"DEFAULT_WEIGHTS", "sep"} {
+		if got := findSymRow(t, rows, name).kind; got != "const" {
+			t.Errorf("%s kind = %q, want %q", name, got, "const")
+		}
+	}
+	// os.sep is public API spelled lowercase: exportedness is the underscore
+	// rule, never the casing.
+	if !findSymRow(t, rows, "sep").exported {
+		t.Error("sep exported = false, want true")
+	}
+	if findSymRow(t, rows, "__all__").exported {
+		t.Error("__all__ exported = true, want false (dunder is _-prefixed)")
+	}
+	for _, r := range rows {
+		if r.row.name == "total" {
+			t.Fatal("function-local `total` was indexed; the (module ...) anchor is not holding")
+		}
+	}
+}
+
+// TestMapperSymbols_TypeScriptTypeAliases covers both .ts and .tsx, and both
+// exported and bare aliases — the pattern is deliberately unanchored so one
+// rung catches `export type` and `type` alike.
+func TestMapperSymbols_TypeScriptTypeAliases(t *testing.T) {
+	const src = `export type ButtonProps = { label: string }
+type Internal = number
+export interface Svc { run(): void }
+`
+	for _, name := range []string{"button.ts", "button.tsx"} {
+		t.Run(name, func(t *testing.T) {
+			f := mapMapperFile(t, t.TempDir(), name, src, "button")
+			rows, _ := mapperSymbols([]mapperFile{f})
+			for _, want := range []string{"ButtonProps", "Internal"} {
+				if got := findSymRow(t, rows, want).kind; got != "type" {
+					t.Errorf("%s kind = %q, want %q", want, got, "type")
+				}
+			}
+			if got := findSymRow(t, rows, "Svc").kind; got != "interface" {
+				t.Errorf("Svc kind = %q, want %q (base query must survive)", got, "interface")
+			}
+		})
+	}
+}
+
+// TestMapperSymbols_JavaScriptOutlinerStillCompiles is the regression guard
+// that matters most here: javascript is in jsFamilyLanguages but its grammar
+// has no type_alias_declaration node. A query naming an unknown node type
+// fails to compile, which leaves mapperEngine.outliner nil and silently skips
+// EVERY .js file in the repo. A green symbol count is the only thing that
+// distinguishes "guarded correctly" from "all JS indexing is gone".
+func TestMapperSymbols_JavaScriptOutlinerStillCompiles(t *testing.T) {
+	f := mapMapperFile(t, t.TempDir(), "a.js", "export function Foo() {}\nexport const BAR = 1\n", "a")
+	rows, stats := mapperSymbols([]mapperFile{f})
+	if len(rows) == 0 {
+		t.Fatalf("no symbols from a.js — outliner failed to compile; stats=%+v", stats)
+	}
+	findSymRow(t, rows, "Foo")
+}

@@ -55,12 +55,20 @@ type mapperEngine struct {
 	bindings *gts.Query
 }
 
-// mapperTagsQuery augments the inferred tags query for the JS family so
-// top-level `export const`/`export let` (lexical_declaration) and
-// `export var` (variable_declaration) are visible as symbols. The scoped
-// `export_statement` wrapper keeps inner `const` declarations from being
-// captured — spike proved `export const metadata` 0→1 while
-// `function foo(){ const inner=1 }` stays only `foo`.
+// mapperTagsQuery augments the inferred tags query where upstream misses a
+// declaration form.
+//
+// JS family: top-level `export const`/`export let` (lexical_declaration) and
+// `export var` (variable_declaration). The scoped `export_statement` wrapper
+// keeps inner `const` declarations from being captured — spike proved
+// `export const metadata` 0→1 while `function foo(){ const inner=1 }` stays
+// only `foo`.
+//
+// Python: every module-level assignment, since the grammar has no constant
+// form to match — `(module ...)` is what excludes function locals. Not gated
+// on UPPER_CASE: that would hide os.sep and ~1000 other exported lowercase
+// stdlib names, while the dunder metadata it aims at is already unexported by
+// mapperExported's leading-underscore rule.
 //
 // B6 note (future-fragile guard): the added patterns are specifically for
 // lexical_declaration / variable_declaration inside export_statement. Guarding
@@ -75,6 +83,19 @@ func mapperTagsQuery(entry *grammars.LangEntry) string {
 	if jsFamilyLanguages[entry.Name] && !strings.Contains(base, "lexical_declaration") {
 		base += "\n(export_statement declaration: (lexical_declaration (variable_declarator name: (identifier) @name) @definition.constant))"
 		base += "\n(export_statement declaration: (variable_declaration (variable_declarator name: (identifier) @name) @definition.variable))"
+	}
+	// typescript/tsx only, never javascript: its grammar has no
+	// type_alias_declaration, and a pattern naming an unknown node type fails
+	// to compile, which nils the outliner and skips every file in that
+	// language.
+	isTS := entry.Name == "typescript" || entry.Name == "tsx"
+	if isTS && !strings.Contains(base, "type_alias_declaration") {
+		base += "\n(type_alias_declaration name: (type_identifier) @name) @definition.type"
+	}
+	// "(assignment" not "assignment": the latter also matches Python's
+	// augmented_assignment, which would silently disable this rung.
+	if entry.Name == "python" && !strings.Contains(base, "(assignment") {
+		base += "\n(module (assignment left: (identifier) @name) @definition.constant)"
 	}
 	return base
 }

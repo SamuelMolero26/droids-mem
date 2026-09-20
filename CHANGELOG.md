@@ -7,6 +7,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Mapper tier now indexes TypeScript type aliases and Python module-level
+  bindings.** `type X = ...` in `.ts`/`.tsx` and every top-level assignment in
+  `.py` were missing from `graph_symbol` and `graph_package`, so querying
+  `ButtonProps` or `DEFAULT_WEIGHTS` returned `not_found` and a package's
+  exported surface understated itself. Python has no constant syntax for the
+  grammar to match, so every module-level binding is indexed rather than only
+  `UPPER_CASE` names — gating on casing would hide public API such as `os.sep`.
+  Dunder metadata like `__all__` stays out of package listings through the
+  existing leading-underscore export rule. Closes #134.
+
 ## [1.3.0-beta.1] — 2026-09-14
 
 Headline: a multi-language code graph with Next.js and JSX awareness, safer
