@@ -55,6 +55,20 @@ func (m Model) searchView() string {
 // cyan border; the others get a dim border. Borders replace the old vrule
 // dividers between panes (ADR-0021 update).
 func (m Model) bodyView(bodyH int) string {
+	if m.mode == modeStats || (m.mode == modeConfirm && m.confirmProject != "") {
+		s := m.statsView()
+		if m.mode == modeConfirm { // project prune reuses the confirm flow
+			count := 0
+			for _, p := range m.stats {
+				if p.TaskType == m.confirmProject {
+					count = p.Count
+				}
+			}
+			s += "\n" + dangerStyle.Render(fmt.Sprintf("Prune project %q (all %d %s)?  [y/N]",
+				m.confirmProject, count, plural(count, "memory", "memories")))
+		}
+		return s
+	}
 	inner := max(20, m.width-sidebarWidth)
 	detailW := inner * 34 / 100
 	listW := inner - detailW
@@ -185,6 +199,7 @@ func (m Model) sidebarView() string {
 
 func (m Model) footerView() string {
 	left := footerKey.Render("↵") + footerStyle.Render(" open   ") +
+		footerKey.Render("^u") + footerStyle.Render(" usage   ") +
 		footerKey.Render("^s") + footerStyle.Render(" share   ") +
 		footerKey.Render("^p") + footerStyle.Render(" pull   ") +
 		footerKey.Render("s") + footerStyle.Render(" scope   ") +
