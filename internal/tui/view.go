@@ -148,6 +148,146 @@ func (m Model) itemByID(id string) (listItem, bool) {
 	return listItem{}, false
 }
 
+// statsView renders the full-body usage pane (modeStats). It replaces the
+// 3-pane layout when the user hits ^u. Mirrors sidebarView's selection style
+// (▸ + sidebarSel) and reuses sectionLabel/metaStyle/countStyle so the pane
+// feels like the rest of the inspector. Header shows total payload + optional
+// db-file bytes; the project list is bytes-desc with a proportional bar; esc
+// handling and drill are driven by handleStatsKey — this is view only.
+func (m Model) statsView() string {
+	var b strings.Builder
+	b.WriteString(sectionLabel.Render("USAGE"))
+	b.WriteString("\n\n")
+	if m.statsErr != nil {
+		b.WriteString(dangerStyle.Render("load failed: " + m.statsErr.Error()))
+		b.WriteString("\n\n")
+		b.WriteString(metaStyle.Render("esc back"))
+		return b.String()
+	}
+	var totalBytes int64
+	var totalCount int
+	for _, p := range m.stats {
+		totalBytes += p.Bytes
+		totalCount += p.Count
+	}
+	payload := formatBytes(totalBytes)
+	hdr := metaStyle.Render("payload ") + bodyStyle.Render(payload)
+	if m.statsFile != -1 {
+		hdr += metaStyle.Render("  ·  file ") + bodyStyle.Render(formatBytes(m.statsFile))
+	}
+	hdr += countStyle.Render(fmt.Sprintf("  ·  %d %s", totalCount, plural(totalCount, "memory", "memories")))
+	b.WriteString(hdr)
+	b.WriteString("\n\n")
+
+	if len(m.stats) == 0 {
+		b.WriteString(metaStyle.Render("no projects"))
+		b.WriteString("\n\n")
+		b.WriteString(metaStyle.Render("esc back"))
+		return b.String()
+	}
+
+	// Drill-down: per-kind split for the selected project.
+	if m.statsDrill != "" {
+		var proj *store.ProjectSize
+		for i := range m.stats {
+			if m.stats[i].TaskType == m.statsDrill {
+				proj = &m.stats[i]
+				break
+			}
+		}
+		if proj == nil {
+			b.WriteString(metaStyle.Render("no project " + m.statsDrill))
+			b.WriteString("\n\n")
+			b.WriteString(metaStyle.Render("esc back"))
+			return b.String()
+		}
+		b.WriteString(sectionLabel.Render(proj.TaskType))
+		b.WriteString(" ")
+		b.WriteString(countStyle.Render(fmt.Sprintf("%d %s", proj.Count, plural(proj.Count, "memory", "memories"))))
+		b.WriteString(metaStyle.Render(" · " + formatBytes(proj.Bytes)))
+		b.WriteString("\n\n")
+		if len(proj.ByKind) == 0 {
+			b.WriteString(metaStyle.Render("no kinds"))
+			b.WriteString("\n\n")
+			b.WriteString(metaStyle.Render("esc back"))
+			return b.String()
+		}
+		maxKind := proj.ByKind[0].Bytes
+		if maxKind == 0 {
+			maxKind = 1
+		}
+		for _, k := range proj.ByKind {
+			label := fmt.Sprintf("%-17s", k.Kind)
+			cnt := countStyle.Render(fmt.Sprintf("%3d", k.Count))
+			bs := metaStyle.Render(fmt.Sprintf("%8s", formatBytes(k.Bytes)))
+			blen := int(float64(k.Bytes) / float64(maxKind) * 10)
+			if blen == 0 && k.Bytes > 0 {
+				blen = 1
+			}
+			bar := ""
+			if blen > 0 {
+				bar = " " + strings.Repeat("█", blen)
+			}
+			b.WriteString("  ")
+			b.WriteString(sidebarUnsel.Render(label))
+			b.WriteString(cnt)
+			b.WriteString("  ")
+			b.WriteString(bs)
+			b.WriteString(bar)
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+		b.WriteString(metaStyle.Render("esc back"))
+		return b.String()
+	}
+
+	// Project list, bytes-desc, bar proportional to maxBytes.
+	maxBytes := m.stats[0].Bytes
+	if maxBytes == 0 {
+		maxBytes = 1
+	}
+	for i, p := range m.stats {
+		label := fmt.Sprintf("%-20s", truncate(p.TaskType, 20))
+		cnt := countStyle.Render(fmt.Sprintf("%3d", p.Count))
+		bs := metaStyle.Render(fmt.Sprintf("%8s", formatBytes(p.Bytes)))
+		blen := int(float64(p.Bytes) / float64(maxBytes) * 12)
+		if blen == 0 && p.Bytes > 0 {
+			blen = 1
+		}
+		bar := ""
+		if blen > 0 {
+			bar = " " + strings.Repeat("█", blen)
+		}
+		if i == m.statsIdx {
+			b.WriteString(sidebarSel.Render("▸ " + label))
+		} else {
+			b.WriteString("  ")
+			b.WriteString(sidebarUnsel.Render(label))
+		}
+		b.WriteString(cnt)
+		b.WriteString("  ")
+		b.WriteString(bs)
+		b.WriteString(bar)
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(metaStyle.Render("↑/↓ navigate  enter drill  esc back  ^d prune"))
+	return b.String()
+}
+
+func formatBytes(n int64) string {
+	switch {
+	case n < 1024:
+		return fmt.Sprintf("%d B", n)
+	case n < 1024*1024:
+		return fmt.Sprintf("%.1f KB", float64(n)/1024)
+	case n < 1024*1024*1024:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1024*1024))
+	default:
+		return fmt.Sprintf("%.1f GB", float64(n)/(1024*1024*1024))
+	}
+}
+
 // sidebarView renders the KINDS census (arrow-navigable) and the SCOPE section
 // (cycled by `s`, not the cursor) — the scope-filter mockup.
 func (m Model) sidebarView() string {
