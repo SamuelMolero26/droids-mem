@@ -109,6 +109,14 @@ undercount. A `stale` graph serves the last complete index;
 `carried` marks a unit whose prior edges were retained. Verify critical findings
 against source when either appears.
 
+## Architecture
+
+![droids-mem architecture](assets/architecture.png)
+
+Agents reach the memory store and code graph through the MCP bridge; operators
+use the CLI. Both share `internal/store`, which scrubs before writing to
+SQLite. The code graph keeps its own per-repo index and never touches `mem.db`.
+
 ## Data and Safety
 
 The default database is `~/.droids-mem/mem.db`; set `DROIDS_MEM_DB` to move it.
