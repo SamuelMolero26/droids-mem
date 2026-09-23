@@ -55,19 +55,8 @@ func (m Model) searchView() string {
 // cyan border; the others get a dim border. Borders replace the old vrule
 // dividers between panes (ADR-0021 update).
 func (m Model) bodyView(bodyH int) string {
-	if m.mode == modeStats || (m.mode == modeConfirm && m.confirmProject != "") {
-		s := m.statsView()
-		if m.mode == modeConfirm { // project prune reuses the confirm flow
-			count := 0
-			for _, p := range m.stats {
-				if p.TaskType == m.confirmProject {
-					count = p.Count
-				}
-			}
-			s += "\n" + dangerStyle.Render(fmt.Sprintf("Prune project %q (all %d %s)?  [y/N]",
-				m.confirmProject, count, plural(count, "memory", "memories")))
-		}
-		return s
+	if m.mode == modeStats {
+		return m.statsView(bodyH)
 	}
 	inner := max(20, m.width-sidebarWidth)
 	detailW := inner * 34 / 100
@@ -152,9 +141,12 @@ func (m Model) itemByID(id string) (listItem, bool) {
 // 3-pane layout when the user hits ^u. Mirrors sidebarView's selection style
 // (▸ + sidebarSel) and reuses sectionLabel/metaStyle/countStyle so the pane
 // feels like the rest of the inspector. Header shows total payload + optional
-// db-file bytes; the project list is bytes-desc with a proportional bar; esc
-// handling and drill are driven by handleStatsKey — this is view only.
-func (m Model) statsView() string {
+// db-file bytes; bars and percentages are shares of that total, so a full bar
+// means "most of the corpus" rather than merely "the biggest row". The project
+// list is windowed to bodyH — without that the footer hint and the bottom rule
+// fall off the screen as soon as the corpus outgrows the terminal. esc handling
+// and drill are driven by handleStatsKey — this is view only.
+func (m Model) statsView(bodyH int) string {
 	var b strings.Builder
 	b.WriteString(sectionLabel.Render("USAGE"))
 	b.WriteString("\n\n")
@@ -212,28 +204,10 @@ func (m Model) statsView() string {
 			b.WriteString(metaStyle.Render("esc back"))
 			return b.String()
 		}
-		maxKind := proj.ByKind[0].Bytes
-		if maxKind == 0 {
-			maxKind = 1
-		}
+		// Kinds are measured against the project, not the corpus: in here the
+		// question is "what shape is this project", not "how big is it".
 		for _, k := range proj.ByKind {
-			label := fmt.Sprintf("%-17s", k.Kind)
-			cnt := countStyle.Render(fmt.Sprintf("%3d", k.Count))
-			bs := metaStyle.Render(fmt.Sprintf("%8s", formatBytes(k.Bytes)))
-			blen := int(float64(k.Bytes) / float64(maxKind) * 10)
-			if blen == 0 && k.Bytes > 0 {
-				blen = 1
-			}
-			bar := ""
-			if blen > 0 {
-				bar = " " + strings.Repeat("█", blen)
-			}
-			b.WriteString("  ")
-			b.WriteString(sidebarUnsel.Render(label))
-			b.WriteString(cnt)
-			b.WriteString("  ")
-			b.WriteString(bs)
-			b.WriteString(bar)
+			b.WriteString(usageRow(k.Kind, 17, k.Count, k.Bytes, proj.Bytes, 10, false))
 			b.WriteString("\n")
 		}
 		b.WriteString("\n")
@@ -241,39 +215,73 @@ func (m Model) statsView() string {
 		return b.String()
 	}
 
-	// Project list, bytes-desc, bar proportional to maxBytes.
-	maxBytes := m.stats[0].Bytes
-	if maxBytes == 0 {
-		maxBytes = 1
+	// Project list, bytes-desc, windowed around the cursor so it always stays
+	// on screen. 6 lines of chrome: label, blank, header, blank … blank, hint.
+	avail := max(1, bodyH-6)
+	start := 0
+	if len(m.stats) > avail {
+		start = min(max(0, m.statsIdx-avail/2), len(m.stats)-avail)
 	}
-	for i, p := range m.stats {
-		label := fmt.Sprintf("%-20s", truncate(p.TaskType, 20))
-		cnt := countStyle.Render(fmt.Sprintf("%3d", p.Count))
-		bs := metaStyle.Render(fmt.Sprintf("%8s", formatBytes(p.Bytes)))
-		blen := int(float64(p.Bytes) / float64(maxBytes) * 12)
-		if blen == 0 && p.Bytes > 0 {
-			blen = 1
-		}
-		bar := ""
-		if blen > 0 {
-			bar = " " + strings.Repeat("█", blen)
-		}
-		if i == m.statsIdx {
-			b.WriteString(sidebarSel.Render("▸ " + label))
-		} else {
-			b.WriteString("  ")
-			b.WriteString(sidebarUnsel.Render(label))
-		}
-		b.WriteString(cnt)
-		b.WriteString("  ")
-		b.WriteString(bs)
-		b.WriteString(bar)
+	end := min(len(m.stats), start+avail)
+	for i := start; i < end; i++ {
+		p := m.stats[i]
+		b.WriteString(usageRow(p.TaskType, 20, p.Count, p.Bytes, totalBytes, 12, i == m.statsIdx))
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(metaStyle.Render("↑/↓ navigate  enter drill  esc back  ^d prune"))
+	hint := "↑/↓ navigate  enter drill  esc back"
+	if end-start < len(m.stats) {
+		hint += fmt.Sprintf("  ·  %d–%d of %d", start+1, end, len(m.stats))
+	}
+	b.WriteString(metaStyle.Render(hint))
 	return b.String()
 }
+
+// usageRow renders one label/count/bytes/share line for the usage pane. share
+// is the denominator the percentage and bar are measured against — the corpus
+// total in the project list, the project's own payload in the kind drill — so
+// the bar answers "how much of the whole is this" either way.
+func usageRow(label string, width, count int, bytes, share int64, barW int, sel bool) string {
+	var b strings.Builder
+	name := fmt.Sprintf("%-*s", width, truncate(label, width))
+	if sel {
+		b.WriteString(sidebarSel.Render("▸ " + name))
+	} else {
+		b.WriteString("  ")
+		b.WriteString(sidebarUnsel.Render(name))
+	}
+	var pct float64
+	if share > 0 {
+		pct = float64(bytes) / float64(share) * 100
+	}
+	b.WriteString(countStyle.Render(fmt.Sprintf("%3d", count)))
+	b.WriteString("  ")
+	b.WriteString(metaStyle.Render(fmt.Sprintf("%8s", formatBytes(bytes))))
+	b.WriteString("  ")
+	b.WriteString(metaStyle.Render(fmt.Sprintf("%5.1f%%", pct)))
+	// Eighths, not whole cells: one project usually dominates the corpus, so
+	// at whole-cell resolution everything below 1/barW collapses to the same
+	// single block and the bar stops distinguishing 11% from 1%.
+	eighths := int(pct / 100 * float64(barW) * 8)
+	if eighths == 0 && bytes > 0 { // a non-empty project never renders as nothing
+		eighths = 1
+	}
+	if eighths > 0 {
+		bar := strings.Repeat("█", eighths/8)
+		if rem := eighths % 8; rem > 0 {
+			bar += string(barEighths[rem])
+		}
+		style := barUnsel
+		if sel {
+			style = barSel
+		}
+		b.WriteString(" " + style.Render(bar))
+	}
+	return b.String()
+}
+
+// barEighths indexes partial block glyphs by eighth, so a bar can end mid-cell.
+var barEighths = []rune(" ▏▎▍▌▋▊▉█")
 
 func formatBytes(n int64) string {
 	switch {

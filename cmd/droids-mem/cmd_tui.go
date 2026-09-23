@@ -14,9 +14,9 @@ func newTUICmd(a *app) *cobra.Command {
 list, detail). Type to live-search (≥3 chars); tab cycles pane focus; arrows act
 on the focused pane (kind filter / list / detail scroll); the detail pane follows
 the list cursor. enter jumps to the detail pane, ctrl+d deletes with
-confirmation, esc backs out or quits. ctrl+u opens the memory-usage pane:
-per-project counts plus payload bytes, size-sorted, with a per-kind split,
-drill-down, and prune-from-pane; esc backs out.
+confirmation, esc backs out or quits. ctrl+u opens the read-only memory-usage
+pane: per-project counts plus payload bytes and share of the corpus,
+size-sorted, with a per-kind drill-down; esc backs out.
 
 Sharing (ADR-0028): s cycles the SCOPE filter (all/personal/shared); space
 multi-selects rows; ctrl+s opens the share-confirm dialog (flips the selection

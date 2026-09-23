@@ -149,15 +149,14 @@ type Model struct {
 	status        string
 
 	// stats pane state (modeStats): live ProjectSizes rows, cursor, drill
-	// target ("" = project list), last query error, db-file bytes (-1 when
-	// the best-effort stat fails), and the pending project-prune target
-	// ("" = none — the confirm dialog then targets a single memory id).
-	stats          []store.ProjectSize
-	statsIdx       int
-	statsDrill     string
-	statsErr       error
-	statsFile      int64
-	confirmProject string
+	// target ("" = project list), last query error, and db-file bytes (-1
+	// when the best-effort stat fails). The pane is read-only — deletion
+	// lives in the list, where a row is searched for and seen before it goes.
+	stats      []store.ProjectSize
+	statsIdx   int
+	statsDrill string
+	statsErr   error
+	statsFile  int64
 
 	// push/pull do the git side of sharing; defaulted to the real git-shelling
 	// funcs, overridden in tests so the model logic runs without a live repo.
@@ -499,7 +498,7 @@ func (m Model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleStatsKey routes keys while the usage pane owns the screen. Only pane
-// open and prune refresh the sizes — navigation and drill never re-query.
+// open refreshes the sizes — navigation and drill never re-query.
 func (m Model) handleStatsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
@@ -522,12 +521,6 @@ func (m Model) handleStatsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter": // drill into the selected project's kind split
 		if len(m.stats) > 0 {
 			m.statsDrill = m.stats[min(m.statsIdx, len(m.stats)-1)].TaskType
-		}
-		return m, nil
-	case "ctrl+d": // prune only the selected project via the confirm flow
-		if len(m.stats) > 0 {
-			m.confirmProject = m.stats[min(m.statsIdx, len(m.stats)-1)].TaskType
-			m.mode = modeConfirm
 		}
 		return m, nil
 	default: // everything else is swallowed — the pane has no text input

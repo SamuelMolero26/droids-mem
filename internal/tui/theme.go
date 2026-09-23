@@ -60,6 +60,11 @@ var (
 	sidebarUnsel = lipgloss.NewStyle().Foreground(colMeta)
 	countStyle   = lipgloss.NewStyle().Foreground(colDim)
 
+	// Usage-pane bars: the cursor row's bar lights up magenta so the eye can
+	// track the selection down the bar column, not just the label column.
+	barSel   = lipgloss.NewStyle().Foreground(colAccent)
+	barUnsel = lipgloss.NewStyle().Foreground(colMeta)
+
 	titleStyle = lipgloss.NewStyle().Foreground(colBright).Bold(true)
 	metaStyle  = lipgloss.NewStyle().Foreground(colMeta)
 	bodyStyle  = lipgloss.NewStyle().Foreground(colText)
