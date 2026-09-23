@@ -50,6 +50,12 @@ deep-read any browse-tier item.`,
 				writeError("context_failed", err.Error(), true)
 				exitWith(ExitError)
 			}
+			if len(resp.Browse) > 0 {
+				// Contextual disclosure (AXI §9): stub IDs are expandable via
+				// get. Omitted when Browse is empty — nothing to expand, so
+				// the hint would be noise (omit-when-self-contained).
+				resp.Help = []string{"Run 'droids-mem get --id <id>' to read a browse-tier memory in full"}
+			}
 			writeJSON(resp)
 			return nil
 		},

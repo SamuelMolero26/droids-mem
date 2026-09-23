@@ -76,12 +76,8 @@ type SearchResponse struct {
 	Message string `json:"message,omitempty"`
 }
 
-// Definitive-empty messages for Search. Tests assert these literals, never the
-// const names, so a wording change fails loud instead of drifting silently.
-const (
-	msgNoSearchableText = "query contains no searchable text (no letters or digits); nothing can match"
-	msgNoMatch          = "no memories matched; try --all-projects or different keywords"
-)
+// Definitive-empty messages live in search_compact.go (unexported consts +
+// NoMatchMessage); Search only selects by scope here.
 
 func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse, error) {
 	if strings.TrimSpace(req.Query) == "" {
@@ -144,7 +140,11 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 	}
 	if total == 0 {
 		// Genuine no-match: nothing to rank, so skip the SELECT round-trip.
-		return &SearchResponse{Results: []SearchResult{}, Total: 0, Message: msgNoMatch}, nil
+		// The message names the scope that was actually searched; see
+		// NoMatchMessage. Transport-specific syntax is appended by the
+		// CLI/MCP boundary, never here.
+		scoped := !req.AllProjects && (req.TaskType != "" || req.Kind != "")
+		return &SearchResponse{Results: []SearchResult{}, Total: 0, Message: NoMatchMessage(scoped)}, nil
 	}
 
 	// Fetch more results than requested, then re-rank by a composite of BM25 +

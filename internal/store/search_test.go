@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -360,27 +361,78 @@ func TestSearch_OnlyPunctuation(t *testing.T) {
 	}
 }
 
-// TestSearch_NoMatchMessage labels a genuine no-match with the scope hint so
-// agents try --all-projects or different keywords instead of re-running.
+// TestSearch_NoMatchMessage labels a genuine no-match with a scope-aware,
+// transport-neutral hint: a scoped search suggests broadening the scope (the
+// CLI/MCP boundary appends its own actionable syntax), a global search only
+// suggests different keywords. It must never name --all-projects here — that
+// syntax is wrong for MCP (all_projects=true) and wrong when the search was
+// already global.
 func TestSearch_NoMatchMessage(t *testing.T) {
 	s := newTestStore(t)
 	seedMemories(t, s)
 
-	resp, err := s.Search(context.Background(), store.SearchRequest{Query: "xyznonexistentterm", AllProjects: true})
+	tests := []struct {
+		name string
+		req  store.SearchRequest
+		want string
+	}{
+		{
+			name: "scoped search suggests broader scope",
+			req:  store.SearchRequest{Query: "xyznonexistentterm", TaskType: "crm_upload"},
+			want: "no memories matched; try a broader scope or different keywords",
+		},
+		{
+			name: "global search suggests keywords only",
+			req:  store.SearchRequest{Query: "xyznonexistentterm", AllProjects: true},
+			want: "no memories matched; try different keywords",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp, err := s.Search(context.Background(), tt.req)
+			if err != nil {
+				t.Fatalf("Search: %v", err)
+			}
+			if resp.Results == nil {
+				t.Error("expected empty slice, got nil")
+			}
+			if len(resp.Results) != 0 {
+				t.Errorf("expected 0 results, got %d", len(resp.Results))
+			}
+			if resp.Total != 0 {
+				t.Errorf("expected total 0, got %d", resp.Total)
+			}
+			if resp.Message != tt.want {
+				t.Errorf("message = %q, want %q", resp.Message, tt.want)
+			}
+		})
+	}
+}
+
+// TestSearch_KeepsFullLearned is the session-relevance regression lock:
+// Store.Search must keep returning full rows (the hook/session pull injects
+// full Learned into the prompt). Only the CLI/MCP boundary projects to
+// compact — a long learned must arrive here uncut.
+func TestSearch_KeepsFullLearned(t *testing.T) {
+	s := newTestStore(t)
+	// Note: save trims trailing whitespace, so build the fixture without any.
+	full := strings.TrimSpace(strings.Repeat("critical detail ", 100)) // ~1599 runes
+	if _, err := s.Save(context.Background(), store.SaveRequest{
+		TaskType: "relevance_full", Kind: "task_pattern",
+		Title: "Full learned regression", What: "hook injects this", Learned: full, Tags: "regression",
+	}); err != nil {
+		t.Fatalf("seed save: %v", err)
+	}
+
+	resp, err := s.Search(context.Background(), store.SearchRequest{Query: "regression hook injects", TaskType: "relevance_full"})
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
-	if resp.Results == nil {
-		t.Error("expected empty slice, got nil")
+	if len(resp.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(resp.Results))
 	}
-	if len(resp.Results) != 0 {
-		t.Errorf("expected 0 results, got %d", len(resp.Results))
-	}
-	if resp.Total != 0 {
-		t.Errorf("expected total 0, got %d", resp.Total)
-	}
-	const wantMessage = "no memories matched; try --all-projects or different keywords"
-	if resp.Message != wantMessage {
-		t.Errorf("message = %q, want %q", resp.Message, wantMessage)
+	if resp.Results[0].Learned != full {
+		t.Errorf("Learned cut to %d runes, want full %d", len([]rune(resp.Results[0].Learned)), len([]rune(full)))
 	}
 }

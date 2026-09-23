@@ -68,6 +68,11 @@ type ContextResponse struct {
 	// exceeds len(UserRules), the overflow appears in Browse as title stubs.
 	UserRulesTotal int             `json:"user_rules_total"`
 	Browse         []ContextMemory `json:"browse"`
+	// Help carries contextual-disclosure hints (AXI §9) pointing at the
+	// full-detail escape hatch for stub IDs. Never set by Store.Context
+	// itself — the CLI/MCP boundary sets it when Browse is non-empty, with
+	// transport-appropriate syntax, so this stays neutral here.
+	Help []string `json:"help,omitempty"`
 }
 
 func (s *Store) Context(ctx context.Context, req ContextRequest) (*ContextResponse, error) {

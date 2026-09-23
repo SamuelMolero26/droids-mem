@@ -73,7 +73,7 @@ const instructionsCore = `droids-mem is your persistent memory across sessions. 
 Available tools: mem_save, mem_search, mem_context, mem_get, mem_corpus, graph_symbol, graph_package, graph_build_wait
 
 AT THE START of a task, and again whenever the topic shifts:
-- Call mem_search with a short description of what you are about to do. This surfaces relevant prior lessons by relevance and needs no task_type. Each result includes an overlap_score (0-1): higher means more literal token overlap with your query, lower means the connection is looser (synonyms, rewording). Judge relevance yourself — ignore weak results. If you are investigating a problem that may span repos, pass all_projects=true to search every project's memories.
+- Call mem_search with a short description of what you are about to do. This surfaces relevant prior lessons by relevance and needs no task_type. Results carry a learned_preview (first 500 chars of the lesson) instead of the full body — ordering already implies relevance, so judge by rank and call mem_get with a result id to read the full body before relying on it. If you are investigating a problem that may span repos, pass all_projects=true to search every project's memories.
 - If you know a stable workflow tag for this work, also call mem_context with that task_type for curated continuity (prior session summary + standing user rules). Derive task_type mechanically — the git repo name or top-level directory name — and reuse the exact same string every session for that project; inventing a new slug each time silently orphans prior continuity. A miss here is harmless — the search above already covers you.
 
 AS YOU WORK, when you learn something worth reusing next time, call mem_save:

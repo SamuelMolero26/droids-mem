@@ -117,6 +117,65 @@ func TestE2E_SearchPunctuationOnlyIsDefinitiveEmpty(t *testing.T) {
 	}
 }
 
+// AXI §2+§9: the single integration proof — default search lists are compact
+// (learned_preview, never full learned) with a get disclosure, and get is the
+// full-detail escape hatch. Truncation math and key shape are proved once at
+// the unit level; this only proves the binary wires compact search to full get.
+func TestE2E_SearchCompactAndGetRoundTrip(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "mem.db")
+	full := strings.Repeat("zebracode detail ", 40) // ~680 runes, over the 500 preview cap
+	cli(t, dbPath, nil, "save",
+		"--task-type", "compact_e2e",
+		"--kind", "task_pattern",
+		"--title", "Zebracode detail mapping fix",
+		"--what", "long lesson body for preview",
+		"--learned", full,
+		"--tags", "zebracode",
+	)
+
+	stdout, _, code := cliStderr(t, dbPath, "search", "--query", "zebracode detail mapping", "--task-type", "compact_e2e")
+	if code != 0 {
+		t.Fatalf("search exit = %d, want 0", code)
+	}
+	var searchResp struct {
+		Results []map[string]any `json:"results"`
+		Total   int              `json:"total"`
+		Help    []string         `json:"help"`
+	}
+	if err := json.Unmarshal(stdout, &searchResp); err != nil {
+		t.Fatalf("stdout not JSON: %v\nraw: %s", err, stdout)
+	}
+	if searchResp.Total != 1 || len(searchResp.Results) != 1 {
+		t.Fatalf("want 1 compact result, got %+v", searchResp)
+	}
+	row := searchResp.Results[0]
+	if _, ok := row["learned"]; ok {
+		t.Errorf("default list leaks full learned: %v", row)
+	}
+	if _, ok := row["learned_preview"]; !ok {
+		t.Errorf("default list missing learned_preview: %v", row)
+	}
+	if len(searchResp.Help) != 1 || !strings.Contains(searchResp.Help[0], "droids-mem get --id <id>") {
+		t.Errorf("search help = %v, want get disclosure", searchResp.Help)
+	}
+
+	id, _ := row["id"].(string)
+	getOut, _, getCode := cliStderr(t, dbPath, "get", "--id", id)
+	if getCode != 0 {
+		t.Fatalf("get exit = %d, want 0", getCode)
+	}
+	var getMem map[string]any
+	if err := json.Unmarshal(getOut, &getMem); err != nil {
+		t.Fatalf("get stdout not JSON: %v\nraw: %s", err, getOut)
+	}
+	if getMem["learned"] != strings.TrimSpace(full) {
+		t.Errorf("get did not return full learned")
+	}
+	if _, ok := getMem["help"]; ok {
+		t.Errorf("detail view carries help noise: %v", getMem)
+	}
+}
+
 // The MCP graph_package arg name (`--package`) must work on the CLI too, matching
 // the positional form byte-for-byte in output (surface parity).
 func TestE2E_GraphPackageFlagParity(t *testing.T) {
