@@ -135,39 +135,6 @@ func TestSearchHandler_ReturnsTotal(t *testing.T) {
 	}
 }
 
-// Scoped no-match gains MCP-actionable syntax. The single scoped case is the
-// only MCP-side proof: projection shape lives in the store, the global path
-// is locked there and at the CLI boundary.
-func TestSearchHandler_NoMatchHintIsTransportNeutral(t *testing.T) {
-	st := newTestStore(t)
-	if _, err := saveHandler(st)(context.Background(), mcp.CallToolRequest{}, saveArgsFixture()); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-
-	res, err := searchHandler(st)(context.Background(), mcp.CallToolRequest{},
-		searchArgs{Query: "xyznonexistentterm", TaskType: "handlertest"})
-	if err != nil {
-		t.Fatalf("handler err: %v", err)
-	}
-	var resp store.SearchCompactResponse
-	if err := json.Unmarshal([]byte(okText(t, res)), &resp); err != nil {
-		t.Fatalf("payload not JSON: %v", err)
-	}
-	if resp.Total != 0 {
-		t.Errorf("total = %d, want 0", resp.Total)
-	}
-	want := store.NoMatchMessage(true) + " Try all_projects=true to search every project."
-	if resp.Message != want {
-		t.Errorf("message = %q, want %q", resp.Message, want)
-	}
-	if strings.Contains(resp.Message, "--all-projects") {
-		t.Errorf("MCP path names CLI flag syntax: %q", resp.Message)
-	}
-	if len(resp.Help) != 0 {
-		t.Errorf("empty response help = %v, want none", resp.Help)
-	}
-}
-
 // Browse-tier stubs disclose mem_get; an empty browse stays self-contained.
 func TestContextHandler_BrowseDisclosesGet(t *testing.T) {
 	st := newTestStore(t)

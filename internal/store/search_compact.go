@@ -22,27 +22,11 @@ func LearnedPreview(s string) string {
 
 // Definitive-empty messages for Search. Tests assert these literals, never the
 // const names, so a wording change fails loud instead of drifting silently.
-//
-// The no-match message is scope-aware and transport-neutral: a scoped search
-// names no transport-specific flag, so both the CLI and MCP surfaces can use it
-// verbatim and append their own actionable syntax at the boundary. Unexported —
-// boundaries match via NoMatchMessage(true), never by naming a constant.
+// Transport-neutral on purpose: no CLI flag or MCP arg syntax.
 const (
 	msgNoSearchableText = "query contains no searchable text (no letters or digits); nothing can match"
-	msgNoMatchScoped    = "no memories matched; try a broader scope or different keywords"
-	msgNoMatchGlobal    = "no memories matched; try different keywords"
+	msgNoMatch          = "no memories matched; try different keywords or a broader scope"
 )
-
-// NoMatchMessage returns the transport-neutral no-match message for the scope
-// actually searched: scoped (any filter applied) suggests broadening, global
-// only suggests different keywords. The CLI/MCP boundary appends its own
-// actionable syntax (--all-projects vs all_projects=true), never here.
-func NoMatchMessage(scoped bool) string {
-	if scoped {
-		return msgNoMatchScoped
-	}
-	return msgNoMatchGlobal
-}
 
 // SearchCompactRow is the single default list projection (AXI §2 minimal
 // schema): identity + title + a rune-safe learned_preview, never the full
@@ -60,9 +44,7 @@ type SearchCompactRow struct {
 	NeedsReview    bool   `json:"needs_review,omitempty"`
 }
 
-// SearchCompactResponse is the list envelope both transports emit. Help is
-// never set here — each boundary sets its own escape-hatch syntax (or leaves
-// it empty) after projecting.
+// SearchCompactResponse is the list envelope both transports emit.
 type SearchCompactResponse struct {
 	Results []SearchCompactRow `json:"results"`
 	Total   int                `json:"total"`
@@ -73,9 +55,9 @@ type SearchCompactResponse struct {
 // ToCompactSearchResponse projects a full Search response onto the compact
 // list surface. Search keeps returning full rows — session relevance
 // (cmd_session.go) and hooks consume those directly; only the CLI/MCP
-// boundary trims via this helper. Message passes through verbatim; the
-// boundary appends transport-specific suffixes and sets Help.
-func ToCompactSearchResponse(resp *SearchResponse) SearchCompactResponse {
+// boundary trims via this helper. help is the boundary's own escape-hatch
+// syntax (AXI §9), attached only when there are stub IDs to expand.
+func ToCompactSearchResponse(resp *SearchResponse, help string) SearchCompactResponse {
 	out := SearchCompactResponse{
 		Results: []SearchCompactRow{},
 		Total:   resp.Total,
@@ -91,6 +73,9 @@ func ToCompactSearchResponse(resp *SearchResponse) SearchCompactResponse {
 			Pinned:         r.Pinned,
 			NeedsReview:    r.NeedsReview,
 		})
+	}
+	if len(out.Results) > 0 {
+		out.Help = []string{help}
 	}
 	return out
 }

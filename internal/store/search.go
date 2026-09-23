@@ -76,9 +76,6 @@ type SearchResponse struct {
 	Message string `json:"message,omitempty"`
 }
 
-// Definitive-empty messages live in search_compact.go (unexported consts +
-// NoMatchMessage); Search only selects by scope here.
-
 func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse, error) {
 	if strings.TrimSpace(req.Query) == "" {
 		return nil, &ValidationError{Field: "query", Message: "required"}
@@ -95,20 +92,13 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 		limit = maxSearchLimit
 	}
 
-	// The hasSearchableText gate is load-bearing, not defensive: it mirrors the
-	// Context browse-tier gate, where punctuation-only input would otherwise
-	// become a MATCH expression of phrases that tokenize to nothing and match
-	// no row after two doomed SQL round-trips. Zero SQL runs on this path.
+	// Punctuation-only input becomes a MATCH of phrases that tokenize to
+	// nothing (phraseFTSQuery only returns "" for blank input, which the
+	// TrimSpace check above already rejects), so gate on real text first.
 	if !hasSearchableText(req.Query) {
 		return &SearchResponse{Results: []SearchResult{}, Total: 0, Message: msgNoSearchableText}, nil
 	}
-
 	ftsQuery := phraseFTSQuery(req.Query)
-	if ftsQuery == "" {
-		// Query had no searchable tokens (e.g. all punctuation). Nothing can
-		// match; return empty rather than run MATCH on an empty expression.
-		return &SearchResponse{Results: []SearchResult{}, Total: 0, Message: msgNoSearchableText}, nil
-	}
 
 	// build WHERE clause — only hardcoded strings in the format string, user values in args
 	conditions := []string{"memories_fts MATCH ?"}
@@ -140,11 +130,7 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 	}
 	if total == 0 {
 		// Genuine no-match: nothing to rank, so skip the SELECT round-trip.
-		// The message names the scope that was actually searched; see
-		// NoMatchMessage. Transport-specific syntax is appended by the
-		// CLI/MCP boundary, never here.
-		scoped := !req.AllProjects && (req.TaskType != "" || req.Kind != "")
-		return &SearchResponse{Results: []SearchResult{}, Total: 0, Message: NoMatchMessage(scoped)}, nil
+		return &SearchResponse{Results: []SearchResult{}, Total: 0, Message: msgNoMatch}, nil
 	}
 
 	// Fetch more results than requested, then re-rank by a composite of BM25 +

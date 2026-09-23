@@ -151,22 +151,8 @@ func searchHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, s
 		if err != nil {
 			return toolErr(err), nil
 		}
-		return toolJSON(toSearchListResponse(resp))
+		return toolJSON(store.ToCompactSearchResponse(resp, "Call mem_get with a result id to read the full body"))
 	}
-}
-
-// toSearchListResponse renders a full Store.Search response on the compact
-// MCP surface: the shared store projection plus MCP-owned suffix and help
-// syntax (AXI §9 — help only when stub IDs exist; never CLI flag syntax here).
-func toSearchListResponse(resp *store.SearchResponse) store.SearchCompactResponse {
-	out := store.ToCompactSearchResponse(resp)
-	if resp.Message == store.NoMatchMessage(true) {
-		out.Message += " Try all_projects=true to search every project."
-	}
-	if len(out.Results) > 0 {
-		out.Help = []string{"Call mem_get with a result id to read the full body"}
-	}
-	return out
 }
 
 // ---------- mem_context ----------

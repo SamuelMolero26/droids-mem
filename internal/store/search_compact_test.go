@@ -55,8 +55,7 @@ func TestLearnedPreview(t *testing.T) {
 
 // TestToCompactSearchResponse is the single proof for the shared list
 // projection: allow-listed keys only, lifecycle flags only when true, preview
-// applied, total/message passed through. Boundaries assert only their own
-// suffix/help wiring — never this shape again.
+// applied, total/message passed through, help only when results exist.
 func TestToCompactSearchResponse(t *testing.T) {
 	resp := &store.SearchResponse{
 		Results: []store.SearchResult{
@@ -78,12 +77,15 @@ func TestToCompactSearchResponse(t *testing.T) {
 		Message: "some message",
 	}
 
-	got := store.ToCompactSearchResponse(resp)
+	got := store.ToCompactSearchResponse(resp, "expand me")
 	if got.Total != 3 || got.Message != "some message" {
 		t.Fatalf("total/message not passed through: %+v", got)
 	}
-	if len(got.Help) != 0 {
-		t.Fatalf("shared projection sets help = %v, want none (boundaries own it)", got.Help)
+	if len(got.Help) != 1 || got.Help[0] != "expand me" {
+		t.Fatalf("help = %v, want the boundary's text when results exist", got.Help)
+	}
+	if empty := store.ToCompactSearchResponse(&store.SearchResponse{}, "expand me"); len(empty.Help) != 0 {
+		t.Fatalf("empty response help = %v, want none", empty.Help)
 	}
 
 	raw, err := json.Marshal(got)

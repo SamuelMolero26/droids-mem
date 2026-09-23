@@ -361,52 +361,23 @@ func TestSearch_OnlyPunctuation(t *testing.T) {
 	}
 }
 
-// TestSearch_NoMatchMessage labels a genuine no-match with a scope-aware,
-// transport-neutral hint: a scoped search suggests broadening the scope (the
-// CLI/MCP boundary appends its own actionable syntax), a global search only
-// suggests different keywords. It must never name --all-projects here — that
-// syntax is wrong for MCP (all_projects=true) and wrong when the search was
-// already global.
+// TestSearch_NoMatchMessage labels a genuine no-match with a transport-neutral
+// hint: it must never name --all-projects (wrong for MCP, and wrong when the
+// search was already global or only filtered by kind).
 func TestSearch_NoMatchMessage(t *testing.T) {
 	s := newTestStore(t)
 	seedMemories(t, s)
 
-	tests := []struct {
-		name string
-		req  store.SearchRequest
-		want string
-	}{
-		{
-			name: "scoped search suggests broader scope",
-			req:  store.SearchRequest{Query: "xyznonexistentterm", TaskType: "crm_upload"},
-			want: "no memories matched; try a broader scope or different keywords",
-		},
-		{
-			name: "global search suggests keywords only",
-			req:  store.SearchRequest{Query: "xyznonexistentterm", AllProjects: true},
-			want: "no memories matched; try different keywords",
-		},
+	resp, err := s.Search(context.Background(), store.SearchRequest{Query: "xyznonexistentterm", TaskType: "crm_upload"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			resp, err := s.Search(context.Background(), tt.req)
-			if err != nil {
-				t.Fatalf("Search: %v", err)
-			}
-			if resp.Results == nil {
-				t.Error("expected empty slice, got nil")
-			}
-			if len(resp.Results) != 0 {
-				t.Errorf("expected 0 results, got %d", len(resp.Results))
-			}
-			if resp.Total != 0 {
-				t.Errorf("expected total 0, got %d", resp.Total)
-			}
-			if resp.Message != tt.want {
-				t.Errorf("message = %q, want %q", resp.Message, tt.want)
-			}
-		})
+	if resp.Results == nil || len(resp.Results) != 0 || resp.Total != 0 {
+		t.Errorf("want empty non-nil results and total 0, got %+v", resp)
+	}
+	const want = "no memories matched; try different keywords or a broader scope"
+	if resp.Message != want {
+		t.Errorf("message = %q, want %q", resp.Message, want)
 	}
 }
 

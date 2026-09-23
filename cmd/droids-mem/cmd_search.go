@@ -7,20 +7,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// toSearchListResponse renders a full Store.Search response on the compact
-// CLI surface: the shared store projection plus CLI-owned suffix and help
-// syntax (AXI §9 — help only when stub IDs exist to expand).
-func toSearchListResponse(resp *store.SearchResponse) store.SearchCompactResponse {
-	out := store.ToCompactSearchResponse(resp)
-	if resp.Message == store.NoMatchMessage(true) {
-		out.Message += " Try --all-projects to search every project."
-	}
-	if len(out.Results) > 0 {
-		out.Help = []string{"Run 'droids-mem get --id <id>' to read a memory in full"}
-	}
-	return out
-}
-
 func newSearchCmd(a *app) *cobra.Command {
 	var (
 		query       string
@@ -60,7 +46,7 @@ func newSearchCmd(a *app) *cobra.Command {
 				writeError("search_failed", err.Error(), true)
 				exitWith(ExitError)
 			}
-			writeJSON(toSearchListResponse(resp))
+			writeJSON(store.ToCompactSearchResponse(resp, "Run 'droids-mem get --id <id>' to read a memory in full"))
 			return nil
 		},
 	}
