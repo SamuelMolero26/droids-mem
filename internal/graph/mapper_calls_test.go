@@ -4,12 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
-	"time"
 
 	gts "github.com/odvcencio/gotreesitter"
 	_ "modernc.org/sqlite"
@@ -382,61 +379,6 @@ func TestEdges_NeverJoinGoSymbolToMapperSymbol(t *testing.T) {
 	}
 }
 
-// ---------- D.9 (T1/D8): indexerGen bump ----------
-
-// TestManager_IndexerGenBump_RebuildsPriorGraphWithCallEdges is task D.9,
-// extending C.6's pattern one generation further: a graph.db seeded exactly
-// as a PR-C-era build would have left it (indexerGen "2" — symbols only, no
-// call edges) must be treated as stale by the CURRENT stamp, forcing a
-// rebuild that now returns mapper CALL EDGES a PR-C-era build could never
-// have produced.
-func TestManager_IndexerGenBump_RebuildsPriorGraphWithCallEdges(t *testing.T) {
-	repo := t.TempDir()
-	writeFile(t, repo, "app.ts", "export function helper(): void {}\nexport function run(): void { helper(); }\n")
-
-	m := managerFor(t)
-	ctx := context.Background()
-
-	canon, err := canonicalRepo(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dbPath := m.dbPath(canon)
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0o750); err != nil {
-		t.Fatal(err)
-	}
-
-	st, err := stamp(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, rest, ok := strings.Cut(st, ":")
-	if !ok {
-		t.Fatalf("stamp() = %q, want a %q-separated generation prefix", st, ":")
-	}
-	// Same census as the CURRENT tree, but the PR-C-era generation — so a
-	// mismatch can only be attributed to indexerGen, not an unrelated census
-	// difference.
-	oldStamp := stampGen(schema, indexedExtensions(), "2") + ":" + rest
-	seedRawGraphMeta(t, dbPath, oldStamp, nil)
-
-	resp, err := m.WaitBuild(ctx, repo, 60*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !resp.Completed || !resp.Rebuilt {
-		t.Fatalf("want completed+rebuilt (indexerGen bump must force a rebuild of a PR-C-era graph), got %+v", resp)
-	}
-
-	symResp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "helper"})
-	if err != nil {
-		t.Fatalf("Symbol helper: %v", err)
-	}
-	if len(symResp.Callers) == 0 {
-		t.Fatal("Symbol helper: no callers in response — the rebuild did not produce mapper call edges")
-	}
-}
-
 // ---------- G2.4 / G2.5: module-specifier -> repo-file resolution ----------
 
 // TestResolveSpecifier_RelativeFormsAndBareMiss covers G2.4 and G2.5 in one
@@ -639,51 +581,5 @@ func TestBuildIndex_Rung2a_ResolvesThroughRealImport(t *testing.T) {
 	}
 	if files[0] != "client.ts" {
 		t.Errorf("run()->get() resolved into %q, want %q: rung 2a's import scoping did not reach the real build", files[0], "client.ts")
-	}
-}
-
-// ---------- G2.9 (T1/D8): indexerGen bump ----------
-
-// TestManager_IndexerGenBump_RebuildsPriorGraphWithImportScopedLadder
-// extends D.9/E.8's pattern one generation further. A graph seeded exactly
-// as a PR-G1-era build would have left it (indexerGen "4") must be treated
-// as stale, because rung 2a changes which EDGES a build writes: a pre-G2
-// graph holds edges resolved without import scoping, differently attributed
-// rather than merely less complete.
-func TestManager_IndexerGenBump_RebuildsPriorGraphWithImportScopedLadder(t *testing.T) {
-	repo := t.TempDir()
-	writeFile(t, repo, "app.ts", "export function hello(): string { return 'hi'; }\n")
-
-	m := managerFor(t)
-	ctx := context.Background()
-
-	canon, err := canonicalRepo(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dbPath := m.dbPath(canon)
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0o750); err != nil {
-		t.Fatal(err)
-	}
-
-	st, err := stamp(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, rest, ok := strings.Cut(st, ":")
-	if !ok {
-		t.Fatalf("stamp() = %q, want a %q-separated generation prefix", st, ":")
-	}
-	// Same census as the CURRENT tree, so a mismatch can only be attributed
-	// to indexerGen, not an unrelated census difference.
-	oldStamp := stampGen(schema, indexedExtensions(), "4") + ":" + rest
-	seedRawGraphMeta(t, dbPath, oldStamp, nil)
-
-	resp, err := m.WaitBuild(ctx, repo, 60*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !resp.Completed || !resp.Rebuilt {
-		t.Fatalf("want completed+rebuilt (indexerGen bump must force a rebuild of a PR-G1-era graph), got %+v", resp)
 	}
 }

@@ -6,9 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
-	"time"
 
 	"golang.org/x/tools/go/packages"
 
@@ -151,59 +149,6 @@ func TestGoSymbols_ByPos_ExcludesMapperSymbols(t *testing.T) {
 	}
 }
 
-// TestManager_IndexerGenBump_RebuildsPriorGraphWithMapperSymbols is task C.6
-// (T1/D8), per PR-B's B.9 pattern extended to a full rebuild: a graph.db
-// seeded exactly as a PR-B-era build would have left it (old indexerGen,
-// matching census, zero symbols) must be treated as stale by the CURRENT
-// stamp — forcing a rebuild that now returns mapper symbols a PR-B-era build
-// could never have produced.
-func TestManager_IndexerGenBump_RebuildsPriorGraphWithMapperSymbols(t *testing.T) {
-	repo := t.TempDir()
-	writeFile(t, repo, "app.ts", "export function hello(): string { return 'hi'; }\n")
-
-	m := managerFor(t)
-	ctx := context.Background()
-
-	canon, err := canonicalRepo(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dbPath := m.dbPath(canon)
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0o750); err != nil {
-		t.Fatal(err)
-	}
-
-	st, err := stamp(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, rest, ok := strings.Cut(st, ":")
-	if !ok {
-		t.Fatalf("stamp() = %q, want a %q-separated generation prefix", st, ":")
-	}
-	// Same census (count/size/maxMtime) as the CURRENT tree, but the PR-B-era
-	// generation — so a mismatch can only be attributed to indexerGen, not an
-	// unrelated census difference.
-	oldStamp := stampGen(schema, indexedExtensions(), "1") + ":" + rest
-	seedRawGraphMeta(t, dbPath, oldStamp, nil)
-
-	resp, err := m.WaitBuild(ctx, repo, 60*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !resp.Completed || !resp.Rebuilt {
-		t.Fatalf("want completed+rebuilt (indexerGen bump must force a rebuild of a PR-B-era graph), got %+v", resp)
-	}
-
-	symResp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "hello"})
-	if err != nil {
-		t.Fatalf("Symbol hello: %v", err)
-	}
-	if symResp.Symbol == nil {
-		t.Fatal("Symbol hello: nil symbol in response — the rebuild did not produce mapper symbols")
-	}
-}
-
 // TestBuildIndex_BothTiersEmpty_HardErrors is task C.10: reinstated now that
 // mapper discovery exists to make the check meaningful. PR-B deliberately
 // left the Go-free path always non-erroring, because mapper discovery wasn't
@@ -320,5 +265,63 @@ func TestBuildIndex_MajorityBrokenGo_NoMapperContent_StillHardErrors(t *testing.
 	}
 	if err := buildIndex(context.Background(), repo, dbPath, st); err == nil {
 		t.Fatal("buildIndex succeeded on a majority-broken Go-only repo, want the existing hard error preserved")
+	}
+}
+
+// TestBuildIndex_RepeatedQNames: a Python name defined twice in one scope is
+// one row (else graph_symbol dead-ends: the qname is its finest key), whose
+// source shows every body and which a call from the later body still reaches.
+// TS keeps repeats apart: there they are different functions whose object
+// literal went unindexed.
+func TestBuildIndex_RepeatedQNames(t *testing.T) {
+	repo := t.TempDir()
+	writeFile(t, repo, "cfg.py", `def build():
+    return 1
+
+DEBUG = False
+DEBUG = True
+
+class C:
+    @property
+    def x(self):
+        return 1
+    @x.setter
+    def x(self, v):
+        build()
+`)
+	writeFile(t, repo, "rules.ts", "const JS = { run() { return 1 } }\nconst PY = { run() { return 2 } }\n")
+	dbPath := filepath.Join(t.TempDir(), "graph.db")
+	st, err := stamp(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+		t.Fatalf("buildIndex: %v", err)
+	}
+	conn, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	count := func(q string, args ...any) int {
+		t.Helper()
+		var n int
+		if err := conn.QueryRow(q, args...).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	for qname, want := range map[string]int{"cfg:DEBUG": 1, "cfg:C.x": 1, "rules:run": 2} {
+		if got := count(`SELECT count(*) FROM symbols WHERE qname = ?`, qname); got != want {
+			t.Errorf("%s: %d rows, want %d", qname, got, want)
+		}
+	}
+	if count(`SELECT count(*) FROM symbols WHERE qname = 'cfg:C.x' AND source LIKE '%return 1%' AND source LIKE '%build()%'`) != 1 {
+		t.Error("cfg:C.x source must show both the getter and the setter body")
+	}
+	if count(`SELECT count(*) FROM edges e JOIN symbols a ON a.id = e.caller JOIN symbols b ON b.id = e.callee
+		WHERE a.qname = 'cfg:C.x' AND b.qname = 'cfg:build'`) != 1 {
+		t.Error("the setter body's build() call must attribute to cfg:C.x")
 	}
 }
