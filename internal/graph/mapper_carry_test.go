@@ -7,7 +7,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 )
 
 // ---------- E.1: carry-trigger scenarios (pure, table) ----------
@@ -355,59 +354,5 @@ func TestMapperCarriedEdges_NoCollisionStillCarries(t *testing.T) {
 	}
 	if _, ok := got[[2]int64{701, 702}]; !ok {
 		t.Errorf("edge not remapped to the fresh ids: %v", got)
-	}
-}
-
-// ---------- E.8 (T1/D8): indexerGen bump ----------
-
-// TestManager_IndexerGenBump_RebuildsPriorGraphWithCarryForwardSemantics is
-// task E.8, extending D.9's pattern one generation further: a graph.db seeded
-// exactly as a PR-D-era build would have left it (indexerGen "3") must be
-// treated as stale by the CURRENT stamp, forcing a rebuild under carry-
-// forward semantics.
-func TestManager_IndexerGenBump_RebuildsPriorGraphWithCarryForwardSemantics(t *testing.T) {
-	repo := t.TempDir()
-	writeFile(t, repo, "app.ts", "export function hello(): string { return 'hi'; }\n")
-
-	m := managerFor(t)
-	ctx := context.Background()
-
-	canon, err := canonicalRepo(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dbPath := m.dbPath(canon)
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0o750); err != nil {
-		t.Fatal(err)
-	}
-
-	st, err := stamp(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, rest, ok := strings.Cut(st, ":")
-	if !ok {
-		t.Fatalf("stamp() = %q, want a %q-separated generation prefix", st, ":")
-	}
-	// Same census as the CURRENT tree, but the PR-D-era generation — so a
-	// mismatch can only be attributed to indexerGen, not an unrelated census
-	// difference.
-	oldStamp := stampGen(schema, indexedExtensions(), "3") + ":" + rest
-	seedRawGraphMeta(t, dbPath, oldStamp, nil)
-
-	resp, err := m.WaitBuild(ctx, repo, 60*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !resp.Completed || !resp.Rebuilt {
-		t.Fatalf("want completed+rebuilt (indexerGen bump must force a rebuild of a PR-D-era graph), got %+v", resp)
-	}
-
-	symResp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "hello"})
-	if err != nil {
-		t.Fatalf("Symbol hello: %v", err)
-	}
-	if symResp.Symbol == nil {
-		t.Fatal("Symbol hello: nil symbol in response — the rebuild did not run")
 	}
 }

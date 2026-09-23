@@ -244,8 +244,12 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	// appended BEFORE positional ID assignment (C.2) — symbol IDs are
 	// positional, so landing them after that loop would collide with id 0.
 	symbols, byPos := goSymbols(pkgs, module, fset, readFile, repo)
+	seenRow := map[*symRow]bool{} // merged Python spans share a row (mergeSameQName)
 	for _, ms := range mapperSyms {
-		symbols = append(symbols, ms.row)
+		if !seenRow[ms.row] {
+			seenRow[ms.row] = true
+			symbols = append(symbols, ms.row)
+		}
 	}
 	for i, s := range symbols {
 		s.id = int64(i + 1)

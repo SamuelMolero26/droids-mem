@@ -46,8 +46,10 @@ func indexedExtensions() []string {
 // meta.tests_skipped: a graph built before it has no such row, so the
 // answer omits the disclosure — a silent under-report on any mapper repo with
 // tests. That is the bump line exactly: the stored graph became wrong, not
-// merely incomplete.
-const indexerGen = "9"
+// merely incomplete. Generation 10 merges repeated Python qnames into one row
+// and indexes TS type aliases and Python module-level bindings: a generation-9
+// graph holds duplicate rows that dead-end graph_symbol.
+const indexerGen = "10"
 
 // stampGen derives the stamp's generation prefix from the things that change
 // what a cached graph MEANS: the schema its rows were written under, the file
