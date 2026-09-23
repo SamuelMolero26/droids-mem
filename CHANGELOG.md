@@ -17,6 +17,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `UPPER_CASE` names — gating on casing would hide public API such as `os.sep`.
   Dunder metadata like `__all__` stays out of package listings through the
   existing leading-underscore export rule. Closes #134.
+- **A Python name defined twice in one scope is now one symbol, not several
+  rows that `graph_symbol` could never resolve.** A `@property` getter and
+  setter, `@overload` stubs, or a rebound module name shared one qname, so the
+  lookup answered "ambiguous" and re-querying the exact qname returned the same
+  ambiguity. The definitions now share one row whose source shows every body;
+  calls from any of them still attribute to it. TypeScript is untouched: there a
+  repeated qname means two different functions whose container was lost.
+  Cached graphs rebuild once (indexer generation 10).
 
 ## [1.3.0-beta.1] — 2026-09-14
 

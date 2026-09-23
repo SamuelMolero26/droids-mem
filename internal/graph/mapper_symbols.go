@@ -233,7 +233,33 @@ func outlineMapperTree(eng *mapperEngine, f mapperFile, src []byte, tree *gts.Tr
 	for _, s := range syms {
 		out = append(out, buildMapperSymbols(s, "", f, src, tree, eng.lang, true, false)...)
 	}
+	if f.entry.Name == "python" {
+		return mergeSameQName(out)
+	}
 	return out
+}
+
+// mergeSameQName points every repeat of a qname within one Python file
+// (property getter/setter, @overload stubs, a rebound module name) at the
+// first occurrence's row: two rows sharing a qname dead-end graph_symbol,
+// whose finest key is the qname. Each span keeps its own byte range, so a
+// call inside a later body still attributes to the shared row.
+//
+// Python only: a repeated name in one scope is one binding there, while in
+// TS a repeat means a lost container (methods of distinct unexported object
+// literals), i.e. different functions.
+func mergeSameQName(syms []mapperSym) []mapperSym {
+	first := map[string]*symRow{}
+	for i := range syms {
+		r, ok := first[syms[i].row.qname]
+		if !ok {
+			first[syms[i].row.qname] = syms[i].row
+			continue
+		}
+		r.source = truncate(r.source+"\n\n"+syms[i].row.source, maxSourceBytes)
+		syms[i].row = r
+	}
+	return syms
 }
 
 // buildMapperSymbols converts one gts.OutlineSymbol and its Children,

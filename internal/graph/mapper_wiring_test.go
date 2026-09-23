@@ -322,3 +322,97 @@ func TestBuildIndex_MajorityBrokenGo_NoMapperContent_StillHardErrors(t *testing.
 		t.Fatal("buildIndex succeeded on a majority-broken Go-only repo, want the existing hard error preserved")
 	}
 }
+
+// TestBuildIndex_PythonRepeatedQNameOneRow is the end-to-end half of the
+// merge: graph.db holds one row per repeated qname, and a call made from the
+// SECOND definition's body still lands on that row — its span was kept for
+// attribution even though its row was not.
+func TestBuildIndex_PythonRepeatedQNameOneRow(t *testing.T) {
+	repo := t.TempDir()
+	writeFile(t, repo, "cfg.py", `def build():
+    return 1
+
+class C:
+    @property
+    def x(self):
+        return 1
+    @x.setter
+    def x(self, v):
+        build()
+`)
+	dbPath := filepath.Join(t.TempDir(), "graph.db")
+	st, err := stamp(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+		t.Fatalf("buildIndex: %v", err)
+	}
+	conn, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	var n int
+	if err := conn.QueryRow(`SELECT count(*) FROM symbols WHERE qname = 'cfg:C.x'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("cfg:C.x has %d rows, want 1", n)
+	}
+	err = conn.QueryRow(`SELECT count(*) FROM edges e
+		JOIN symbols a ON a.id = e.caller JOIN symbols b ON b.id = e.callee
+		WHERE a.qname = 'cfg:C.x' AND b.qname = 'cfg:build'`).Scan(&n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("edge cfg:C.x -> cfg:build count = %d, want 1 (call from the setter body)", n)
+	}
+}
+
+// TestManager_IndexerGenBump_RebuildsGraphWithRepeatedQNames: a generation-9
+// graph can hold several rows per Python qname, which dead-ends graph_symbol,
+// so it must rebuild rather than keep serving them.
+func TestManager_IndexerGenBump_RebuildsGraphWithRepeatedQNames(t *testing.T) {
+	repo := t.TempDir()
+	writeFile(t, repo, "cfg.py", "DEBUG = False\nDEBUG = True\n")
+
+	m := managerFor(t)
+	canon, err := canonicalRepo(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := m.dbPath(canon)
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	st, err := stamp(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, rest, ok := strings.Cut(st, ":")
+	if !ok {
+		t.Fatalf("stamp() = %q, want a %q-separated generation prefix", st, ":")
+	}
+	seedRawGraphMeta(t, dbPath, stampGen(schema, indexedExtensions(), "9")+":"+rest, nil)
+
+	if _, err := m.WaitBuild(context.Background(), repo, 60*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	// WaitBuild reports Rebuilt:true for any fresh graph, rebuilt or not, so
+	// check what only a rebuild produces: the seed holds no symbol rows.
+	conn, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	var n int
+	if err := conn.QueryRow(`SELECT count(*) FROM symbols WHERE qname = 'cfg:DEBUG'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("cfg:DEBUG has %d rows, want 1 (a generation-9 graph must rebuild)", n)
+	}
+}
