@@ -46,7 +46,7 @@ func newSearchCmd(a *app) *cobra.Command {
 				writeError("search_failed", err.Error(), true)
 				exitWith(ExitError)
 			}
-			writeJSON(resp)
+			writeJSON(store.ToCompactSearchResponse(resp, "Run 'droids-mem get --id <id>' to read a memory in full"))
 			return nil
 		},
 	}

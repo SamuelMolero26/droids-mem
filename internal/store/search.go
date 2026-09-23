@@ -71,6 +71,9 @@ type SearchResult struct {
 type SearchResponse struct {
 	Results []SearchResult `json:"results"`
 	Total   int            `json:"total"`
+	// Message labels a definitive empty state and is set only when Total == 0.
+	// Total stays the machine-readable gate; Message is display-only.
+	Message string `json:"message,omitempty"`
 }
 
 func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse, error) {
@@ -89,12 +92,13 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 		limit = maxSearchLimit
 	}
 
-	ftsQuery := phraseFTSQuery(req.Query)
-	if ftsQuery == "" {
-		// Query had no searchable tokens (e.g. all punctuation). Nothing can
-		// match; return empty rather than run MATCH on an empty expression.
-		return &SearchResponse{Results: []SearchResult{}, Total: 0}, nil
+	// Punctuation-only input becomes a MATCH of phrases that tokenize to
+	// nothing (phraseFTSQuery only returns "" for blank input, which the
+	// TrimSpace check above already rejects), so gate on real text first.
+	if !hasSearchableText(req.Query) {
+		return &SearchResponse{Results: []SearchResult{}, Total: 0, Message: msgNoSearchableText}, nil
 	}
+	ftsQuery := phraseFTSQuery(req.Query)
 
 	// build WHERE clause — only hardcoded strings in the format string, user values in args
 	conditions := []string{"memories_fts MATCH ?"}
@@ -123,6 +127,10 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 	var total int
 	if err := s.db.QueryRowContext(ctx, countStmt, args...).Scan(&total); err != nil {
 		return nil, fmt.Errorf("search count: %w", err)
+	}
+	if total == 0 {
+		// Genuine no-match: nothing to rank, so skip the SELECT round-trip.
+		return &SearchResponse{Results: []SearchResult{}, Total: 0, Message: msgNoMatch}, nil
 	}
 
 	// Fetch more results than requested, then re-rank by a composite of BM25 +

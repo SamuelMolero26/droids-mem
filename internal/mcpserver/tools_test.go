@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -125,12 +126,77 @@ func TestSearchHandler_ReturnsTotal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handler err: %v", err)
 	}
-	var resp store.SearchResponse
+	var resp store.SearchCompactResponse
 	if err := json.Unmarshal([]byte(okText(t, res)), &resp); err != nil {
 		t.Fatalf("payload not JSON: %v", err)
 	}
 	if resp.Total != 1 {
 		t.Fatalf("want total 1, got %d", resp.Total)
+	}
+}
+
+// Browse-tier stubs disclose mem_get; an empty browse stays self-contained.
+func TestContextHandler_BrowseDisclosesGet(t *testing.T) {
+	st := newTestStore(t)
+	if _, err := st.Save(context.Background(), store.SaveRequest{
+		TaskType: "helpctx", Kind: "error_resolution",
+		Title: "Browse stub", What: "visible snippet here", Learned: "the lesson", Tags: "stub",
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	res, err := contextHandler(st)(context.Background(), mcp.CallToolRequest{}, contextArgs{TaskType: "helpctx"})
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	var env contextEnvelope
+	if err := json.Unmarshal([]byte(okText(t, res)), &env); err != nil {
+		t.Fatalf("payload not JSON: %v", err)
+	}
+	if len(env.Context.Browse) == 0 {
+		t.Fatal("want browse-tier stub, got none")
+	}
+	if len(env.Context.Help) != 1 || !strings.Contains(env.Context.Help[0], "mem_get") {
+		t.Errorf("browse help = %v, want mem_get disclosure", env.Context.Help)
+	}
+
+	empty, err := contextHandler(st)(context.Background(), mcp.CallToolRequest{}, contextArgs{TaskType: "helpctx-empty"})
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	var emptyEnv contextEnvelope
+	if err := json.Unmarshal([]byte(okText(t, empty)), &emptyEnv); err != nil {
+		t.Fatalf("payload not JSON: %v", err)
+	}
+	if len(emptyEnv.Context.Help) != 0 {
+		t.Errorf("empty browse help = %v, want none", emptyEnv.Context.Help)
+	}
+}
+
+// Successful get is self-contained: full body, no help noise (AXI §9
+// omit-when-self-contained).
+func TestGetHandler_HappyPathHasNoHelp(t *testing.T) {
+	st := newTestStore(t)
+	saved, err := st.Save(context.Background(), store.SaveRequest{
+		TaskType: "getnohelp", Kind: "task_pattern",
+		Title: "Full body", What: "context", Learned: "the full lesson", Tags: "full",
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	res, err := getHandler(st)(context.Background(), mcp.CallToolRequest{}, getArgs{ID: saved.ID})
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(okText(t, res)), &decoded); err != nil {
+		t.Fatalf("payload not JSON: %v", err)
+	}
+	if decoded["learned"] != "the full lesson" {
+		t.Errorf("get lost full learned: %v", decoded)
+	}
+	if _, ok := decoded["help"]; ok {
+		t.Errorf("detail view carries help noise: %v", decoded)
 	}
 }
 
