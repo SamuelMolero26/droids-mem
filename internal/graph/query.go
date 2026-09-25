@@ -82,10 +82,9 @@ const (
 	clientDirectiveHint = "client component (\"use client\" directive)"
 	serverDirectiveHint = "server component (\"use server\" directive)"
 	// precisionResolved/precisionSyntactic name SymbolResponse.Precision's two
-	// values (design D7). The rest of the mapper tier (edgeSet, mapper_calls.go)
+	// values. The rest of the mapper tier (edgeSet, mapper_calls.go)
 	// uses the same two values as bare string literals; named here because
-	// query.go's derivation and weakestPrecision below compare against them
-	// repeatedly.
+	// query.go's derivation compares against them.
 	precisionResolved  = "resolved"
 	precisionSyntactic = "syntactic"
 )
@@ -253,23 +252,6 @@ func symbolPrecision(file string) string {
 	return precisionResolved
 }
 
-// weakestPrecision returns the weakest precision present in precisions
-// ("syntactic" beats "resolved" — spec "Mixed transitive_callers Count with
-// Precision Label"). Never called with genuinely mixed input in production:
-// tier disjointness means a real symbol's callers are always single-tier, so
-// Symbol() uses the cheap symbolPrecision(file) shortcut instead. This
-// function pins the general "weakest wins" semantic that shortcut relies on,
-// and is the documented fallback (D7's guard note) if the disjointness
-// invariant is ever disproved: replace the shortcut call site with a real
-// per-edge `SELECT precision FROM edges WHERE ...` fed through this same
-// function. An empty/all-resolved input returns "resolved".
-func weakestPrecision(precisions []string) string {
-	if slices.Contains(precisions, precisionSyntactic) {
-		return precisionSyntactic
-	}
-	return precisionResolved
-}
-
 // Symbol resolves and answers a symbol-anchored query against repo's graph.
 func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolResponse, error) {
 	if strings.TrimSpace(req.Repo) == "" {
@@ -411,6 +393,11 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	dir := req.Direction
 	if dir == "" {
 		dir = "both"
+	}
+	switch dir {
+	case "up", "down", "both":
+	default:
+		return nil, fmt.Errorf("invalid direction %q: must be up|down|both: %w", req.Direction, ErrInvalidArgument)
 	}
 
 	if req.To != "" {

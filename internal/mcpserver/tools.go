@@ -243,10 +243,13 @@ type corpusArgs struct {
 }
 
 // RecentSessionStub is a lightweight summary of one session_summary memory
-// for the mem_corpus response.
+// for the mem_corpus response. Origin names how the row was authored
+// ("manual" for explicit saves, "auto" for the session-end path) so the
+// agent can tell its own recaps apart from automatic ones.
 type RecentSessionStub struct {
 	Title     string `json:"title"`
 	CreatedAt int64  `json:"created_at"`
+	Origin    string `json:"origin,omitempty"`
 }
 
 type corpusResponse struct {
@@ -258,7 +261,7 @@ type corpusResponse struct {
 
 func corpusToolDef() mcp.Tool {
 	return mcp.NewTool("mem_corpus",
-		mcp.WithDescription("Return a census of the memory corpus: task_type list with counts, kind breakdown, total memory count, and recent session_summary titles. Call this at the start of a task to discover orphaned task_types or to assess corpus health."),
+		mcp.WithDescription("Return a census of the memory corpus: task_type list with counts, kind breakdown, total memory count, and recent session_summary titles (manual + auto, newest first, each with its origin). Call this at the start of a task to discover orphaned task_types or to assess corpus health."),
 		mcp.WithNumber("limit",
 			mcp.Description("Max recent_sessions to return (default 5, max 20)."),
 			mcp.DefaultNumber(5), mcp.Min(1), mcp.Max(20),
@@ -287,14 +290,14 @@ func corpusHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, c
 			return toolErr(err), nil
 		}
 
-		sessions, err := st.RecentSessions(ctx, store.RecentSessionsRequest{Limit: limit})
+		sessions, err := st.RecentSummaries(ctx, store.RecentSessionsRequest{Limit: limit})
 		if err != nil {
 			return toolErr(err), nil
 		}
 
 		stubs := make([]RecentSessionStub, 0, len(sessions.Sessions))
 		for _, s := range sessions.Sessions {
-			stubs = append(stubs, RecentSessionStub{Title: s.Title, CreatedAt: s.CreatedAt})
+			stubs = append(stubs, RecentSessionStub{Title: s.Title, CreatedAt: s.CreatedAt, Origin: s.Origin})
 		}
 
 		resp := corpusResponse{

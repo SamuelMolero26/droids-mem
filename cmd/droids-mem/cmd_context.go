@@ -17,6 +17,7 @@ func newContextCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "context",
 		Short: "Load start-of-run context bundle for a task type",
+		Args:  cobra.NoArgs,
 		Long: `Returns a two-tier bundle:
   - always tier: latest session_summary + ALL user_rules (full body)
   - browse tier: top error_resolution + task_pattern (title + snippet)

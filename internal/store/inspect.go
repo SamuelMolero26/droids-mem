@@ -26,6 +26,10 @@ type Memory struct {
 	// Scope ('personal'|'shared') is populated by List and GetRow — the in-process
 	// TUI sharing surface renders it. RecentSessions leaves it "".
 	Scope string `json:"scope,omitempty"`
+	// Origin is how the row was authored: "manual" for explicit saves,
+	// "auto" for the session-end enforcement path. Populated by read paths
+	// that select it (RecentSummaries); left "" by paths that do not.
+	Origin string `json:"origin,omitempty"`
 	// ReviewAfter is nil until a decay horizon is assigned (save/force-save/
 	// supersede in slice 3, or mark_reviewed in slice 2) — scanned as
 	// sql.NullInt64, never COALESCEd, so a grandfathered NULL row stays nil
@@ -184,6 +188,55 @@ func (s *Store) RecentSessions(ctx context.Context, req RecentSessionsRequest) (
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("recent sessions rows: %w", err)
+	}
+
+	return &RecentSessionsResponse{Sessions: sessions, Total: len(sessions)}, nil
+}
+
+// RecentSummaries returns the newest session_summary rows regardless of
+// origin, recency-ordered. This is the agent-facing recency source behind
+// mem_corpus: explicit manual summaries and session-end auto summaries share
+// one timeline here so the agent's own recaps are visible. Each row carries
+// its origin so callers can tell manual apart from auto. Retention budgets
+// stay split by origin on the save path; this read merges them without
+// changing eviction.
+func (s *Store) RecentSummaries(ctx context.Context, req RecentSessionsRequest) (*RecentSessionsResponse, error) {
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at,
+		       expand_count, COALESCE(last_expanded_at, 0), review_after, pinned, origin
+		FROM memories
+		WHERE kind = 'session_summary'
+		ORDER BY created_at DESC, id DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("recent summaries query: %w", err)
+	}
+	defer rows.Close()
+
+	sessions := []Memory{}
+	for rows.Next() {
+		var m Memory
+		var reviewAfter sql.NullInt64
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &reviewAfter, &m.Pinned, &m.Origin); err != nil {
+			return nil, fmt.Errorf("scan summary: %w", err)
+		}
+		if reviewAfter.Valid {
+			m.ReviewAfter = &reviewAfter.Int64
+		}
+		m.NeedsReview = needsReview(m.ReviewAfter)
+		sessions = append(sessions, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("recent summaries rows: %w", err)
 	}
 
 	return &RecentSessionsResponse{Sessions: sessions, Total: len(sessions)}, nil

@@ -243,3 +243,75 @@ func TestCorpusHandler_Census(t *testing.T) {
 		t.Fatalf("want 1 memory in 1 task_type, got total=%d types=%d", resp.Total, len(resp.TaskTypes))
 	}
 }
+
+// Corpus recent_sessions is the agent-facing recency timeline: manual
+// summaries (the only kind MCP mem_save produces) must appear alongside
+// autos, newest first, each labeled with its origin. A non-summary memory
+// must never appear even when it is the newest row.
+func TestCorpusHandler_IncludesManualSummariesNewerThanAutos(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	auto, err := st.Save(ctx, store.SaveRequest{
+		TaskType: "claude_session", Kind: "session_summary",
+		Title: "Auto nightly session recap", What: "flushed session context",
+		Learned: "checkpoint pipeline state for the next run alpha",
+		Origin:  "auto",
+	})
+	if err != nil {
+		t.Fatalf("seed auto: %v", err)
+	}
+	manual, err := st.Save(ctx, store.SaveRequest{
+		TaskType: "crm_upload", Kind: "session_summary",
+		Title:   "Manual upload retry recap", What: "investigated the gateway timeout",
+		Learned: "cap CRM batch uploads at 200 rows to dodge the gateway timeout beta",
+	})
+	if err != nil {
+		t.Fatalf("seed manual: %v", err)
+	}
+	noise, err := st.Save(ctx, store.SaveRequest{
+		TaskType: "crm_upload", Kind: "task_pattern",
+		Title:   "Newest row but not a summary", What: "a reusable fix",
+		Learned: "pattern lesson unrelated to session recaps gamma",
+	})
+	if err != nil {
+		t.Fatalf("seed noise: %v", err)
+	}
+
+	// Pin created_at deterministically: Save stamps time.Now(), so same-second
+	// rows would tie. Manual is newest, auto older, noise newest overall (must
+	// still be excluded by the kind filter).
+	pin := func(id string, ts int64) {
+		t.Helper()
+		if _, err := st.DB().Exec(
+			`UPDATE memories SET created_at = ?, updated_at = ? WHERE id = ?`, ts, ts, id,
+		); err != nil {
+			t.Fatalf("pin %s: %v", id, err)
+		}
+	}
+	pin(auto.ID, 100)
+	pin(manual.ID, 300)
+	pin(noise.ID, 400)
+
+	res, err := corpusHandler(st)(ctx, mcp.CallToolRequest{}, corpusArgs{})
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	var resp corpusResponse
+	if err := json.Unmarshal([]byte(okText(t, res)), &resp); err != nil {
+		t.Fatalf("payload not JSON: %v", err)
+	}
+	if len(resp.RecentSessions) != 2 {
+		t.Fatalf("want 2 session summaries, got %d: %+v", len(resp.RecentSessions), resp.RecentSessions)
+	}
+	first, second := resp.RecentSessions[0], resp.RecentSessions[1]
+	if first.Title != "Manual upload retry recap" || first.Origin != "manual" {
+		t.Errorf("recent[0] = %+v, want the newer manual summary with origin=manual", first)
+	}
+	if second.Title != "Auto nightly session recap" || second.Origin != "auto" {
+		t.Errorf("recent[1] = %+v, want the older auto summary with origin=auto", second)
+	}
+	if first.CreatedAt <= second.CreatedAt {
+		t.Errorf("recent_sessions not newest-first: %d then %d", first.CreatedAt, second.CreatedAt)
+	}
+}

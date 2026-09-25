@@ -13,6 +13,7 @@ func newGetCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "get",
 		Short:   "Get a single memory by ID",
+		Args:    cobra.NoArgs,
 		Example: `  droids-mem get --id mem_01J9KXVR2E...`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			s, err := a.store()
