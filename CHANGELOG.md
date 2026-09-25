@@ -7,6 +7,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`graph_symbol` `no_source` and `no_tests` options** (CLI: `--no-source`,
+  `--no-tests`). `no_source` omits the queried symbol's own body; `no_tests`
+  drops `_test.go` neighbors from the rows so the 50-row cap is spent on
+  production code (`callers_in_tests` still reports how many exist, and
+  `callers_total` stays comparable). Across 60 symbols of this repo, `direction=up`
+  + `no_source` + `no_tests` cut response bytes by 69% versus the default; both
+  options are opt-in and the default response is unchanged.
+- **`graph_symbol` hint when most callers are interface-dispatch candidates.**
+  When more than half of the callers arrive only via interface dispatch, the hint
+  now says they are CHA over-approximations to verify with grep, instead of
+  leaving the agent to infer it from `callers_via_interface`.
+
 ### Fixed
 - **Mapper tier now indexes TypeScript type aliases and Python module-level
   bindings.** `type X = ...` in `.ts`/`.tsx` and every top-level assignment in

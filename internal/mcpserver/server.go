@@ -95,7 +95,7 @@ const instructionsTail = `Never put secrets, tokens, or keys in any field; the s
 
 BEFORE EDITING a function, call graph_symbol with direction=up depth=3 to check its blast radius. The transitive_callers count tells you how many symbols depend on it. Mention this count when you state what you learned — it is the single most useful signal the graph gives you.
 
-When a graph response includes freshness.stale: true, a genuine build failure means the whole previous index is being served. A single package that does not type-check degrades alone instead: carried: true on a symbol, and freshness.stale_units naming the packages riding on the previous build's edges. Verify critical findings against actual source files before acting on either. When precision is 'syntactic' (Python/TS/JS), callers/callees are heuristic — treat as approximate and cross-check with grep for constants/tests/notebooks.`
+When a graph response includes freshness.stale: true, a genuine build failure means the whole previous index is being served. A single package that does not type-check degrades alone instead: carried: true on a symbol, and freshness.stale_units naming the packages riding on the previous build's edges. Verify critical findings against actual source files before acting on either. When the hint says a symbol is mapper-tier (Python/TS/JS), callers/callees are heuristic — treat as approximate and cross-check with grep for constants/tests/notebooks.`
 
 // instructions assembles the transport-appropriate protocol string. The HTTP
 // variant is byte-identical to the pre-split serverInstructions const.
