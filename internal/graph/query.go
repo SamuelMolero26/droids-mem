@@ -81,10 +81,7 @@ const (
 	// syntacticHint/carriedHint.
 	clientDirectiveHint = "client component (\"use client\" directive)"
 	serverDirectiveHint = "server component (\"use server\" directive)"
-	// precisionResolved/precisionSyntactic name SymbolResponse.Precision's two
-	// values. The rest of the mapper tier (edgeSet, mapper_calls.go)
-	// uses the same two values as bare string literals; named here because
-	// query.go's derivation compares against them.
+	// SymbolResponse.Precision's two values.
 	precisionResolved  = "resolved"
 	precisionSyntactic = "syntactic"
 )
@@ -394,9 +391,7 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	if dir == "" {
 		dir = "both"
 	}
-	switch dir {
-	case "up", "down", "both":
-	default:
+	if !slices.Contains([]string{"up", "down", "both"}, dir) {
 		return nil, fmt.Errorf("invalid direction %q: must be up|down|both: %w", req.Direction, ErrInvalidArgument)
 	}
 

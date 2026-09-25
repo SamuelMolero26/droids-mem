@@ -278,20 +278,13 @@ func TestCorpusHandler_IncludesManualSummariesNewerThanAutos(t *testing.T) {
 		t.Fatalf("seed noise: %v", err)
 	}
 
-	// Pin created_at deterministically: Save stamps time.Now(), so same-second
-	// rows would tie. Manual is newest, auto older, noise newest overall (must
-	// still be excluded by the kind filter).
-	pin := func(id string, ts int64) {
-		t.Helper()
-		if _, err := st.DB().Exec(
-			`UPDATE memories SET created_at = ?, updated_at = ? WHERE id = ?`, ts, ts, id,
-		); err != nil {
+	// Pin created_at: Save stamps time.Now(), so same-second rows would tie.
+	// noise is newest overall and must still be excluded by the kind filter.
+	for id, ts := range map[string]int64{auto.ID: 100, manual.ID: 300, noise.ID: 400} {
+		if _, err := st.DB().Exec(`UPDATE memories SET created_at = ?, updated_at = ? WHERE id = ?`, ts, ts, id); err != nil {
 			t.Fatalf("pin %s: %v", id, err)
 		}
 	}
-	pin(auto.ID, 100)
-	pin(manual.ID, 300)
-	pin(noise.ID, 400)
 
 	res, err := corpusHandler(st)(ctx, mcp.CallToolRequest{}, corpusArgs{})
 	if err != nil {
