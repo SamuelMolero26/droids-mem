@@ -90,3 +90,35 @@ func TestRemoveClaudeSnippet_RoundTrip(t *testing.T) {
 		t.Errorf("second remove = %q, want already_absent", status)
 	}
 }
+
+// append then remove must restore the exact prior bytes and leave the
+// session-memory block alone.
+func TestRemoveGraphBlock_RoundTrip(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	pre := "# my rules\n"
+	if err := os.WriteFile("CLAUDE.md", []byte(pre), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := appendClaudeSnippet(true); err != nil {
+		t.Fatal(err)
+	}
+	withMemory, _ := os.ReadFile("CLAUDE.md")
+	if _, err := appendGraphBlock("CLAUDE.md"); err != nil {
+		t.Fatal(err)
+	}
+
+	if status := removeGraphBlockStatus("CLAUDE.md"); !strings.HasPrefix(status, "removed") {
+		t.Fatalf("remove status = %q, want removed", status)
+	}
+	b, _ := os.ReadFile("CLAUDE.md")
+	if string(b) != string(withMemory) {
+		t.Errorf("graph removal disturbed other content:\ngot  %q\nwant %q", b, withMemory)
+	}
+	if status := removeGraphBlockStatus("CLAUDE.md"); status != "already_absent" {
+		t.Errorf("second remove = %q, want already_absent", status)
+	}
+	if status := removeGraphBlockStatus("nope.md"); status != "already_absent" {
+		t.Errorf("missing file = %q, want already_absent", status)
+	}
+}

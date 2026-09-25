@@ -124,3 +124,39 @@ func TestAppendClaudeSnippet_PreservesExistingContent(t *testing.T) {
 		t.Errorf("existing content not preserved alongside snippet:\n%s", b)
 	}
 }
+
+// The graph block goes into a missing file (created), an existing file
+// (preserved), and is idempotent on re-run.
+func TestAppendGraphBlock(t *testing.T) {
+	dir := t.TempDir()
+
+	missing := filepath.Join(dir, "sub", "AGENTS.md")
+	if appended, err := appendGraphBlock(missing); err != nil || !appended {
+		t.Fatalf("create: appended=%v err=%v", appended, err)
+	}
+	if appended, err := appendGraphBlock(missing); err != nil || appended {
+		t.Fatalf("second run must be a no-op: appended=%v err=%v", appended, err)
+	}
+
+	existing := filepath.Join(dir, "CLAUDE.md")
+	if err := os.WriteFile(existing, []byte("# mine\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := appendGraphBlock(existing); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(existing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(b)
+	if !strings.HasPrefix(got, "# mine\n") {
+		t.Errorf("existing content not preserved: %q", got)
+	}
+	if n := strings.Count(got, graphSnippetMarker); n != 1 {
+		t.Errorf("graph marker appears %d times, want 1", n)
+	}
+	if !strings.Contains(got, "graph_symbol") || !strings.Contains(got, "graph_package") {
+		t.Errorf("block does not name the graph tools: %q", got)
+	}
+}
