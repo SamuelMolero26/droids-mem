@@ -167,6 +167,7 @@ func (s *Store) recent(ctx context.Context, where string, limit int) (*RecentSes
 		limit = 100
 	}
 
+	//nolint:gosec // where is a package constant, never input
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at,
 		       expand_count, COALESCE(last_expanded_at, 0), review_after, pinned, origin
