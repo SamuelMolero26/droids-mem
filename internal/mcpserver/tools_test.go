@@ -263,7 +263,7 @@ func TestCorpusHandler_IncludesManualSummariesNewerThanAutos(t *testing.T) {
 	}
 	manual, err := st.Save(ctx, store.SaveRequest{
 		TaskType: "crm_upload", Kind: "session_summary",
-		Title:   "Manual upload retry recap", What: "investigated the gateway timeout",
+		Title: "Manual upload retry recap", What: "investigated the gateway timeout",
 		Learned: "cap CRM batch uploads at 200 rows to dodge the gateway timeout beta",
 	})
 	if err != nil {
@@ -271,7 +271,7 @@ func TestCorpusHandler_IncludesManualSummariesNewerThanAutos(t *testing.T) {
 	}
 	noise, err := st.Save(ctx, store.SaveRequest{
 		TaskType: "crm_upload", Kind: "task_pattern",
-		Title:   "Newest row but not a summary", What: "a reusable fix",
+		Title: "Newest row but not a summary", What: "a reusable fix",
 		Learned: "pattern lesson unrelated to session recaps gamma",
 	})
 	if err != nil {
