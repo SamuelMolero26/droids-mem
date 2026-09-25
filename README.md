@@ -129,6 +129,13 @@ Before storage, droids-mem redacts supported secrets and PII from `title`,
 silently rewritten. Exact and near-duplicate saves are skipped unless the caller
 explicitly forces a correction.
 
+## TUI
+
+```sh
+droids-mem tui
+```
+![droids-mem tui](assets/tui.png)
+
 ## Operations
 
 ```sh
