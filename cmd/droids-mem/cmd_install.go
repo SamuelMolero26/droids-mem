@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 )
@@ -20,6 +21,12 @@ import (
 //
 //go:embed claude_snippet.md
 var claudeSnippet string
+
+//go:embed graph_snippet.md
+var graphSnippet string
+
+// graphSnippetMarker detects a prior graph-block append (idempotency).
+const graphSnippetMarker = "## droids-mem code graph"
 
 // claudeSnippetMarker detects a prior append (idempotency).
 const claudeSnippetMarker = "## droids-mem session memory"
@@ -56,10 +63,13 @@ func newInstallCmd() *cobra.Command {
 			"--all performs the full bootstrap in one shot: hooks + register the\n" +
 			"server with the Claude Code CLI (user scope, stdio transport: Claude\n" +
 			"spawns it per session, so there is no daemon and no token) + append\n" +
-			"the compose-guidance block to CLAUDE.md. Each step is idempotent.\n\n" +
+			"the compose-guidance block to CLAUDE.md, then register every detected\n" +
+			"codex/opencode install too. Each step is idempotent.\n\n" +
 			"--host codex|opencode registers droids-mem as a stdio MCP server in\n" +
 			"that host's config instead (codex: ~/.codex/config.toml; opencode:\n" +
-			"~/.config/opencode/opencode.json). Idempotent; --all not supported.",
+			"~/.config/opencode/opencode.json) and, with --project, appends the\n" +
+			"code-graph guidance to ./AGENTS.md. Idempotent; --all not supported.\n\n" +
+			"--all also appends the code-graph guidance to CLAUDE.md.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			self, err := os.Executable()
 			if err != nil {
@@ -71,7 +81,7 @@ func newInstallCmd() *cobra.Command {
 					writeError("usage", "--all is Claude-only; --host "+host+" just registers the stdio MCP server", false)
 					exitWith(ExitUsage)
 				}
-				return installHost(host, self, printOnly)
+				return installHost(host, self, printOnly, project)
 			}
 			hookCmd := self + " session hook"
 
@@ -115,13 +125,32 @@ func newInstallCmd() *cobra.Command {
 			default:
 				result["claude_md"] = "already_present: " + mdPath
 			}
+			// The block tells the agent to call graph tools; without a
+			// registered server they do not exist.
+			claudeOK := err == nil && result["mcp_registration"] == "ok"
+			if claudeOK {
+				result["graph_block"] = graphBlockStatus(mdPath)
+			} else if err == nil {
+				result["graph_block"] = "skipped: MCP server not registered"
+			}
+			hostsOK := installOtherHosts(self, result)
+			if project {
+				// One AGENTS.md block and one index for the whole run, however
+				// many hosts registered.
+				if hostsOK {
+					result["agents_md"] = graphBlockStatus("AGENTS.md")
+				}
+				if claudeOK || hostsOK {
+					result["graph_index"] = startGraphIndex(self)
+				}
+			}
 			writeJSON(result)
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&project, "project", false, "Install into ./.claude/settings.json instead of the user settings")
 	cmd.Flags().BoolVar(&printOnly, "print", false, "Print the hooks block + MCP config instead of writing files")
-	cmd.Flags().BoolVar(&all, "all", false, "Full bootstrap: hooks + claude mcp add (stdio) + CLAUDE.md snippet")
+	cmd.Flags().BoolVar(&all, "all", false, "Full bootstrap: hooks + claude mcp add (stdio) + CLAUDE.md snippet + detected codex/opencode")
 	cmd.Flags().StringVar(&host, "host", "claude", "Target host: claude, codex, or opencode")
 	return cmd
 }
@@ -134,129 +163,154 @@ func codexMCPBlock(self string) string {
 // codexMCPMarker detects a prior install (idempotency).
 const codexMCPMarker = "[mcp_servers.droids-mem]"
 
+// stepError marks whether a failed host step is worth retrying.
+type stepError struct {
+	err       error
+	retryable bool
+}
+
+func (e *stepError) Error() string { return e.err.Error() }
+func (e *stepError) Unwrap() error { return e.err }
+
+func stepErr(retryable bool, format string, a ...any) error {
+	return &stepError{fmt.Errorf(format, a...), retryable}
+}
+
+func isRetryable(err error) bool {
+	se, ok := errors.AsType[*stepError](err)
+	return ok && se.retryable
+}
+
 // installHost registers droids-mem as a stdio MCP server in a non-Claude
 // host's config (ADR-0019). Per-host difference is data — a config snippet +
 // a target path — not logic; the stdio instructions string carries the
 // self-save summary protocol, so no hook wiring is required for parity.
-func installHost(host, self string, printOnly bool) error {
+func installHost(host, self string, printOnly, project bool) error {
+	var res map[string]any
+	var err error
 	switch host {
 	case "codex":
-		return installCodex(self, printOnly)
+		if printOnly {
+			fmt.Println(codexMCPBlock(self))
+			return nil
+		}
+		res, err = installCodex(self)
 	case "opencode":
-		return installOpencode(self, printOnly)
+		if printOnly {
+			writeJSON(map[string]any{"mcp": map[string]any{"droids-mem": opencodeEntry(self)}})
+			return nil
+		}
+		res, err = installOpencode(self)
 	default:
 		writeError("usage", "unknown --host "+host+" (want claude, codex, or opencode)", false)
 		exitWith(ExitUsage)
 		return nil
 	}
+	if err != nil {
+		writeError("install_failed", err.Error(), isRetryable(err))
+		exitWith(ExitError)
+	}
+	// Only after the host config is written, so a failed install leaves no
+	// AGENTS.md block behind.
+	if project {
+		res["agents_md"] = graphBlockStatus("AGENTS.md")
+		res["graph_index"] = startGraphIndex(self)
+	}
+	writeJSON(res)
+	return nil
 }
 
 // installCodex appends the [mcp_servers.droids-mem] table to
 // ~/.codex/config.toml. Append-if-absent keeps us dependency-free: TOML
 // tables are order-independent at top level, and the marker check makes
 // re-runs no-ops. We never rewrite the user's existing config.
-func installCodex(self string, printOnly bool) error {
-	block := codexMCPBlock(self)
-	if printOnly {
-		fmt.Println(block)
-		return nil
-	}
+func installCodex(self string) (map[string]any, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		writeError("install_failed", "resolve home dir: "+err.Error(), false)
-		exitWith(ExitError)
+		return nil, stepErr(false, "resolve home dir: %w", err)
 	}
 	path := filepath.Join(home, ".codex", "config.toml")
+	res := map[string]any{"host": "codex", "config": path}
 	existing, err := os.ReadFile(path) // #nosec G304 -- fixed config location, not user input
 	if err != nil && !os.IsNotExist(err) {
-		writeError("install_failed", "read "+path+": "+err.Error(), true)
-		exitWith(ExitError)
+		return nil, stepErr(true, "read %s: %w", path, err)
 	}
 	if strings.Contains(string(existing), codexMCPMarker) {
-		writeJSON(map[string]any{"status": "already_installed", "host": "codex", "config": path})
-		return nil
+		res["status"] = "already_installed"
+		return res, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		writeError("install_failed", "create dir: "+err.Error(), true)
-		exitWith(ExitError)
+		return nil, stepErr(true, "create dir: %w", err)
 	}
-	out := block
+	out := codexMCPBlock(self)
 	if n := len(existing); n > 0 {
 		sep := "\n"
 		if existing[n-1] != '\n' {
 			sep = "\n\n"
 		}
-		out = string(existing) + sep + block
+		out = string(existing) + sep + out
 	}
 
 	// #nosec G703 -- path is a fixed config location, not user input
 	if err := os.WriteFile(path, []byte(out), 0o600); err != nil {
-		writeError("install_failed", "write "+path+": "+err.Error(), true)
-		exitWith(ExitError)
+		return nil, stepErr(true, "write %s: %w", path, err)
 	}
-	writeJSON(map[string]any{"status": "installed", "host": "codex", "config": path})
-	return nil
+	res["status"] = "installed"
+	return res, nil
+}
+
+func opencodeEntry(self string) map[string]any {
+	return map[string]any{
+		"type":    "local",
+		"command": []any{self, "serve", "--stdio"},
+		"enabled": true,
+	}
 }
 
 // installOpencode merges the droids-mem stdio server into opencode's global
 // config (~/.config/opencode/opencode.json) under the "mcp" key. Same
 // read-merge-write pattern as the Claude settings.json merge.
-func installOpencode(self string, printOnly bool) error {
-	entry := map[string]any{
-		"type":    "local",
-		"command": []any{self, "serve", "--stdio"},
-		"enabled": true,
-	}
-	if printOnly {
-		writeJSON(map[string]any{"mcp": map[string]any{"droids-mem": entry}})
-		return nil
-	}
+func installOpencode(self string) (map[string]any, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		writeError("install_failed", "resolve home dir: "+err.Error(), false)
-		exitWith(ExitError)
+		return nil, stepErr(false, "resolve home dir: %w", err)
 	}
 	path := filepath.Join(home, ".config", "opencode", "opencode.json")
+	res := map[string]any{"host": "opencode", "config": path}
 	config := map[string]any{}
 	if b, err := os.ReadFile(path); err == nil { // #nosec G304 -- fixed config location, not user input
 		if err := json.Unmarshal(b, &config); err != nil {
-			writeError("install_failed", "parse "+path+": "+err.Error(), false)
-			exitWith(ExitError)
+			return nil, stepErr(false, "parse %s: %w", path, err)
 		}
 	} else if !os.IsNotExist(err) {
-		writeError("install_failed", "read "+path+": "+err.Error(), true)
-		exitWith(ExitError)
+		return nil, stepErr(true, "read %s: %w", path, err)
 	}
 	mcp, ok := config["mcp"].(map[string]any)
 	if !ok {
 		if _, present := config["mcp"]; present {
 			// Don't clobber a non-object "mcp" — that's the user's data.
-			writeError("install_failed", `existing "mcp" key in `+path+" is not an object; refusing to overwrite", false)
-			exitWith(ExitError)
+			return nil, stepErr(false, `existing "mcp" key in %s is not an object; refusing to overwrite`, path)
 		}
 		mcp = map[string]any{}
 	}
 	if _, ok := mcp["droids-mem"]; ok {
-		writeJSON(map[string]any{"status": "already_installed", "host": "opencode", "config": path})
-		return nil
+		res["status"] = "already_installed"
+		return res, nil
 	}
-	mcp["droids-mem"] = entry
+	mcp["droids-mem"] = opencodeEntry(self)
 	config["mcp"] = mcp
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		writeError("install_failed", "create dir: "+err.Error(), true)
-		exitWith(ExitError)
+		return nil, stepErr(true, "create dir: %w", err)
 	}
 	out, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
-		writeError("install_failed", "marshal config: "+err.Error(), false)
-		exitWith(ExitError)
+		return nil, stepErr(false, "marshal config: %w", err)
 	}
 	if err := os.WriteFile(path, append(out, '\n'), 0o600); err != nil {
-		writeError("install_failed", "write "+path+": "+err.Error(), true)
-		exitWith(ExitError)
+		return nil, stepErr(true, "write %s: %w", path, err)
 	}
-	writeJSON(map[string]any{"status": "installed", "host": "opencode", "config": path})
-	return nil
+	res["status"] = "installed"
+	return res, nil
 }
 
 // stepStatus renders a bootstrap step outcome for the result JSON.
@@ -303,34 +357,117 @@ func appendClaudeSnippet(project bool) (path string, appended bool, err error) {
 	if err != nil {
 		return "", false, err
 	}
-	existing, err := os.ReadFile(path) // #nosec G304 -- fixed CLAUDE.md location, not user input
-	if err != nil && !os.IsNotExist(err) {
-		return path, false, fmt.Errorf("read %s: %w", path, err)
+	appended, err = appendBlock(path, claudeSnippet, claudeSnippetMarker)
+	return path, appended, err
+}
+
+// graphBlockStatus appends the graph block and renders the outcome as a
+// best-effort status string, like the other install steps.
+func graphBlockStatus(path string) string {
+	switch appended, err := appendGraphBlock(path); {
+	case err != nil:
+		return "error: " + err.Error()
+	case appended:
+		return "appended: " + path
+	default:
+		return "already_present: " + path
 	}
-	if strings.Contains(string(existing), claudeSnippetMarker) {
-		return path, false, nil
+}
+
+// otherHosts are the non-Claude hosts --all fans out to; the config dir's
+// presence under $HOME is what marks a host as installed.
+var otherHosts = []struct {
+	name      string
+	dir       []string
+	install   func(self string) (map[string]any, error)
+	uninstall func() (map[string]any, error)
+}{
+	{"codex", []string{".codex"}, installCodex, uninstallCodex},
+	{"opencode", []string{".config", "opencode"}, installOpencode, uninstallOpencode},
+}
+
+// installOtherHosts registers every detected host, recording each outcome
+// under its name; absent hosts are skipped so --all never creates a config dir
+// for software the user lacks. Reports whether any host is now registered.
+func installOtherHosts(self string, result map[string]any) (registered bool) {
+	home, err := os.UserHomeDir()
+	for _, h := range otherHosts {
+		if err != nil {
+			result[h.name] = "error: " + err.Error()
+			continue
+		}
+		if _, statErr := os.Stat(filepath.Join(append([]string{home}, h.dir...)...)); statErr != nil {
+			result[h.name] = "skipped: " + h.name + " not detected"
+			continue
+		}
+		res, err := h.install(self)
+		if err != nil {
+			result[h.name] = "error: " + err.Error()
+			continue
+		}
+		result[h.name] = res
+		registered = true
+	}
+	return registered
+}
+
+// startGraphIndex warms the graph for the current directory in a detached
+// `graph index`, so the agent's first query is not a cold build. Only a git
+// root qualifies — --project installs run at the repo root.
+func startGraphIndex(self string) string {
+	if _, err := os.Stat(".git"); err != nil {
+		return "skipped: not a git repo root"
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	// #nosec G204 -- re-exec of our own binary (os.Executable), fixed argv.
+	cmd := exec.Command(self, "graph", "index", "--repo", wd)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return "error: " + err.Error()
+	}
+	_ = cmd.Process.Release()
+	return "started"
+}
+
+// appendGraphBlock appends the code-graph guidance to path (CLAUDE.md or
+// AGENTS.md), creating the file if missing. Idempotent via its own marker.
+func appendGraphBlock(path string) (bool, error) {
+	return appendBlock(path, graphSnippet, graphSnippetMarker)
+}
+
+// appendBlock appends block to path unless marker is already present,
+// creating the file and its directory when missing.
+func appendBlock(path, block, marker string) (bool, error) {
+	existing, err := os.ReadFile(path) // #nosec G304 -- fixed instructions-file location, not user input
+	if err != nil && !os.IsNotExist(err) {
+		return false, fmt.Errorf("read %s: %w", path, err)
+	}
+	if strings.Contains(string(existing), marker) {
+		return false, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return path, false, fmt.Errorf("create dir: %w", err)
+		return false, fmt.Errorf("create dir: %w", err)
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) // #nosec G304
 	if err != nil {
-		return path, false, fmt.Errorf("open %s: %w", path, err)
+		return false, fmt.Errorf("open %s: %w", path, err)
 	}
-	block := claudeSnippet
 	if len(existing) > 0 {
 		block = "\n" + block
 	}
 	if _, err := f.WriteString(block); err != nil {
 		_ = f.Close()
-		return path, false, fmt.Errorf("append %s: %w", path, err)
+		return false, fmt.Errorf("append %s: %w", path, err)
 	}
 	// Explicit Close (not defer): a write-back flush can fail and losing that
 	// error silently drops appended data.
 	if err := f.Close(); err != nil {
-		return path, false, fmt.Errorf("close %s: %w", path, err)
+		return false, fmt.Errorf("close %s: %w", path, err)
 	}
-	return path, true, nil
+	return true, nil
 }
 
 func claudeSettingsPath(project bool) (string, error) {

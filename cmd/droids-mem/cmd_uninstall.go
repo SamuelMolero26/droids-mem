@@ -36,7 +36,8 @@ func newUninstallCmd() *cobra.Command {
 			"--project to target ./.claude/settings.json. Removes only entries\n" +
 			"droids-mem added; unrelated hooks and settings are preserved.\n\n" +
 			"--all reverses the full bootstrap: hooks + `claude mcp remove` + the\n" +
-			"CLAUDE.md block + stopping the MCP daemon. Each step is best-effort.\n\n" +
+			"CLAUDE.md block + codex/opencode registrations + stopping the MCP\n" +
+			"daemon. Each step is best-effort.\n\n" +
 			"--purge additionally deletes the state dir (~/.droids-mem/: mem.db,\n" +
 			"token, mcp.pid) — the destructive clean-slate. Implies --all's teardown.\n\n" +
 			"--host codex|opencode removes the stdio MCP registration from that\n" +
@@ -47,7 +48,7 @@ func newUninstallCmd() *cobra.Command {
 					writeError("usage", "--all/--purge are Claude-only; --host "+host+" just removes the stdio MCP registration", false)
 					exitWith(ExitUsage)
 				}
-				return uninstallHost(host)
+				return uninstallHost(host, project)
 			}
 
 			path, err := claudeSettingsPath(project)
@@ -75,6 +76,19 @@ func newUninstallCmd() *cobra.Command {
 			// --all / --purge: best-effort per step, report each outcome.
 			result["mcp_registration"] = unregisterClaudeMCPStatus()
 			result["claude_md"] = removeClaudeSnippetStatus(project)
+			if mdPath, err := claudeMdPath(project); err == nil {
+				result["graph_block"] = removeGraphBlockStatus(mdPath)
+			}
+			for _, h := range otherHosts {
+				if res, err := h.uninstall(); err != nil {
+					result[h.name] = "error: " + err.Error()
+				} else {
+					result[h.name] = res
+				}
+			}
+			if project {
+				result["agents_md"] = removeGraphBlockStatus("AGENTS.md")
+			}
 			result["server"] = stopServerStatus() // stop before any purge
 			if purge {
 				result["purge"] = purgeStateStatus()
@@ -84,7 +98,7 @@ func newUninstallCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&project, "project", false, "Uninstall from ./.claude/settings.json instead of the user settings")
-	cmd.Flags().BoolVar(&all, "all", false, "Full teardown: hooks + claude mcp remove + CLAUDE.md block + stop daemon")
+	cmd.Flags().BoolVar(&all, "all", false, "Full teardown: hooks + claude mcp remove + CLAUDE.md block + codex/opencode + stop daemon")
 	cmd.Flags().BoolVar(&purge, "purge", false, "Also delete the state dir (~/.droids-mem/: mem.db, token) — destructive")
 	cmd.Flags().StringVar(&host, "host", "claude", "Target host: claude, codex, or opencode")
 	return cmd
@@ -195,15 +209,25 @@ func unregisterClaudeMCPStatus() string {
 }
 
 // removeClaudeSnippetStatus splices the exact embedded block out of CLAUDE.md.
-// The block carries no binary path, so an exact-string match is safe. A marker
-// present but no exact match means the user edited the block — we refuse to
-// guess its bounds and report manual_removal_needed (ADR-0024 §5).
 func removeClaudeSnippetStatus(project bool) string {
 	path, err := claudeMdPath(project)
 	if err != nil {
 		return "error: " + err.Error()
 	}
-	b, err := os.ReadFile(path) // #nosec G304 -- fixed CLAUDE.md location, not user input
+	return removeBlockStatus(path, claudeSnippet, claudeSnippetMarker)
+}
+
+// removeGraphBlockStatus splices the exact graph block out of path.
+func removeGraphBlockStatus(path string) string {
+	return removeBlockStatus(path, graphSnippet, graphSnippetMarker)
+}
+
+// removeBlockStatus splices the exact embedded block out of path. The block
+// carries no binary path, so an exact-string match is safe. A marker present
+// but no exact match means the user edited the block — we refuse to guess its
+// bounds and report manual_removal_needed (ADR-0024 §5).
+func removeBlockStatus(path, block, marker string) string {
+	b, err := os.ReadFile(path) // #nosec G304 -- fixed instructions-file location, not user input
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "already_absent"
@@ -211,19 +235,19 @@ func removeClaudeSnippetStatus(project bool) string {
 		return "error: " + err.Error()
 	}
 	s := string(b)
-	if !strings.Contains(s, claudeSnippetMarker) {
+	if !strings.Contains(s, marker) {
 		return "already_absent"
 	}
 	// Install prepends a newline when the file was non-empty; strip that form
 	// first, then the bare block (file install created from scratch).
-	next := strings.Replace(s, "\n"+claudeSnippet, "", 1)
+	next := strings.Replace(s, "\n"+block, "", 1)
 	if next == s {
-		next = strings.Replace(s, claudeSnippet, "", 1)
+		next = strings.Replace(s, block, "", 1)
 	}
 	if next == s {
 		return "manual_removal_needed: " + path
 	}
-	// #nosec G703 -- fixed CLAUDE.md location, not user input
+	// #nosec G703 -- fixed instructions-file location, not user input
 	if err := os.WriteFile(path, []byte(next), 0o600); err != nil {
 		return "error: " + err.Error()
 	}
@@ -301,50 +325,57 @@ func purgeStateStatus() string {
 }
 
 // uninstallHost removes the stdio MCP registration from a non-Claude host.
-func uninstallHost(host string) error {
+func uninstallHost(host string, project bool) error {
+	var res map[string]any
+	var err error
 	switch host {
 	case "codex":
-		return uninstallCodex()
+		res, err = uninstallCodex()
 	case "opencode":
-		return uninstallOpencode()
+		res, err = uninstallOpencode()
 	default:
 		writeError("usage", "unknown --host "+host+" (want claude, codex, or opencode)", false)
 		exitWith(ExitUsage)
 		return nil
 	}
+	if err != nil {
+		writeError("uninstall_failed", err.Error(), isRetryable(err))
+		exitWith(ExitError)
+	}
+	if project {
+		res["agents_md"] = removeGraphBlockStatus("AGENTS.md")
+	}
+	writeJSON(res)
+	return nil
 }
 
 // uninstallCodex removes the [mcp_servers.droids-mem] table from config.toml
 // by a marker→boundary scan (the table embeds the binary path, so an exact
 // match would miss after a binary move; ADR-0024 §5).
-func uninstallCodex() error {
+func uninstallCodex() (map[string]any, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		writeError("uninstall_failed", "resolve home dir: "+err.Error(), false)
-		exitWith(ExitError)
+		return nil, stepErr(false, "resolve home dir: %w", err)
 	}
 	path := filepath.Join(home, ".codex", "config.toml")
+	res := map[string]any{"host": "codex", "config": path, "status": "already_absent"}
 	b, err := os.ReadFile(path) // #nosec G304 -- fixed config location, not user input
 	if err != nil {
 		if os.IsNotExist(err) {
-			writeJSON(map[string]any{"status": "already_absent", "host": "codex", "config": path})
-			return nil
+			return res, nil
 		}
-		writeError("uninstall_failed", "read "+path+": "+err.Error(), true)
-		exitWith(ExitError)
+		return nil, stepErr(true, "read %s: %w", path, err)
 	}
 	next, removed := stripTOMLTable(string(b), codexMCPMarker)
 	if !removed {
-		writeJSON(map[string]any{"status": "already_absent", "host": "codex", "config": path})
-		return nil
+		return res, nil
 	}
 	// #nosec G703 -- path is a fixed config location, not user input
 	if err := os.WriteFile(path, []byte(next), 0o600); err != nil {
-		writeError("uninstall_failed", "write "+path+": "+err.Error(), true)
-		exitWith(ExitError)
+		return nil, stepErr(true, "write %s: %w", path, err)
 	}
-	writeJSON(map[string]any{"status": "uninstalled", "host": "codex", "config": path})
-	return nil
+	res["status"] = "uninstalled"
+	return res, nil
 }
 
 // stripTOMLTable removes the table headed by marker (a full-line `[table]`)
@@ -375,31 +406,27 @@ func stripTOMLTable(content, marker string) (string, bool) {
 
 // uninstallOpencode deletes the mcp["droids-mem"] key from opencode.json,
 // pruning an emptied mcp object. Same read-mutate-write as install.
-func uninstallOpencode() error {
+func uninstallOpencode() (map[string]any, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		writeError("uninstall_failed", "resolve home dir: "+err.Error(), false)
-		exitWith(ExitError)
+		return nil, stepErr(false, "resolve home dir: %w", err)
 	}
 	path := filepath.Join(home, ".config", "opencode", "opencode.json")
+	res := map[string]any{"host": "opencode", "config": path, "status": "already_absent"}
 	b, err := os.ReadFile(path) // #nosec G304 -- fixed config location, not user input
 	if err != nil {
 		if os.IsNotExist(err) {
-			writeJSON(map[string]any{"status": "already_absent", "host": "opencode", "config": path})
-			return nil
+			return res, nil
 		}
-		writeError("uninstall_failed", "read "+path+": "+err.Error(), true)
-		exitWith(ExitError)
+		return nil, stepErr(true, "read %s: %w", path, err)
 	}
 	config := map[string]any{}
 	if err := json.Unmarshal(b, &config); err != nil {
-		writeError("uninstall_failed", "parse "+path+": "+err.Error(), false)
-		exitWith(ExitError)
+		return nil, stepErr(false, "parse %s: %w", path, err)
 	}
 	mcp, _ := config["mcp"].(map[string]any)
 	if _, ok := mcp["droids-mem"]; !ok {
-		writeJSON(map[string]any{"status": "already_absent", "host": "opencode", "config": path})
-		return nil
+		return res, nil
 	}
 	delete(mcp, "droids-mem")
 	if len(mcp) == 0 {
@@ -409,16 +436,14 @@ func uninstallOpencode() error {
 	}
 	out, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
-		writeError("uninstall_failed", "marshal config: "+err.Error(), false)
-		exitWith(ExitError)
+		return nil, stepErr(false, "marshal config: %w", err)
 	}
 	// #nosec G703 -- path is a fixed config location, not user input
 	if err := os.WriteFile(path, append(out, '\n'), 0o600); err != nil {
-		writeError("uninstall_failed", "write "+path+": "+err.Error(), true)
-		exitWith(ExitError)
+		return nil, stepErr(true, "write %s: %w", path, err)
 	}
-	writeJSON(map[string]any{"status": "uninstalled", "host": "opencode", "config": path})
-	return nil
+	res["status"] = "uninstalled"
+	return res, nil
 }
 
 // claudeMdPath resolves the CLAUDE.md target: ./CLAUDE.md with --project, else
