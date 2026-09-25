@@ -103,8 +103,8 @@ type SymbolRequest struct {
 	Direction string // up | down | both (default both)
 	Depth     int    // 1..maxDepth, default 1
 	To        string // optional path target
-	NoSource  bool   // omit the queried symbol's source body (signatures-only)
-	NoTests   bool   // drop _test.go neighbors from the rows (counts still reported)
+	NoSource  bool   // omit the symbol's source body
+	NoTests   bool   // drop _test.go neighbors from rows (counts still reported)
 }
 
 // SymbolInfo is the full always-tier body of the queried symbol.
@@ -317,12 +317,9 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 
 	var info SymbolInfo
 	var id int64
-	sourceCol := "source"
-	if req.NoSource {
-		sourceCol = "''"
-	}
-	err = conn.QueryRowContext(ctx, `SELECT id, qname, kind, package, file, line, signature, doc, `+sourceCol+`
-		FROM symbols WHERE qname = ?`, rows[0].QName).Scan( // #nosec G202 -- sourceCol is one of two compile-time constants above
+	err = conn.QueryRowContext(ctx, `SELECT id, qname, kind, package, file, line, signature, doc,
+		CASE WHEN ? THEN '' ELSE source END
+		FROM symbols WHERE qname = ?`, req.NoSource, rows[0].QName).Scan(
 		&id, &info.QName, &info.Kind, &info.Package, &info.File, &info.Line,
 		&info.Signature, &info.Doc, &info.Source)
 	if err != nil {
@@ -702,13 +699,6 @@ func bfsNeighbors(ctx context.Context, conn *sql.DB, start int64, dir string, de
 func neighborLevel(ctx context.Context, conn *sql.DB, from, to string, frontier []int64, seen map[int64]bool,
 	out *[]Neighbor, depth int, startPkg string, noTests bool) (next []int64, truncated bool, err error) {
 
-	// noTests filters at the row source, so the cap is spent on production
-	// neighbors only. Constant fragment; no user input reaches the SQL.
-	testFilter := ""
-	if noTests {
-		testFilter = ` AND s.file NOT LIKE '%%\_test.go' ESCAPE '\'`
-	}
-
 	// ORDER BY is_test first: a same-package _test.go caller must NOT outrank a
 	// cross-package production caller, or the cap can show zero production
 	// callers and an agent wrongly concludes a signature change is test-only.
@@ -717,11 +707,13 @@ func neighborLevel(ctx context.Context, conn *sql.DB, from, to string, frontier 
 	// escaped LIKE avoids misclassifying a literal underscore (e.g.
 	// "helpertest.go") as a wildcard match. The startPkg arg trails the
 	// frontier IN placeholders — positional order must match (issue #49).
+	// noTests filters at the row source so the cap is spent on production
+	// neighbors only; its arg sits between the IN list and startPkg.
 	rows, err := conn.QueryContext(ctx, fmt.Sprintf(`SELECT DISTINCT s.id, s.qname, s.signature, s.file, s.line
 		FROM edges e JOIN symbols s ON s.id = e.%s
-		WHERE e.%s IN (%s)`+testFilter+`
+		WHERE e.%s IN (%s) AND (NOT ? OR s.file NOT LIKE '%%\_test.go' ESCAPE '\')
 		ORDER BY (s.file LIKE '%%\_test.go' ESCAPE '\'), (s.package != ?), s.qname`, to, from, placeholders(len(frontier))),
-		append(idArgs(frontier), startPkg)...)
+		append(idArgs(frontier), noTests, startPkg)...)
 	if err != nil {
 		return nil, false, err
 	}
