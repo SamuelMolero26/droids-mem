@@ -19,6 +19,7 @@ func newSearchCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "search",
 		Short: "Search memories using full-text search",
+		Args:  cobra.NoArgs,
 		Example: `  droids-mem search --query "hubspot phone mapping"
   droids-mem search --query "phone" --task-type crm_upload --kind error_resolution
   droids-mem search --query "auth failure" --limit 10

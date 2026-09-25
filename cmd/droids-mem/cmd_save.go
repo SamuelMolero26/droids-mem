@@ -26,6 +26,7 @@ func newSaveCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "save",
 		Short: "Save a structured memory",
+		Args:  cobra.NoArgs,
 		Example: `  droids-mem save --task-type crm_upload --kind error_resolution \
     --title "HubSpot phone field" --what "field was phone_number" \
     --learned "map to phone, not phone_number" --tags "hubspot phone"
@@ -108,8 +109,8 @@ func newSaveCmd(a *app) *cobra.Command {
 
 func previewSave(cmd *cobra.Command, s *store.Store, req store.SaveRequest) error {
 	// DryRun runs the full save pipeline (validate → scrub → dedupe) under the
-	// real write lock, then rolls back — nothing persists.
-	req.Force = false
+	// real write lock, then rolls back — nothing persists. Force flows through
+	// so --force --dry-run predicts the overwrite path faithfully.
 	req.DryRun = true
 	resp, err := s.Save(cmd.Context(), req)
 	if err != nil {
