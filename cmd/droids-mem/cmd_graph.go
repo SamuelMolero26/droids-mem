@@ -117,6 +117,7 @@ automatically when the repo changes.`,
 
 	var direction, to, symbolFlag string
 	var depth int
+	var noSource, noTests bool
 	symbolCmd := &cobra.Command{
 		Use:   "symbol <name>",
 		Short: "Show a symbol's source + callers/callees as signature stubs",
@@ -142,6 +143,8 @@ automatically when the repo changes.`,
 				Direction: direction,
 				Depth:     depth,
 				To:        to,
+				NoSource:  noSource,
+				NoTests:   noTests,
 			})
 			if err != nil {
 				writeGraphErr(err)
@@ -154,6 +157,8 @@ automatically when the repo changes.`,
 	symbolCmd.Flags().StringVar(&direction, "direction", "both", "edges to follow: up | down | both")
 	symbolCmd.Flags().IntVar(&depth, "depth", 1, "transitive hops (max 5); up + depth>1 = blast radius")
 	symbolCmd.Flags().StringVar(&to, "to", "", "target symbol: return the call path instead of neighbors")
+	symbolCmd.Flags().BoolVar(&noSource, "no-source", false, "omit the symbol's own source body (signature + callers/callees only)")
+	symbolCmd.Flags().BoolVar(&noTests, "no-tests", false, "drop _test.go neighbors from the rows (callers_in_tests still counts them)")
 	symbolCmd.Flags().StringVar(&symbolFlag, "symbol", "", "symbol name (alias for the positional arg; matches MCP graph_symbol)")
 
 	var packageFlag string

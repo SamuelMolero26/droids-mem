@@ -103,6 +103,8 @@ type SymbolRequest struct {
 	Direction string // up | down | both (default both)
 	Depth     int    // 1..maxDepth, default 1
 	To        string // optional path target
+	NoSource  bool   // omit the queried symbol's source body (signatures-only)
+	NoTests   bool   // drop _test.go neighbors from the rows (counts still reported)
 }
 
 // SymbolInfo is the full always-tier body of the queried symbol.
@@ -315,8 +317,12 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 
 	var info SymbolInfo
 	var id int64
-	err = conn.QueryRowContext(ctx, `SELECT id, qname, kind, package, file, line, signature, doc, source
-		FROM symbols WHERE qname = ?`, rows[0].QName).Scan(
+	sourceCol := "source"
+	if req.NoSource {
+		sourceCol = "''"
+	}
+	err = conn.QueryRowContext(ctx, `SELECT id, qname, kind, package, file, line, signature, doc, `+sourceCol+`
+		FROM symbols WHERE qname = ?`, rows[0].QName).Scan( // #nosec G202 -- sourceCol is one of two compile-time constants above
 		&id, &info.QName, &info.Kind, &info.Package, &info.File, &info.Line,
 		&info.Signature, &info.Doc, &info.Source)
 	if err != nil {
@@ -435,7 +441,7 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	var upTrunc, downTrunc bool
 	var callersTotal int // true depth=1 caller total, from callerSplit
 	if dir == "up" || dir == "both" {
-		resp.Callers, upTrunc, err = bfsNeighbors(ctx, conn, id, "up", depth, info.Package)
+		resp.Callers, upTrunc, err = bfsNeighbors(ctx, conn, id, "up", depth, info.Package, req.NoTests)
 		if err != nil {
 			return nil, err
 		}
@@ -443,9 +449,16 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 		if err != nil {
 			return nil, err
 		}
+		// A majority of interface-dispatch callers means CHA fan-out dominates
+		// the list: name the action, not just the count.
+		if resp.CallersViaInterface*2 > callersTotal {
+			resp.Hint = addHint(resp.Hint, fmt.Sprintf(
+				"%d of %d callers are interface-dispatch candidates (CHA over-approximation, may not fire) — verify with grep before trusting",
+				resp.CallersViaInterface, callersTotal))
+		}
 	}
 	if dir == "down" || dir == "both" {
-		resp.Callees, downTrunc, err = bfsNeighbors(ctx, conn, id, "down", depth, info.Package)
+		resp.Callees, downTrunc, err = bfsNeighbors(ctx, conn, id, "down", depth, info.Package, req.NoTests)
 		if err != nil {
 			return nil, err
 		}
@@ -456,6 +469,9 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	// so callerSplit counted exactly the same distinct callers.
 	if upTrunc && depth == 1 {
 		resp.CallersTotal = callersTotal
+		if req.NoTests {
+			resp.CallersTotal -= resp.CallersInTests // rows exclude tests; keep the total comparable
+		}
 	}
 	if downTrunc && depth == 1 {
 		if resp.CalleesTotal, err = calleeCount(ctx, conn, id); err != nil {
@@ -660,7 +676,7 @@ func scanNeighbors(rows *sql.Rows, depth int) ([]Neighbor, error) {
 // signature stubs, capped at maxNeighbors (truncated=true past the cap).
 // startPkg biases the within-level ordering so same-package neighbors survive
 // the cap first (issue #49) — a partial slice is less arbitrary that way.
-func bfsNeighbors(ctx context.Context, conn *sql.DB, start int64, dir string, depth int, startPkg string) ([]Neighbor, bool, error) {
+func bfsNeighbors(ctx context.Context, conn *sql.DB, start int64, dir string, depth int, startPkg string, noTests bool) ([]Neighbor, bool, error) {
 	from, to := "callee", "caller" // up: who calls me
 	if dir == "down" {
 		from, to = "caller", "callee"
@@ -669,7 +685,7 @@ func bfsNeighbors(ctx context.Context, conn *sql.DB, start int64, dir string, de
 	frontier := []int64{start}
 	var out []Neighbor
 	for d := 1; d <= depth && len(frontier) > 0; d++ {
-		next, truncated, err := neighborLevel(ctx, conn, from, to, frontier, seen, &out, d, startPkg)
+		next, truncated, err := neighborLevel(ctx, conn, from, to, frontier, seen, &out, d, startPkg, noTests)
 		if err != nil {
 			return nil, false, err
 		}
@@ -684,7 +700,14 @@ func bfsNeighbors(ctx context.Context, conn *sql.DB, start int64, dir string, de
 // neighborLevel expands one BFS level, appending stubs to out. truncated is
 // true once out hits maxNeighbors.
 func neighborLevel(ctx context.Context, conn *sql.DB, from, to string, frontier []int64, seen map[int64]bool,
-	out *[]Neighbor, depth int, startPkg string) (next []int64, truncated bool, err error) {
+	out *[]Neighbor, depth int, startPkg string, noTests bool) (next []int64, truncated bool, err error) {
+
+	// noTests filters at the row source, so the cap is spent on production
+	// neighbors only. Constant fragment; no user input reaches the SQL.
+	testFilter := ""
+	if noTests {
+		testFilter = ` AND s.file NOT LIKE '%%\_test.go' ESCAPE '\'`
+	}
 
 	// ORDER BY is_test first: a same-package _test.go caller must NOT outrank a
 	// cross-package production caller, or the cap can show zero production
@@ -696,7 +719,7 @@ func neighborLevel(ctx context.Context, conn *sql.DB, from, to string, frontier 
 	// frontier IN placeholders — positional order must match (issue #49).
 	rows, err := conn.QueryContext(ctx, fmt.Sprintf(`SELECT DISTINCT s.id, s.qname, s.signature, s.file, s.line
 		FROM edges e JOIN symbols s ON s.id = e.%s
-		WHERE e.%s IN (%s)
+		WHERE e.%s IN (%s)`+testFilter+`
 		ORDER BY (s.file LIKE '%%\_test.go' ESCAPE '\'), (s.package != ?), s.qname`, to, from, placeholders(len(frontier))),
 		append(idArgs(frontier), startPkg)...)
 	if err != nil {

@@ -38,6 +38,53 @@ func TestCallersViaInterface_Split(t *testing.T) {
 	if resp.CallersViaInterface != 3 {
 		t.Errorf("Minor.Do CallersViaInterface = %d, want 3", resp.CallersViaInterface)
 	}
+	if strings.Contains(resp.Hint, "interface-dispatch candidates") {
+		t.Errorf("Minor.Do (3 of 7 interface) must not carry the CHA hint: %q", resp.Hint)
+	}
+}
+
+// TestSymbol_NoSource: the flag drops only the queried symbol's body; the
+// signature, callers and counts are identical to the default response.
+func TestSymbol_NoSource(t *testing.T) {
+	m, repo := testManagerAt(t, "testdata/dispatch")
+	ctx := context.Background()
+	req := SymbolRequest{Repo: repo, Symbol: "dispatch.Dominant.Do", Direction: "up"}
+
+	full, err := m.Symbol(ctx, req)
+	if err != nil {
+		t.Fatalf("Symbol: %v", err)
+	}
+	if full.Symbol.Source == "" {
+		t.Fatal("precondition: default response must carry source")
+	}
+	req.NoSource = true
+	got, err := m.Symbol(ctx, req)
+	if err != nil {
+		t.Fatalf("Symbol NoSource: %v", err)
+	}
+	if got.Symbol.Source != "" {
+		t.Errorf("NoSource kept source: %q", got.Symbol.Source)
+	}
+	if strings.Contains(RenderSymbol(got), "source:") {
+		t.Error("NoSource render still has a source block")
+	}
+	if got.Symbol.Signature != full.Symbol.Signature || !reflect.DeepEqual(got.Callers, full.Callers) ||
+		got.CallersViaInterface != full.CallersViaInterface {
+		t.Error("NoSource changed signature/callers/split; only source may differ")
+	}
+}
+
+// TestDominantInterfaceCallers_Hint: 3 of 4 callers are interface dispatch,
+// so the hint names the action (verify), not just the count.
+func TestDominantInterfaceCallers_Hint(t *testing.T) {
+	m, repo := testManagerAt(t, "testdata/dispatch")
+	resp, err := m.Symbol(context.Background(), SymbolRequest{Repo: repo, Symbol: "dispatch.Dominant.Do", Direction: "up"})
+	if err != nil {
+		t.Fatalf("Symbol Dominant.Do: %v", err)
+	}
+	if want := "3 of 4 callers are interface-dispatch candidates"; !strings.Contains(resp.Hint, want) {
+		t.Errorf("hint = %q, want it to contain %q", resp.Hint, want)
+	}
 }
 
 // TestCapInvariance_SplitsAndTotalsIndependentOfCap pins task 7.1/7.2 (spec
@@ -123,5 +170,35 @@ func TestNeighbor_NoPerRowTestOrDispatchField(t *testing.T) {
 				t.Errorf("caller row carries a per-row field %q, want response-level splits only: %v", k, row)
 			}
 		}
+	}
+}
+
+// TestSymbol_NoTests: test-file callers leave the rows but stay in the
+// callers_in_tests count; production callers are untouched.
+func TestSymbol_NoTests(t *testing.T) {
+	m, repo := testManagerAt(t, "testdata/pkgtest")
+	ctx := context.Background()
+
+	full, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "pkgtest.Real", Direction: "up"})
+	if err != nil {
+		t.Fatalf("Symbol: %v", err)
+	}
+	got, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "pkgtest.Real", Direction: "up", NoTests: true})
+	if err != nil {
+		t.Fatalf("Symbol NoTests: %v", err)
+	}
+	if len(full.Callers) != 2 || full.CallersInTests != 2 {
+		t.Fatalf("precondition: Real callers = %d (in tests %d), want 2/2", len(full.Callers), full.CallersInTests)
+	}
+	if len(got.Callers) != 0 || got.CallersInTests != 2 {
+		t.Errorf("NoTests callers = %d, in_tests = %d, want 0 rows and count 2", len(got.Callers), got.CallersInTests)
+	}
+
+	prod, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "pkgtest.helper", Direction: "up", NoTests: true})
+	if err != nil {
+		t.Fatalf("Symbol helper: %v", err)
+	}
+	if len(prod.Callers) != 1 || prod.Callers[0].QName != "pkgtest.Real" {
+		t.Errorf("production caller dropped by NoTests: %+v", prod.Callers)
 	}
 }
