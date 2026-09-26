@@ -101,6 +101,9 @@ type SymbolRequest struct {
 	To        string // optional path target
 	NoSource  bool   // omit the symbol's source body
 	NoTests   bool   // drop _test.go neighbors from rows (counts still reported)
+	// NoBuild answers from the graph already on disk and never builds or
+	// rebuilds; an unindexed repo is ErrNotFound. Read-only viewers set it.
+	NoBuild bool
 }
 
 // SymbolInfo is the full always-tier body of the queried symbol.
@@ -259,12 +262,14 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	if strings.TrimSpace(req.Symbol) == "" {
 		return nil, fmt.Errorf("symbol is required: %w", ErrInvalidArgument)
 	}
-	conn, release, fresh, err := m.ensureFresh(ctx, req.Repo)
+	conn, release, fresh, err := m.openFor(ctx, req.Repo, req.NoBuild)
 	if err != nil {
 		return nil, err
 	}
 	defer release() // hold the handle for every statement below, not just the first
-	m.bump(req.Repo, "symbol")
+	if !req.NoBuild {
+		m.bump(req.Repo, "symbol")
+	}
 	resp := &SymbolResponse{Repo: req.Repo, Freshness: fresh, Hint: expandHint}
 	if fresh.Stale {
 		resp.Hint = staleGraphHint + "; " + expandHint
@@ -820,6 +825,7 @@ func pathLevel(ctx context.Context, conn *sql.DB, frontier []int64, parent map[i
 type PackageRequest struct {
 	Repo    string
 	Package string // package path or suffix, e.g. "internal/store"
+	NoBuild bool   // see SymbolRequest.NoBuild
 }
 
 // PackageSymbol is one exported symbol's stub in a package surface.
@@ -978,12 +984,14 @@ func (m *Manager) Package(ctx context.Context, req PackageRequest) (*PackageResp
 	if strings.TrimSpace(req.Package) == "" {
 		return nil, fmt.Errorf("package is required: %w", ErrInvalidArgument)
 	}
-	conn, release, fresh, err := m.ensureFresh(ctx, req.Repo)
+	conn, release, fresh, err := m.openFor(ctx, req.Repo, req.NoBuild)
 	if err != nil {
 		return nil, err
 	}
 	defer release() // hold the handle for every statement below, not just the first
-	m.bump(req.Repo, "package")
+	if !req.NoBuild {
+		m.bump(req.Repo, "package")
+	}
 
 	// First tier: exact or suffix (preserves Go and Python leaf behavior).
 	if resolved, err := resolvePackage(ctx, conn, req.Package); err == nil {
