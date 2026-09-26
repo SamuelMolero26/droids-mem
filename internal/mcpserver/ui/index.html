@@ -1,5 +1,21 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><title>droids-mem graph</title></head>
-<body><p>droids-mem graph viewer</p></body>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>droids-mem graph</title>
+<link rel="stylesheet" href="app.css">
+<script defer src="core.js"></script>
+<script defer src="map.js"></script>
+<script defer src="views.js"></script>
+</head>
+<body>
+<header>
+  <nav id="nav"><strong>droids-mem graph</strong><a href="#/">Map</a><span id="navx"></span></nav>
+  <div id="badges"></div>
+  <div id="trail"></div>
+</header>
+<div id="banner" class="banner" hidden></div>
+<main id="view"></main>
+</body>
 </html>

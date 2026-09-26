@@ -1,0 +1,139 @@
+'use strict';
+// Shared plumbing: session bootstrap, API client, router, badges. Every view
+// renders through textContent / text nodes only (CSP forbids inline script and
+// style, and nothing here builds markup from strings).
+var DM = window.DM = { views: {}, seq: 0, opts: { depth: 2, dir: 'both' } };
+
+DM.BUILD_FAILED = 'Latest build failed; showing last good graph (may be stale). ' +
+  'Fix the error and re-run droids-mem graph ui to retry.';
+
+// el(tag, className, ...children): strings become text nodes, null is skipped.
+DM.el = function (tag, cls) {
+  var e = document.createElement(tag);
+  if (cls) e.className = cls;
+  for (var i = 2; i < arguments.length; i++) {
+    var k = arguments[i];
+    if (k == null) continue;
+    e.append(typeof k === 'object' ? k : document.createTextNode(String(k)));
+  }
+  return e;
+};
+
+DM.svg = function (tag, attrs) {
+  var e = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (var a in attrs) e.setAttribute(a, attrs[a]);
+  for (var i = 2; i < arguments.length; i++) {
+    var k = arguments[i];
+    e.append(typeof k === 'object' ? k : document.createTextNode(String(k)));
+  }
+  return e;
+};
+
+DM.link = function (hash, text, cls) {
+  var a = DM.el('a', cls, text);
+  a.href = hash;
+  return a;
+};
+DM.pkgHash = function (name) { return '#/pkg/' + encodeURIComponent(name); };
+DM.symHash = function (qname) { return '#/sym/' + encodeURIComponent(qname); };
+
+// Bootstrap: the launcher puts the key (and optionally a build error) in the
+// URL fragment. Move both into sessionStorage and strip the fragment so the key
+// does not linger in history or get copied from the address bar.
+(function bootstrap() {
+  if (location.hash.indexOf('#k=') !== 0) return;
+  var p = new URLSearchParams(location.hash.slice(1));
+  sessionStorage.setItem('dm.key', p.get('k') || '');
+  sessionStorage.removeItem('dm.err');
+  var e = p.get('err');
+  if (e) {
+    try {
+      var bin = atob(e.replace(/-/g, '+').replace(/_/g, '/'));
+      sessionStorage.setItem('dm.err', new TextDecoder().decode(Uint8Array.from(bin, function (c) { return c.charCodeAt(0); })));
+    } catch (x) {
+      sessionStorage.setItem('dm.err', '');
+    }
+  }
+  history.replaceState(null, '', location.pathname + location.search + '#/');
+})();
+
+DM.api = async function (path, params) {
+  var key = sessionStorage.getItem('dm.key');
+  if (!key) {
+    var none = new Error('no session key');
+    none.status = 401;
+    throw none;
+  }
+  var qs = params ? '?' + new URLSearchParams(params) : '';
+  var r = await fetch('/api/graph/' + path + qs, { headers: { Authorization: 'Bearer ' + key } });
+  var body = null;
+  try { body = await r.json(); } catch (x) { /* non-JSON error body */ }
+  if (!r.ok) {
+    var err = new Error((body && body.error) || r.statusText);
+    err.status = r.status;
+    throw err;
+  }
+  return body;
+};
+
+DM.showError = function (main, err) {
+  var msg = err.message;
+  if (err.status === 401) msg = 'Session expired — re-run droids-mem graph ui';
+  else if (err.status === 404) msg = msg + '. If this repo has not been indexed yet, run droids-mem graph ui.';
+  main.textContent = '';
+  main.append(DM.el('p', 'state error', msg));
+};
+
+DM.note = function (main, text) {
+  main.textContent = '';
+  main.append(DM.el('p', 'state', text));
+};
+
+// setBadges renders freshness/precision signals. o: {syntactic, carried, truncated}.
+DM.setBadges = function (f, o) {
+  var box = document.getElementById('badges');
+  box.textContent = '';
+  var add = function (cls, text, title) {
+    var b = DM.el('span', 'badge ' + cls, text);
+    if (title) b.title = title;
+    box.append(b);
+  };
+  o = o || {};
+  f = f || {};
+  if (o.syntactic) add('warn', 'approximate', 'Heuristic (syntactic) edges, not type-checked');
+  if (f.stale) add('warn', 'stale', 'Sources changed since the graph was built');
+  if (f.rebuilding) add('info', 'rebuilding');
+  if (o.carried || f.stale_units_total) add('warn', 'carried', 'Some packages use edges carried from an earlier build');
+  if (f.index_error) add('bad', 'index error', f.index_error);
+  if (o.truncated) add('info', 'truncated', 'Result was capped');
+};
+
+DM.route = async function () {
+  var h = location.hash.replace(/^#\/?/, '');
+  var i = h.indexOf('/');
+  var name = (i < 0 ? h : h.slice(0, i)) || 'map';
+  var arg = i < 0 ? '' : decodeURIComponent(h.slice(i + 1));
+  var t = ++DM.seq;
+  var main = document.getElementById('view');
+  document.getElementById('badges').textContent = '';
+  var view = DM.views[name];
+  if (!view) return DM.note(main, 'Page not found.');
+  DM.note(main, 'Loading…');
+  try {
+    await view({ main: main, arg: arg, alive: function () { return t === DM.seq; } });
+  } catch (err) {
+    if (t === DM.seq) DM.showError(main, err);
+  }
+};
+
+document.addEventListener('DOMContentLoaded', function () {
+  var banner = document.getElementById('banner');
+  var detail = sessionStorage.getItem('dm.err');
+  if (detail !== null) {
+    banner.textContent = DM.BUILD_FAILED;
+    if (detail) banner.append(DM.el('code', null, detail));
+    banner.hidden = false;
+  }
+  window.addEventListener('hashchange', DM.route);
+  DM.route();
+});

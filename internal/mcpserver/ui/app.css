@@ -1,0 +1,50 @@
+:root {
+  --bg: #fafafa; --fg: #1d2127; --muted: #6a737d; --line: #d0d7de; --panel: #fff;
+  --accent: #0b62d6; --warn: #9a6700; --bad: #b42318; --info: #1a7f37;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a; --fg: #e4e7ea; --muted: #9aa4ae; --line: #30363d; --panel: #1b1f24;
+    --accent: #58a6ff; --warn: #d4a72c; --bad: #f47067; --info: #56d364;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+header {
+  display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center;
+  padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+}
+nav { display: flex; gap: 16px; align-items: center; }
+#navx { display: flex; gap: 16px; align-items: center; }
+#trail { flex-basis: 100%; color: var(--muted); font-size: 12px; overflow-x: auto; white-space: nowrap; }
+#trail a + a::before, #trail span + a::before { content: " › "; color: var(--muted); }
+main { padding: 16px; }
+input, select, button {
+  font: inherit; color: var(--fg); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 4px; padding: 3px 8px;
+}
+button { cursor: pointer; }
+.muted { color: var(--muted); }
+.state { color: var(--muted); }
+.state.error { color: var(--bad); }
+.banner { margin: 0; padding: 8px 16px; background: var(--warn); color: #fff; }
+.banner code { display: block; margin-top: 4px; font-size: 12px; white-space: pre-wrap; }
+.badge { display: inline-block; margin-right: 6px; padding: 0 8px; border-radius: 10px; font-size: 12px; border: 1px solid currentColor; }
+.badge.warn { color: var(--warn); }
+.badge.bad { color: var(--bad); }
+.badge.info { color: var(--info); }
+.toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.mapbox { overflow: auto; max-height: calc(100vh - 170px); border: 1px solid var(--line); background: var(--panel); }
+svg .edge { fill: none; stroke: var(--muted); opacity: .45; }
+svg .edge.back { stroke-dasharray: 5 4; }
+svg .edge.hl { stroke: var(--accent); opacity: 1; }
+svg .node rect { fill: var(--bg); stroke: var(--line); stroke-width: 1; }
+svg .node.syn rect { stroke-dasharray: 4 3; }
+svg .node.carried rect { stroke: var(--warn); stroke-width: 2; }
+svg .node.hl rect { stroke: var(--accent); stroke-width: 2; }
+svg .node text { fill: var(--fg); font-size: 11px; pointer-events: none; }
