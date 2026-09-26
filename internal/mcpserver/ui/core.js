@@ -119,6 +119,7 @@ DM.route = async function () {
   var view = DM.views[name];
   if (!view) return DM.note(main, 'Page not found.');
   DM.note(main, 'Loading…');
+  if (DM.trailPush) DM.trailPush(name, arg);
   try {
     await view({ main: main, arg: arg, alive: function () { return t === DM.seq; } });
   } catch (err) {
