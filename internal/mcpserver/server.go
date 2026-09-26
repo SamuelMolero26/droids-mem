@@ -151,6 +151,10 @@ func Run(ctx context.Context, cfg Config, st *store.Store) error {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 	mux.HandleFunc("/identity", identityHandler(cfg.Token, cfg.Version))
+	// The graph viewer is loopback-only: never mounted on a wider bind.
+	if cfg.Graphs != nil && IsLoopbackAddr(cfg.Addr) {
+		registerUI(mux, cfg.Token, cfg.Graphs)
+	}
 
 	wrapped := bearerAuth(cfg.Token, cfg.Endpoint, limitBody(mux))
 

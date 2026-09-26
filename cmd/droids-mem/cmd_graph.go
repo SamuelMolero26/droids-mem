@@ -2,15 +2,19 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/samuelmolero26/droids-mem/internal/graph"
+	"github.com/samuelmolero26/droids-mem/internal/mcpserver"
 	"github.com/samuelmolero26/droids-mem/internal/state"
 )
 
@@ -193,8 +197,89 @@ automatically when the repo changes.`,
 	}
 	packageCmd.Flags().StringVar(&packageFlag, "package", "", "package path (alias for the positional arg; matches MCP graph_package)")
 
-	cmd.AddCommand(indexCmd, symbolCmd, packageCmd)
+	uiCmd := &cobra.Command{
+		Use:   "ui",
+		Short: "Open the graph viewer for this repo in the browser",
+		Long: `ui builds (or refreshes) the repo's graph, makes sure the local daemon is
+running, and opens the viewer in the default browser. The URL carries a signed
+key valid for 12 hours; it is printed as JSON in case the browser cannot open.
+
+If the build fails but an earlier graph exists, the viewer opens on that graph
+and shows a banner with the build error.`,
+		Args:        cobra.NoArgs,
+		Annotations: bypass,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			root, err := graph.RepoRoot(resolveRepo())
+			if err != nil {
+				writeGraphErr(err)
+				return nil
+			}
+			gm, err := graphManager()
+			if err != nil {
+				return err
+			}
+			defer gm.Close()
+			var indexErr string
+			if _, err := gm.Index(cmd.Context(), root); err != nil {
+				// Keep going on the last good graph; with none, there is nothing to show.
+				if _, perr := gm.PackageOverview(cmd.Context(), root); perr != nil {
+					writeError("graph_index_failed", err.Error(), false)
+					exitWith(ExitError)
+				}
+				indexErr = err.Error()
+			}
+
+			addr := envOr("DROIDS_MEM_MCP_ADDR", mcpserver.DefaultAddr)
+			if !mcpserver.IsLoopbackAddr(addr) {
+				writeError("ui_unavailable", fmt.Sprintf("the viewer is served only on a loopback address; DROIDS_MEM_MCP_ADDR=%s is not", addr), false)
+				exitWith(ExitError)
+			}
+			self, err := os.Executable()
+			if err != nil {
+				return err
+			}
+			if out, err := exec.CommandContext(cmd.Context(), self, "ensure-server").CombinedOutput(); err != nil { // #nosec G204 -- our own executable, fixed argument
+				writeError("ui_server_failed", fmt.Sprintf("ensure-server: %v: %s", err, out), true)
+				exitWith(ExitError)
+			}
+			tok, err := state.LoadOrCreateToken()
+			if err != nil {
+				return fmt.Errorf("load token: %w", err)
+			}
+			// The key rides in the URL fragment, which browsers never send to a server.
+			u := baseURL(addr) + "/ui/#k=" + mcpserver.UIKey(tok, root, time.Now().Add(mcpserver.UIKeyTTL))
+			if indexErr != "" {
+				u += "&err=" + base64.RawURLEncoding.EncodeToString([]byte(truncateRunes(indexErr, 300)))
+			}
+			openBrowser(u)
+			out := map[string]string{"status": "ok", "url": u, "repo": root}
+			if indexErr != "" {
+				out["index_error"] = indexErr
+			}
+			writeJSON(out)
+			return nil
+		},
+	}
+
+	cmd.AddCommand(indexCmd, symbolCmd, packageCmd, uiCmd)
 	return cmd
+}
+
+// openBrowser asks the OS to open u. Failure is not an error: the URL is also
+// printed, so the user can open it by hand.
+func openBrowser(u string) {
+	opener := "xdg-open"
+	if runtime.GOOS == "darwin" {
+		opener = "open"
+	}
+	_ = exec.Command(opener, u).Start() // #nosec G204 -- fixed opener, URL is a single argv element, no shell
+}
+
+func truncateRunes(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n]) + "…"
+	}
+	return s
 }
 
 // writeGraphErr emits the error envelope and exits (3 for misses, 1 otherwise).
