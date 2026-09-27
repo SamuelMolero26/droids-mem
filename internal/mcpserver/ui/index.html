@@ -10,11 +10,22 @@
 <script defer src="views.js"></script>
 </head>
 <body>
-<header>
-  <nav id="nav"><strong>droids-mem graph</strong><a href="#/">Map</a><span id="navx"></span></nav>
-  <div id="badges"></div>
-  <div id="trail"></div>
+<header class="top">
+  <strong class="brand">droids-mem graph</strong>
+  <nav class="tabs">
+    <a id="tab-map" href="#/">Map</a>
+    <a id="tab-sym" href="#/sym/">Symbol</a>
+    <a id="tab-flow" href="#/flow/">Flow</a>
+  </nav>
+  <label class="vh" for="q">Search symbols</label>
+  <input id="q" class="search" type="search" placeholder="Search a symbol — press / to focus" aria-keyshortcuts="/" autocomplete="off">
 </header>
+<div class="trailbar">
+  <span class="muted">Trail</span>
+  <div id="trail"></div>
+  <div id="badges"></div>
+  <button id="clear" type="button">Clear</button>
+</div>
 <div id="banner" class="banner" hidden></div>
 <main id="view"></main>
 </body>

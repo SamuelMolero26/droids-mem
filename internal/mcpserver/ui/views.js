@@ -1,50 +1,14 @@
 'use strict';
-// Package, symbol/flow, search and entry-point views, plus the navigation trail.
+// Package, flow, search and entry-point views.
 (function () {
-  var TRAIL_MAX = 50;
-
-  function shortName(q) { return q.length > 40 ? '…' + q.slice(-39) : q; }
   function where(s) { return s.file ? s.file + (s.line ? ':' + s.line : '') : ''; }
-
-  // ---- trail: breadcrumb of visited pages, kept per browser session ----
-  function loadTrail() {
-    try { return JSON.parse(sessionStorage.getItem('dm.trail')) || []; } catch (e) { return []; }
-  }
-  function renderTrail(t) {
-    var box = document.getElementById('trail');
-    box.textContent = '';
-    t.forEach(function (c, i) {
-      box.append(i === t.length - 1 ? DM.el('span', 'cur', c.l) : DM.link(c.h, c.l));
-    });
-  }
-  DM.trailPush = function (name, arg) {
-    var labels = { map: 'Map', entry: 'Entry points', pkg: arg, sym: shortName(arg), search: 'Search: ' + arg };
-    var h = location.hash || '#/';
-    var t = loadTrail();
-    if (!t.length || t[t.length - 1].h !== h) t.push({ l: labels[name] || name, h: h });
-    t = t.slice(-TRAIL_MAX);
-    sessionStorage.setItem('dm.trail', JSON.stringify(t));
-    renderTrail(t);
-  };
-
-  // ---- nav: search box and entry-points link ----
-  document.addEventListener('DOMContentLoaded', function () {
-    var input = DM.el('input');
-    input.type = 'search';
-    input.placeholder = 'Search symbols (2+ chars)';
-    input.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter') location.hash = '#/search/' + encodeURIComponent(input.value.trim());
-    });
-    document.getElementById('navx').append(DM.link('#/entry', 'Entry points'), input);
-  });
 
   // ---- shared: a list of symbol stubs ----
   function stubList(items) {
     var ul = DM.el('ul', 'list');
     items.forEach(function (s) {
-      var li = DM.el('li', null, DM.link(DM.symHash(s.qname), s.qname));
+      var li = DM.el('li', null, DM.row(s, where(s)));
       if (s.signature && s.signature !== s.qname) li.append(DM.el('div', 'sig', s.signature));
-      if (where(s)) li.append(DM.el('div', 'muted small', where(s)));
       ul.append(li);
     });
     return ul;
@@ -59,23 +23,20 @@
       .concat(d.symbols.filter(function (s) { return !s.exported; }));
     var ul = DM.el('ul', 'list');
     syms.forEach(function (s) {
-      ul.append(DM.el('li', null,
-        DM.el('span', 'kind', s.kind), ' ', DM.link(DM.symHash(s.qname), s.qname),
-        s.exported ? null : DM.el('span', 'muted small', ' unexported'),
-        DM.el('div', 'sig', s.signature),
-        DM.el('div', 'muted small', where(s))));
+      ul.append(DM.el('li', null, DM.row(s, where(s) + (s.exported ? '' : ' · unexported')),
+        DM.el('div', 'sig', s.signature)));
     });
     ctx.main.textContent = '';
     ctx.main.append(DM.el('h2', null, d.package),
       DM.el('p', 'muted', d.truncated ? 'Showing ' + d.symbols.length + ' of ' + d.total + ' symbols.' : d.symbols.length + ' symbols.'), ul);
   };
 
-  // ---- symbol / flow ----
+  // ---- flow: callers | focus | callees columns ----
   function column(title, items, depth) {
     var col = DM.el('section', 'col', DM.el('h3', null, title));
     if (!items.length) col.append(DM.el('p', 'muted small', 'none'));
     items.forEach(function (n) {
-      var a = DM.link(DM.symHash(n.qname), shortName(n.qname));
+      var a = DM.link(DM.flowHash(n.qname), DM.short(n.qname));
       a.title = n.qname + '\n' + n.signature + '\n' + where(n);
       col.append(DM.el('div', 'nb', a));
     });
@@ -94,7 +55,7 @@
     return DM.el('label', 'muted', label + ' ', sel);
   }
 
-  DM.views.sym = async function (ctx) {
+  DM.views.flow = async function (ctx) {
     var o = DM.opts;
     var d = await DM.api('symbol', { symbol: ctx.arg, direction: o.dir, depth: o.depth });
     if (!ctx.alive()) return;
@@ -104,6 +65,7 @@
       ctx.main.append(DM.el('p', 'state', 'Multiple or no matches for "' + ctx.arg + '".'), stubList(d.matches || []));
       return;
     }
+    DM.trailPush(d.symbol.qname, d.symbol.kind);
     var s = d.symbol, callers = d.callers || [], callees = d.callees || [];
     var again = function () { DM.route(); };
     var head = DM.el('div', 'toolbar',
@@ -117,6 +79,7 @@
     if (d.callers_via_interface) stats.push('callers via interface: ' + d.callers_via_interface);
 
     var focus = DM.el('section', 'col focus', DM.el('h3', null, 'Focus'),
+      DM.el('div', 'nb', DM.link(DM.symHash(s.qname), DM.short(s.qname))),
       DM.el('div', 'sig', s.signature), DM.link(DM.pkgHash(s.package), s.package),
       DM.el('div', 'muted small', where(s)));
     if (s.doc) focus.append(DM.el('p', 'small', s.doc));
@@ -135,9 +98,12 @@
       }
     }
     ctx.main.textContent = '';
-    ctx.main.append(DM.el('h2', null, s.qname, ' ', DM.el('span', 'kind', s.kind)),
+    ctx.main.append(DM.el('h2', null, s.qname, ' ', DM.el('span', 'muted', s.kind)),
       DM.el('p', 'muted', stats.join(' · ')), head, cols);
   };
+
+  DM.views.sym = DM.views.flow; // temporary until the Symbol page lands
+  DM.stubList = stubList;
 
   // ---- search ----
   DM.views.search = async function (ctx) {

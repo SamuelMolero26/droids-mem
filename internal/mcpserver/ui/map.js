@@ -132,7 +132,7 @@
       (d.truncated ? ' (truncated: largest packages and busiest edges only)' : '') +
       '. Callers on the left; dashed edges close a cycle. Click a package to open it.';
     ctx.main.textContent = '';
-    ctx.main.append(DM.el('div', 'toolbar', minus, plus, DM.el('span', 'muted', info)), holder);
+    ctx.main.append(DM.el('div', 'toolbar', minus, plus, DM.link('#/entry', 'Entry points'), DM.el('span', 'muted', info)), holder);
     redraw();
   };
 })();

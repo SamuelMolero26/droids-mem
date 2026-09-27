@@ -36,6 +36,63 @@ DM.link = function (hash, text, cls) {
 };
 DM.pkgHash = function (name) { return '#/pkg/' + encodeURIComponent(name); };
 DM.symHash = function (qname) { return '#/sym/' + encodeURIComponent(qname); };
+DM.flowHash = function (qname) { return '#/flow/' + encodeURIComponent(qname); };
+
+// Short display name. Mapper qnames are "<module>:<Container.name>", Go qnames
+// are "<import path>.<Name or Recv.Method>"; the full qname stays in a title.
+DM.short = function (q) {
+  var i = q.lastIndexOf(':');
+  if (i >= 0) return q.slice(i + 1);
+  var s = q.slice(q.lastIndexOf('/') + 1), j = s.indexOf('.');
+  return j >= 0 ? s.slice(j + 1) : s;
+};
+
+// Kind badge: a small outlined square with one glyph; unknown kinds show "·".
+var KIND = { func: 'ƒ', method: 'm', constructor: 'm', class: 'C', interface: 'I', type: 'T', const: 'c', var: 'v' };
+DM.kindBadge = function (kind) {
+  var b = DM.el('span', 'kb', KIND[kind] || '·');
+  b.setAttribute('role', 'img');
+  b.setAttribute('aria-label', kind || 'unknown kind');
+  b.title = kind || 'unknown kind';
+  return b;
+};
+
+// Row: the whole row is one link to the symbol; meta is plain muted text.
+DM.row = function (n, meta) {
+  var a = DM.link(DM.symHash(n.qname), null, 'row');
+  a.title = n.qname;
+  a.append(DM.kindBadge(n.kind), DM.el('span', 'nm', DM.short(n.qname)), meta ? DM.el('span', 'meta', meta) : null);
+  return a;
+};
+
+// ---- trail: symbols opened this browser session, most recent last ----
+var TRAIL_MAX = 50;
+DM.trail = function () {
+  var t;
+  try { t = JSON.parse(sessionStorage.getItem('dm.trail')); } catch (e) { t = null; }
+  return Array.isArray(t) ? t.filter(function (c) { return c && typeof c.q === 'string'; }) : [];
+};
+DM.lastSym = function () {
+  var t = DM.trail();
+  return t.length ? t[t.length - 1].q : '';
+};
+DM.renderTrail = function (activeQ) {
+  var box = document.getElementById('trail');
+  box.textContent = '';
+  DM.trail().forEach(function (c) {
+    var a = DM.link(DM.symHash(c.q), null, 'chip');
+    a.title = c.q;
+    a.append(DM.kindBadge(c.k), DM.short(c.q));
+    if (c.q === activeQ) a.setAttribute('aria-current', 'true');
+    box.append(a);
+  });
+};
+DM.trailPush = function (q, kind) {
+  var t = DM.trail().filter(function (c) { return c.q !== q; });
+  t.push({ q: q, k: kind });
+  sessionStorage.setItem('dm.trail', JSON.stringify(t.slice(-TRAIL_MAX)));
+  DM.renderTrail(q);
+};
 
 // Bootstrap: the launcher puts the key (and optionally a build error) in the
 // URL fragment. Move both into sessionStorage and strip the fragment so the key
@@ -118,8 +175,21 @@ DM.route = async function () {
   document.getElementById('badges').textContent = '';
   var view = DM.views[name];
   if (!view) return DM.note(main, 'Page not found.');
+  var sf = name === 'sym' || name === 'flow';
+  // An empty #/sym/ or #/flow/ resolves to the last symbol in the trail.
+  if (sf && !arg) {
+    arg = DM.lastSym();
+    if (arg) history.replaceState(null, '', (name === 'sym' ? DM.symHash : DM.flowHash)(arg));
+  }
+  ['map', 'sym', 'flow'].forEach(function (n) {
+    var tab = document.getElementById('tab-' + n);
+    if (n === (sf ? name : 'map')) tab.setAttribute('aria-current', 'page');
+    else tab.removeAttribute('aria-current');
+  });
+  DM.renderTrail(sf ? arg : '');
+  if (name === 'search') document.getElementById('q').value = arg;
+  if (sf && !arg) return DM.note(main, 'Search or pick a symbol from the Map.');
   DM.note(main, 'Loading…');
-  if (DM.trailPush) DM.trailPush(name, arg);
   try {
     await view({ main: main, arg: arg, alive: function () { return t === DM.seq; } });
   } catch (err) {
@@ -135,6 +205,24 @@ document.addEventListener('DOMContentLoaded', function () {
     if (detail) banner.append(DM.el('code', null, detail));
     banner.hidden = false;
   }
+  document.getElementById('clear').addEventListener('click', function () {
+    sessionStorage.setItem('dm.trail', '[]');
+    DM.renderTrail('');
+  });
+  // Search box: Enter searches, Escape leaves; "/" anywhere else focuses it.
+  var q = document.getElementById('q');
+  q.addEventListener('keydown', function (e) {
+    var v = q.value.trim();
+    if (e.key === 'Enter' && v) location.hash = '#/search/' + encodeURIComponent(v);
+    else if (e.key === 'Escape') q.blur();
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.target.isContentEditable || (e.target.closest && e.target.closest('input, select, textarea'))) return;
+    e.preventDefault();
+    q.focus();
+    q.select();
+  });
   window.addEventListener('hashchange', DM.route);
   DM.route();
 });
