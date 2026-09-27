@@ -102,7 +102,6 @@
       DM.el('p', 'muted', stats.join(' · ')), head, cols);
   };
 
-  DM.views.sym = DM.views.flow; // temporary until the Symbol page lands
   DM.stubList = stubList;
 
   // ---- search ----

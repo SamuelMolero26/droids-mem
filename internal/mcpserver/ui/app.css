@@ -112,3 +112,40 @@ svg .node text { fill: var(--fg); font-size: 11px; pointer-events: none; }
   .flow { flex-direction: column; }
   .col { width: 100%; }
 }
+
+/* Symbol page: three panes; DOM order is detail, callers, calls. */
+.sym {
+  flex: 1 1 0; min-height: 0; display: grid; gap: 0;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr) minmax(220px, 280px);
+  grid-template-areas: "callers detail calls";
+}
+.pane { min-height: 0; overflow: auto; padding: 0 16px 16px; border-left: 1px solid var(--rule); }
+.pane:focus-within { border-left-color: var(--accent); }
+.pane.callers { grid-area: callers; border-left: 0; }
+.pane.detail { grid-area: detail; }
+.pane.calls { grid-area: calls; }
+.pane-h { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 12px 0 8px; }
+.pane-h h2 { margin: 0; font: 600 13px var(--sans); }
+.pane-h a { font-size: 12px; color: var(--muted); }
+.grp-h { display: flex; justify-content: space-between; gap: 8px; margin-top: 12px; color: var(--muted); font: 12px var(--mono); }
+.grp-h .path { overflow-wrap: anywhere; }
+details.tests { margin-top: 12px; }
+details.tests summary { cursor: pointer; color: var(--muted); }
+.note { margin: 8px 0; color: var(--muted); font-size: 12px; }
+.detail h1 { display: flex; align-items: center; gap: 10px; margin: 12px 0 4px; font: 600 20px var(--mono); overflow-wrap: anywhere; }
+.detail .meta { margin: 0 0 4px; font: 12.5px var(--mono); }
+.pills { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.detail .sig { max-height: none; }
+.doc { margin: 8px 0; white-space: pre-wrap; }
+.detail hr { margin: 16px 0; border: 0; border-top: 1px solid var(--rule-strong); }
+.src { overflow-x: auto; font: 12.5px/19px var(--mono); color: var(--fg-2); }
+.sl { white-space: pre; min-width: max-content; }
+.ln { position: sticky; left: 0; display: inline-block; min-width: 5ch; margin-right: 12px; text-align: right; color: var(--dim); background: var(--bg); user-select: none; }
+
+@media (max-width: 1199px) {
+  .sym { grid-template-columns: 200px minmax(0, 1fr) 200px; }
+}
+@media (max-width: 899px) {
+  .sym { display: block; flex: none; }
+  .pane { overflow: visible; padding: 0 0 16px; border-left: 0; }
+}
