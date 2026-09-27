@@ -3,7 +3,7 @@
 (function () {
   // DX is the horizontal pitch between packages in a layer, DY the vertical
   // pitch between layers.
-  var W = 180, H = 20, DX = 200, DY = 80, PAD = 16;
+  var W = 200, H = 44, DX = 224, DY = 96, PAD = 16;
 
   // layout assigns a column and row to every package. Same input, same output.
   function layout(nodes, edges) {
@@ -68,7 +68,7 @@
     return { names: names, idx: idx, col: col, row: row, back: back };
   }
 
-  function shorten(s) { return s.length > 28 ? '…' + s.slice(-27) : s; }
+  function shorten(s) { return s.length > 21 ? '…' + s.slice(-20) : s; }
 
   function draw(d, scale, holder) {
     var L = layout(d.packages, d.edges);
@@ -100,10 +100,17 @@
     L.names.forEach(function (name) {
       var p = byName[name], at = pos(name);
       var cls = 'node' + (p.precision === 'syntactic' ? ' syn' : '') + (p.carried ? ' carried' : '');
+      var tags = [];
+      if (p.carried) tags.push('carried');
+      if (p.precision === 'syntactic') tags.push('approx');
       var g = DM.svg('a', { href: DM.pkgHash(name), class: cls },
         DM.svg('title', {}, name + ' — ' + p.symbols + ' symbols' + (p.carried ? ' (carried from earlier build)' : '')),
-        DM.svg('rect', { x: at.x, y: at.y, width: W, height: H, rx: 3 }),
-        DM.svg('text', { x: at.x + 6, y: at.y + 14 }, shorten(name)));
+        DM.svg('rect', { x: at.x, y: at.y, width: W, height: H, rx: 3, class: 'card' }),
+        DM.svg('rect', { x: at.x + 8, y: at.y + 8, width: 16, height: 16, rx: 2, class: 'icon' }),
+        DM.svg('text', { x: at.x + 16, y: at.y + 20, class: 'glyph' }, 'p'),
+        DM.svg('text', { x: at.x + 32, y: at.y + 20, class: 'name' }, shorten(name)),
+        DM.svg('text', { x: at.x + 32, y: at.y + 36, class: 'sub' }, p.symbols + ' symbols'),
+        DM.svg('text', { x: at.x + W - 8, y: at.y + 36, class: 'tag' }, tags.join(' · ')));
       var toggle = function (on) {
         g.classList.toggle('hl', on);
         (incident[name] || []).forEach(function (e) { e.classList.toggle('hl', on); });

@@ -1,21 +1,12 @@
 :root {
-  color-scheme: light dark;
-  --bg: #F7F5F0; --bg-sub: #F1EEE7; --chip: #EFECE5;
-  --fg: #1C1B19; --fg-2: #3D3A35; --muted: #6B665E; --dim: #8F897F;
-  --rule: #DDD8CE; --rule-strong: #1C1B19;
-  --accent: #9E2A3A; --accent-text: #9E2A3A; --focus: #9E2A3A;
-  --warn: #8A5A00; --bad: #B42318;
+  color-scheme: dark;
+  --bg: #0E0E11; --bg-sub: #131317; --chip: #17171C;
+  --fg: #E8E8E8; --fg-2: #C6C6C6; --muted: #8D8D8D; --dim: #6E6E6E;
+  --rule: #1E1E24; --rule-strong: #3A3E49;
+  --accent: #C026D3; --accent-text: #E879F9; --focus: #00DFD8;
+  --warn: #BE986B; --bad: #E05A5F;
   --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0E0E11; --bg-sub: #131317; --chip: #17171C;
-    --fg: #E8E8E8; --fg-2: #C6C6C6; --muted: #8D8D8D; --dim: #6E6E6E;
-    --rule: #1E1E24; --rule-strong: #3A3E49;
-    --accent: #C026D3; --accent-text: #E879F9; --focus: #00DFD8;
-    --warn: #BE986B; --bad: #E05A5F;
-  }
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -90,15 +81,24 @@ li > .sig { padding: 0 4px 0 28px; }
 pre { max-height: 50vh; overflow: auto; padding: 8px; background: var(--bg-sub); border: 1px solid var(--rule); font: 12.5px var(--mono); color: var(--fg-2); }
 
 .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
-.mapbox { flex: 1 1 0; min-height: 0; overflow: auto; border: 1px solid var(--rule); background: var(--bg-sub); }
+.mapbox { flex: 1 1 0; min-height: 0; overflow: auto; display: flex; border: 1px solid var(--rule); background: var(--bg-sub); }
+/* auto margins center the map when it is smaller than the box and, unlike
+   justify-content: center, never clip the start edge when it overflows. */
+.mapbox svg { margin: auto; flex: none; }
 svg .edge { fill: none; stroke: var(--muted); opacity: .45; }
 svg .edge.back { stroke-dasharray: 5 4; }
 svg .edge.hl { stroke: var(--accent); opacity: 1; }
-svg .node rect { fill: var(--bg); stroke: var(--rule-strong); stroke-width: 1; }
-svg .node.syn rect { stroke-dasharray: 4 3; }
-svg .node.carried rect { stroke: var(--warn); stroke-width: 2; }
-svg .node.hl rect { stroke: var(--accent); stroke-width: 2; }
-svg .node text { fill: var(--fg); font-size: 11px; pointer-events: none; }
+svg .node .card { fill: var(--chip); stroke: var(--rule-strong); stroke-width: 1; }
+svg .node.syn .card { stroke-dasharray: 4 3; }
+svg .node.carried .card { stroke: var(--warn); stroke-width: 2; }
+svg .node.hl .card { stroke: var(--focus); stroke-width: 2; }
+svg .node .icon { fill: none; stroke: var(--muted); stroke-width: 1; }
+svg .node.hl .icon { stroke: var(--accent-text); }
+svg .node text { pointer-events: none; }
+svg .node .glyph { fill: var(--muted); font: 10px var(--mono); text-anchor: middle; }
+svg .node .name { fill: var(--fg); font: 12px var(--mono); }
+svg .node .sub { fill: var(--muted); font: 10px var(--mono); }
+svg .node .tag { fill: var(--warn); font: 9px var(--mono); text-anchor: end; }
 
 .flow { display: flex; gap: 12px; align-items: flex-start; overflow-x: auto; }
 .col { min-width: 200px; flex: 1 1 200px; padding: 8px; border: 1px solid var(--rule); background: var(--bg-sub); border-radius: 2px; }
