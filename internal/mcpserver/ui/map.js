@@ -119,6 +119,7 @@
     var syn = d.packages.some(function (p) { return p.precision === 'syntactic'; });
     var carried = d.packages.some(function (p) { return p.carried; });
     DM.setBadges(d.freshness, { syntactic: syn, carried: carried, truncated: d.truncated });
+    DM.setStats(d.stats);
     if (!d.packages.length) {
       return DM.note(ctx.main, 'No indexable symbols' + (d.freshness.empty_reason ? ' (' + d.freshness.empty_reason + ')' : '') + '.');
     }

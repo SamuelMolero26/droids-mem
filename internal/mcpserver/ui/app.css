@@ -39,6 +39,7 @@ h2 { margin: 0 0 8px; font: 600 16px var(--mono); }
 .tabs a:hover { text-decoration: none; color: var(--fg); }
 .tabs a[aria-current="page"] { color: var(--fg); border-bottom-color: var(--accent); }
 .search { flex: 1 1 240px; min-width: 0; max-width: 900px; padding: 6px 10px; background: var(--chip); }
+.stats { margin-left: auto; color: var(--muted); font: 12px var(--mono); white-space: nowrap; }
 
 .trailbar {
   display: flex; align-items: center; gap: 12px; padding: 6px 16px;
@@ -107,6 +108,7 @@ svg .node text { fill: var(--fg); font-size: 11px; pointer-events: none; }
 
 @media (max-width: 900px) {
   .search { flex-basis: 100%; max-width: none; margin-bottom: 8px; }
+  .stats { display: none; }
   .flow { flex-direction: column; }
   .col { width: 100%; }
 }

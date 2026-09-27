@@ -114,6 +114,14 @@ type PkgEdge struct {
 	Calls int    `json:"calls"`
 }
 
+// RepoStats sizes the whole index, tests included — the same totals
+// `graph index` reports.
+type RepoStats struct {
+	Symbols int `json:"symbols"`
+	Edges   int `json:"edges"`
+	Files   int `json:"files"`
+}
+
 // OverviewResponse is the package-level map of one repo.
 type OverviewResponse struct {
 	Repo      string    `json:"repo"`
@@ -121,6 +129,7 @@ type OverviewResponse struct {
 	Packages  []PkgNode `json:"packages"`
 	Edges     []PkgEdge `json:"edges"`
 	Truncated bool      `json:"truncated,omitempty"`
+	Stats     RepoStats `json:"stats"`
 }
 
 // PackageOverview returns packages and the cross-package call counts between
@@ -133,6 +142,12 @@ func (m *Manager) PackageOverview(ctx context.Context, repo string) (*OverviewRe
 	}
 	defer release()
 	resp := &OverviewResponse{Repo: repo, Freshness: fresh, Packages: []PkgNode{}, Edges: []PkgEdge{}}
+
+	if err := conn.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM symbols),
+		(SELECT COUNT(*) FROM edges), (SELECT COUNT(DISTINCT file) FROM symbols)`).Scan(
+		&resp.Stats.Symbols, &resp.Stats.Edges, &resp.Stats.Files); err != nil {
+		return nil, err
+	}
 
 	rows, err := conn.QueryContext(ctx, `SELECT package, COUNT(*), COUNT(CASE WHEN file LIKE '%.go' THEN 1 END)
 		FROM symbols WHERE NOT `+isTestFile+` GROUP BY package
@@ -291,13 +306,13 @@ func (m *Manager) SearchSymbols(ctx context.Context, repo, q string) (*StubsResp
 		return nil
 	}
 
-	if err := add(`SELECT qname, signature, file, line FROM symbols
+	if err := add(`SELECT qname, kind, signature, file, line FROM symbols
 		WHERE name LIKE ? ESCAPE '\' OR name LIKE ? ESCAPE '\' ORDER BY length(name), qname LIMIT ?`,
 		escapeLike(q)+"%", "%."+escapeLike(q)+"%", maxSearchResults); err != nil {
 		return nil, err
 	}
 	if fq := ftsQuery(q); fq != "" && len(resp.Symbols) < maxSearchResults {
-		if err := add(`SELECT s.qname, s.signature, s.file, s.line
+		if err := add(`SELECT s.qname, s.kind, s.signature, s.file, s.line
 			FROM symbols_fts f JOIN symbols s ON s.id = f.rowid
 			WHERE symbols_fts MATCH ? ORDER BY bm25(symbols_fts) LIMIT ?`, fq, maxSearchResults); err != nil {
 			return nil, err
@@ -317,7 +332,7 @@ func (m *Manager) EntryPoints(ctx context.Context, repo string) (*StubsResponse,
 	defer release()
 	resp := &StubsResponse{Repo: repo, Freshness: fresh, Symbols: []Neighbor{}, Hint: entryPointsHint}
 
-	rows, err := conn.QueryContext(ctx, `SELECT s.qname, s.signature, s.file, s.line FROM symbols s
+	rows, err := conn.QueryContext(ctx, `SELECT s.qname, s.kind, s.signature, s.file, s.line FROM symbols s
 		WHERE s.kind IN ('func', 'method') AND NOT `+fmt.Sprintf(testFileOf, "s")+`
 		AND (s.name IN ('main', 'init') OR s.exported = 1 OR lower(s.name) LIKE '%route%')
 		AND NOT EXISTS (SELECT 1 FROM edges e JOIN symbols c ON c.id = e.caller

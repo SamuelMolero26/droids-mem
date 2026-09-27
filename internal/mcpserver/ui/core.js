@@ -165,6 +165,16 @@ DM.setBadges = function (f, o) {
   if (o.truncated) add('info', 'truncated', 'Result was capped');
 };
 
+// setStats fills the header size line from overview.stats; older backends omit
+// it, so a falsy value leaves the slot hidden.
+DM.setStats = function (st) {
+  if (!st) return;
+  sessionStorage.setItem('dm.stats', JSON.stringify(st));
+  var el = document.getElementById('stats');
+  el.textContent = st.symbols + ' symbols · ' + st.edges + ' edges · ' + st.files + ' files';
+  el.hidden = false;
+};
+
 DM.route = async function () {
   var h = location.hash.replace(/^#\/?/, '');
   var i = h.indexOf('/');
@@ -224,5 +234,10 @@ document.addEventListener('DOMContentLoaded', function () {
     q.select();
   });
   window.addEventListener('hashchange', DM.route);
+  // Header stats: the map fills them; elsewhere use the cache or fetch once.
+  var cached = null;
+  try { cached = JSON.parse(sessionStorage.getItem('dm.stats')); } catch (e) { /* stale cache */ }
+  if (cached) DM.setStats(cached);
+  else if (location.hash.replace(/^#\/?/, '')) DM.api('overview').then(function (d) { DM.setStats(d.stats); }, function () {});
   DM.route();
 });
