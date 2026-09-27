@@ -1,7 +1,9 @@
 'use strict';
-// Package map: a deterministic layered layout (callers left, callees right).
+// Package map: a deterministic layered layout (callers on top, callees below).
 (function () {
-  var W = 180, H = 20, DX = 220, DY = 28, PAD = 16;
+  // DX is the horizontal pitch between packages in a layer, DY the vertical
+  // pitch between layers.
+  var W = 180, H = 20, DX = 200, DY = 80, PAD = 16;
 
   // layout assigns a column and row to every package. Same input, same output.
   function layout(nodes, edges) {
@@ -74,18 +76,19 @@
     d.packages.forEach(function (p) { byName[p.name] = p; });
     var maxCol = 0, maxRow = 0;
     L.names.forEach(function (_, i) { maxCol = Math.max(maxCol, L.col[i]); maxRow = Math.max(maxRow, L.row[i]); });
-    var w = PAD * 2 + maxCol * DX + W, h = PAD * 2 + maxRow * DY + H;
+    // A layer (col) is a horizontal band; row is the position within it.
+    var w = PAD * 2 + maxRow * DX + W, h = PAD * 2 + maxCol * DY + H;
     var svg = DM.svg('svg', { viewBox: '0 0 ' + w + ' ' + h, width: w * scale, height: h * scale, role: 'img' });
-    var pos = function (name) { return { x: PAD + L.col[L.idx[name]] * DX, y: PAD + L.row[L.idx[name]] * DY }; };
+    var pos = function (name) { return { x: PAD + L.row[L.idx[name]] * DX, y: PAD + L.col[L.idx[name]] * DY }; };
 
     var incident = {};
     d.edges.forEach(function (e) {
       if (L.idx[e.from] === undefined || L.idx[e.to] === undefined || e.from === e.to) return;
       var a = pos(e.from), b = pos(e.to);
-      var x1 = a.x + W, y1 = a.y + H / 2, x2 = b.x, y2 = b.y + H / 2;
+      var x1 = a.x + W / 2, y1 = a.y + H, x2 = b.x + W / 2, y2 = b.y;
       var isBack = L.back[L.idx[e.from] + ':' + L.idx[e.to]];
       var path = DM.svg('path', {
-        d: 'M' + x1 + ' ' + y1 + ' C' + (x1 + 60) + ' ' + y1 + ' ' + (x2 - 60) + ' ' + y2 + ' ' + x2 + ' ' + y2,
+        d: 'M' + x1 + ' ' + y1 + ' C' + x1 + ' ' + (y1 + 30) + ' ' + x2 + ' ' + (y2 - 30) + ' ' + x2 + ' ' + y2,
         'stroke-width': Math.min(6, 1 + Math.log2(e.calls)),
         class: 'edge' + (isBack ? ' back' : '')
       }, DM.svg('title', {}, e.from + ' → ' + e.to + ' (' + e.calls + ' calls)'));
@@ -131,7 +134,7 @@
     minus.onclick = function () { scale = Math.max(0.25, scale - 0.25); redraw(); };
     var info = d.packages.length + ' packages, ' + d.edges.length + ' edges' +
       (d.truncated ? ' (truncated: largest packages and busiest edges only)' : '') +
-      '. Callers on the left; dashed edges close a cycle. Click a package to open it.';
+      '. Callers on top; dashed edges close a cycle. Click a package to open it.';
     ctx.main.textContent = '';
     ctx.main.append(DM.el('div', 'toolbar', minus, plus, DM.link('#/entry', 'Entry points'), DM.el('span', 'muted', info)), holder);
     redraw();
