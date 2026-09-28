@@ -39,3 +39,6 @@ future.todo
 CONTEXT.mds
 *.local.md
 CONTEXT.md
+
+# ODD feature/task docs (local only)
+odd/
