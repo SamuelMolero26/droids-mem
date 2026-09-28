@@ -44,6 +44,7 @@ User: "I want to add a playwright check for the UI testing framework and package
 - [x] T6 complex-fixture — extend e2e/fixture additively (keep calc+main): 4-link chain cmd/api→auth→store→cache, Store interface, 60-caller fanout sink (neighbors cap 50 → truncation UI), _test.go caller, type/const/var, unexported helper, isolated pkg, Python cycle pair iff indexed. Route: inline. Acceptance: overview shows new pkgs; symbol fanout.Target has callers_total ≥ 60. DONE: 12 pkgs incl. py.cyc_a/b cycle pair; Target callers_total=60/50 rows/truncated; DB.Get via-interface=1; fixture `go build ./...` exit 0.
 - [x] T7 stress-spec — e2e/graph-ui-stress.spec.js: depth-3 flow chain, truncation text, Tests section, type/const no-callers, unexported marker, entrypoints, unknown-route 404, 1-char search, no-match symbol, trail+Clear, map determinism across reload. Route: inline. Acceptance: full suite green, assertions matched to observed API (short names, no invented text). DONE with redirect: symbol/flow expanded (direction filter, step-up link, implementers, Satisfies, ambiguous multi-match via 'Caller'); 2 map-layout tests PARKED as fixme (layout order shifts between runs; isolated-column assumption wrong) — 16 passed, 2 skipped.
 - [x] T9 symbol-flow-spec — e2e/graph-ui-symbol-flow.spec.js: column-scoped flow assertions (column order by depth, per-column neighbors, neighbor click refocus + back, empty side `none`, focus details, focus link to symbol) and symbol detail (meta, pills, signature, doc, numbered source, grouped callers, row click, step down, empty panes, ambiguous name). Harness always rebuilds the binary (cached e2e-bin served stale go:embed UI). Route: inline (1 spec + 1-line helper). DONE: 26 passed, 2 skipped; new spec 30/30 over --repeat-each 3. Mutation check (4 UI breaks: flow links to sym, caller columns ascending, source line +1, step down→up): each caught by the new spec only; the prior 16 tests passed all 4.
+- [x] T10 unpark-map-fixmes — both map `test.fixme`s were test bugs: (a) the determinism test read positions before the async overview draw finished, and its "fresh vs reused daemon" drift matches the stale cached e2e-bin (fixed in T9); (b) the isolate check tested max x, but the top-down layout (960ba40) parks unlinked packages on the bottom layer (max y). Rewritten: wait for all cards, compare across reload, assert callers above callees on every non-back edge; back edge is py.cyc_b → py.cyc_a; isolated on the bottom layer. Route: inline (1 spec). DONE: 28 passed, 0 skipped; map tests 15/15 x2 fresh daemons. Mutation check on map.js (random name order, axes swapped, no back-edge detection, isolates not parked): 4/4 caught.
 - [ ] T8 push-triggers (PENDING USER) — NOT authorized: widen ci.yml push branches vs open draft PR early. Report current behavior + proposal only.
 
 ## Route declaration (trigger evidence)
@@ -56,6 +57,7 @@ User: "I want to add a playwright check for the UI testing framework and package
 
 ## Verification evidence
 - T9: `npx playwright test` → 26 passed, 2 skipped (fixme map layout). Mutation check: 4/4 UI breaks fail the suite.
+- T10: `npx playwright test` → 28 passed, 0 skipped. map.js mutation check: 4/4 caught.
 
 ## Next step
-- T8 push-triggers (user decision); parked map-layout fixmes.
+- T8 push-triggers (user decision).

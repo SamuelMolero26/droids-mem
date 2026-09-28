@@ -1,7 +1,7 @@
 'use strict';
 // Stress suite for the viewer: deep chains, truncation, interface/test
 // callers, no-caller kinds, entrypoints, router edges, trail, and layout
-// determinism. Shares the daemon from global setup (test-results/daemon.json).
+// layout. Shares the daemon from global setup (test-results/daemon.json).
 // Assertion texts below were read off the implementation and the live API —
 // the UI renders short names (Add, not calc.Add), never full qnames.
 const { test, expect } = require('@playwright/test');
@@ -143,41 +143,55 @@ test('trail accumulates visits and Clear resets it', async ({ page }) => {
   await expect(page.locator('#trail')).toBeEmpty();
 });
 
-test.fixme('map layout is deterministic across reloads', async ({ page }) => {
-  // FIXME: layout differs between fresh and reused daemon runs (node order
-  // shifts) and the isolated-column assumption below proved wrong (isolated
-  // x=240 vs max 464). Parked per user redirect to symbol/flow coverage.
-  const positions = () =>
-    page.evaluate(() =>
-      Array.from(document.querySelectorAll('svg a[href^="#/pkg/"]')).map((a) => {
-        const r = a.querySelector('rect.card');
-        return [a.getAttribute('href'), r.getAttribute('x'), r.getAttribute('y')];
-      }),
-    );
+// mapCards waits for every package card, then returns [name, x, y] per card.
+// The map draws after an async overview fetch, so reading before the cards
+// exist returns a partial layout.
+async function mapCards(page) {
+  const { packages } = await api('overview');
+  await expect(page.locator('svg a[href^="#/pkg/"] rect.card')).toHaveCount(packages.length);
+  return page.evaluate(() =>
+    Array.from(document.querySelectorAll('svg a[href^="#/pkg/"]')).map((a) => {
+      const r = a.querySelector('rect.card');
+      return [
+        decodeURIComponent(a.getAttribute('href').slice('#/pkg/'.length)),
+        Number(r.getAttribute('x')),
+        Number(r.getAttribute('y')),
+      ];
+    }),
+  );
+}
+
+test('map layout is deterministic and draws callers above callees', async ({ page }) => {
   await boot(page, '/');
-  const first = await positions();
+  const first = await mapCards(page);
   expect(first.length).toBeGreaterThanOrEqual(10);
   await page.reload();
-  expect(await positions()).toEqual(first);
-});
+  expect(await mapCards(page)).toEqual(first);
 
-test.fixme('map closes the python cycle with a back edge and parks the isolate', async ({
-  page,
-}) => {
-  // FIXME: same as above — parked per user redirect to symbol/flow coverage.
-  await boot(page, '/');
-  // Stroke-only SVG paths report as hidden to Playwright; attached is the
-  // honest assertion for the dashed cycle-closing edge.
-  await expect(page.locator('path.edge.back')).not.toHaveCount(0);
-  await expect(page.locator('#badges')).toContainText('approximate');
-  const cards = await page.evaluate(() =>
-    Array.from(document.querySelectorAll('svg a[href^="#/pkg/"]')).map((a) => [
-      a.getAttribute('href'),
-      Number(a.querySelector('rect.card').getAttribute('x')),
+  const y = Object.fromEntries(first.map(([name, , cy]) => [name, cy]));
+  const edges = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('path.edge')).map((p) => [
+      p.querySelector('title').textContent,
+      p.classList.contains('back'),
     ]),
   );
-  const xs = cards.map(([, x]) => x);
-  const isolated = cards.find(([href]) => href.includes('isolated'));
-  expect(isolated, 'isolated package card').toBeTruthy();
-  expect(isolated[1]).toBe(Math.max(...xs));
+  expect(edges.length).toBeGreaterThan(0);
+  for (const [title, back] of edges) {
+    if (back) continue;
+    const [from, to] = title.replace(/ \(.*$/, '').split(' → ');
+    expect(y[from], `${from} above ${to}`).toBeLessThan(y[to]);
+  }
+});
+
+test('map closes the python cycle with a back edge and parks the isolate', async ({ page }) => {
+  await boot(page, '/');
+  const cards = await mapCards(page);
+  // Stroke-only SVG paths report as hidden to Playwright; assert via text.
+  await expect(page.locator('path.edge.back > title')).toHaveText([/^py\.cyc_b → py\.cyc_a /]);
+  await expect(page.locator('#badges')).toContainText('approximate');
+  // Packages with no cross-package edges share the bottom layer.
+  const maxY = Math.max(...cards.map(([, , cy]) => cy));
+  const bottom = cards.filter(([, , cy]) => cy === maxY).map(([name]) => name);
+  expect(bottom).toContain('internal/isolated');
+  expect(cards.filter(([name]) => name.startsWith('cmd/')).every(([, , cy]) => cy < maxY)).toBe(true);
 });
