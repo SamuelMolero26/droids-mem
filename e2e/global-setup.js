@@ -1,25 +1,36 @@
 'use strict';
-// Playwright global setup: build once, boot one loopback daemon with an
-// isolated HOME/DB, mint the viewer URL, persist state for specs/teardown.
+// Playwright global setup: mint a real viewer URL via `graph ui` against the
+// daemon webServer booted (it reuses it through ensure-server and prints
+// {status,url,repo}). The UI key rides in the URL fragment (#k=...), which
+// browsers never send, so specs forward it as a Bearer token for /api/graph.
 const fs = require('node:fs');
-const { startDaemon, mintUIUrl, fixtureDir, statePath } = require('./helpers/daemon');
+const path = require('node:path');
+const { execFileSync } = require('node:child_process');
+const { statePath } = require('./helpers/daemon');
 
 module.exports = async function globalSetup() {
-  const started = await startDaemon();
-  const url = mintUIUrl(started, fixtureDir);
-  if (!/\/ui\/#k=v1\./.test(url)) {
-    throw new Error(`unexpected viewer URL shape: ${url.slice(0, 80)}`);
+  const home = process.env.DM_E2E_HOME;
+  const addr = process.env.DM_E2E_ADDR;
+  const fixtureDir = path.join(__dirname, 'fixture');
+  const out = execFileSync(process.env.DM_E2E_BIN, ['graph', 'ui', '--repo', fixtureDir], {
+    env: {
+      ...process.env,
+      DROIDS_MEM_HOME: home,
+      DROIDS_MEM_DB: path.join(home, 'mem.db'),
+      DROIDS_MEM_MCP_ADDR: addr,
+    },
+    cwd: fixtureDir,
+    encoding: 'utf8',
+  });
+  const { url } = JSON.parse(out.slice(out.indexOf('{')));
+  if (!/\/ui\/#k=v1\./.test(url ?? '')) {
+    throw new Error(`unexpected graph ui output: ${out.slice(0, 300)}`);
   }
-  const state = {
-    bin: started.bin,
-    home: started.home,
-    db: started.db,
-    addr: started.addr,
-    pid: started.pid,
-    url,
+  fs.writeFileSync(statePath, JSON.stringify({ addr, url }, null, 2));
+
+  // Teardown: webServer stops the daemon; drop the isolated HOME and state.
+  return async () => {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(statePath, { force: true });
   };
-  fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
-  // eslint-disable-next-line no-console
-  console.log(`[e2e] daemon on ${state.addr}, viewer ready`);
-  return async () => {};
 };
