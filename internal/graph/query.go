@@ -827,7 +827,6 @@ func pathLevel(ctx context.Context, conn *sql.DB, frontier []int64, parent map[i
 type PackageRequest struct {
 	Repo    string
 	Package string // package path or suffix, e.g. "internal/store"
-	NoBuild bool   // see SymbolRequest.NoBuild
 }
 
 // PackageSymbol is one exported symbol's stub in a package surface.
@@ -986,14 +985,12 @@ func (m *Manager) Package(ctx context.Context, req PackageRequest) (*PackageResp
 	if strings.TrimSpace(req.Package) == "" {
 		return nil, fmt.Errorf("package is required: %w", ErrInvalidArgument)
 	}
-	conn, release, fresh, err := m.openFor(ctx, req.Repo, req.NoBuild)
+	conn, release, fresh, err := m.ensureFresh(ctx, req.Repo)
 	if err != nil {
 		return nil, err
 	}
 	defer release() // hold the handle for every statement below, not just the first
-	if !req.NoBuild {
-		m.bump(req.Repo, "package")
-	}
+	m.bump(req.Repo, "package")
 
 	// First tier: exact or suffix (preserves Go and Python leaf behavior).
 	if resolved, err := resolvePackage(ctx, conn, req.Package); err == nil {
