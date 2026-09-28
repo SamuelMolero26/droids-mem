@@ -38,11 +38,8 @@ deep-read any browse-tier item.`,
 			})
 			if err != nil {
 				if ve, ok := errors.AsType[*store.ValidationError](err); ok {
-					suggestion := ve.Suggestion
-					if suggestion == "" {
-						suggestion = "provide --" + ve.Field
-					}
-					writeError("validation_failed", ve.Message, false,
+					code, suggestion, retryable := validationErrorFields(ve, "provide --"+ve.Field)
+					writeError(code, ve.Message, retryable,
 						withField(ve.Field),
 						withSuggestion(suggestion),
 					)

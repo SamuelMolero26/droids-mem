@@ -1,10 +1,35 @@
 package main_test
 
 import (
+	"errors"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// cliStderr runs the binary and returns (stdout, stderr, exitCode). Unlike
+// cli, it never fails the test on a non-zero exit — a validation-error path
+// writes JSON to stderr and exits 2, and the test asserts on that.
+func cliStderr(t *testing.T, dbPath string, args ...string) ([]byte, []byte, int) {
+	t.Helper()
+	cmd := exec.Command(binaryPath, args...)
+	cmd.Env = append(os.Environ(), "DROIDS_MEM_DB="+dbPath)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	code := 0
+	if err != nil {
+		if ee, ok := errors.AsType[*exec.ExitError](err); ok {
+			code = ee.ExitCode()
+		} else {
+			t.Fatalf("cli %v: %v", args, err)
+		}
+	}
+	return []byte(stdout.String()), []byte(stderr.String()), code
+}
 
 // Dry-run must exercise the full save pipeline without persisting anything.
 func TestE2E_DryRunDoesNotPersist(t *testing.T) {
@@ -73,4 +98,28 @@ func TestE2E_ScopeFlag(t *testing.T) {
 		"--task-type", "crm_upload", "--kind", "task_pattern",
 		"--title", "Bad scope", "--what", "w", "--learned", "l",
 		"--scope", "global")
+}
+
+// internal/store/save.go sets Retryable: true on its required-field
+// validators — the CLI must not silently report the opposite.
+func TestE2E_SaveMissingTitleIsRetryable(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "mem.db")
+
+	_, stderr, code := cliStderr(t, dbPath, "save",
+		"--task-type", "crm_upload", "--kind", "task_pattern",
+		"--title", "   ", "--what", "w", "--learned", "l")
+	if code != 2 {
+		t.Fatalf("missing --title exit = %d, want 2 (stderr: %s)", code, stderr)
+	}
+	var env struct {
+		Field     string `json:"field"`
+		Retryable bool   `json:"retryable"`
+	}
+	mustParseJSON(t, stderr, &env)
+	if env.Field != "title" {
+		t.Fatalf("field = %q, want title (stderr: %s)", env.Field, stderr)
+	}
+	if !env.Retryable {
+		t.Fatalf("retryable = false, want true — store.Save sets Retryable: true for a missing --title (stderr: %s)", stderr)
+	}
 }

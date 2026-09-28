@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	"github.com/samuelmolero26/droids-mem/internal/store"
 )
 
 const (
@@ -82,4 +84,21 @@ func withInput(input any) func(*errResponse) {
 
 func withSuggestion(s string) func(*errResponse) {
 	return func(e *errResponse) { e.Suggestion = s }
+}
+
+// validationErrorFields resolves the code/suggestion/retryable a
+// store.ValidationError should render as: its own Code/Suggestion when the
+// store set them, falling back to "validation_failed"/fallbackSuggestion
+// otherwise. Retryable always mirrors the store's own value — every
+// ValidationError sets it explicitly, so there is no fallback for it.
+func validationErrorFields(ve *store.ValidationError, fallbackSuggestion string) (code, suggestion string, retryable bool) {
+	code = ve.Code
+	if code == "" {
+		code = "validation_failed"
+	}
+	suggestion = ve.Suggestion
+	if suggestion == "" {
+		suggestion = fallbackSuggestion
+	}
+	return code, suggestion, ve.Retryable
 }
