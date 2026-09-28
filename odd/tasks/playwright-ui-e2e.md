@@ -46,6 +46,7 @@ User: "I want to add a playwright check for the UI testing framework and package
 
 ## Progress
 - 2026-09-28: doc created, no source writes yet. Engram mirror PENDING (server unavailable, droids-mem mirror saved mem_01M3M8A9Y75Z3N7ZNC6FVZBBXS). Next: T1.
+- 2026-09-28: T1–T5 done. Work-unit commits: 6322fc3 (package scaffold), 8480199 (harness+spec), 6f8577b (CI job). Running count ~461 authored lines (lock excluded) — over the 400 advisory heuristic; no push/PR (user decision). No delivery yet.
 
 ## Verification evidence
 - None yet.
