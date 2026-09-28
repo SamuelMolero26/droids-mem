@@ -38,15 +38,7 @@ deep-read any browse-tier item.`,
 			})
 			if err != nil {
 				if ve, ok := errors.AsType[*store.ValidationError](err); ok {
-					suggestion := ve.Suggestion
-					if suggestion == "" {
-						suggestion = "provide --" + ve.Field
-					}
-					writeError("validation_failed", ve.Message, false,
-						withField(ve.Field),
-						withSuggestion(suggestion),
-					)
-					exitWith(ExitUsage)
+					failValidation(ve, "provide --"+ve.Field)
 				}
 				writeError("context_failed", err.Error(), true)
 				exitWith(ExitError)

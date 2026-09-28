@@ -32,11 +32,7 @@ func newListCmd(a *app) *cobra.Command {
 			})
 			if err != nil {
 				if ve, ok := errors.AsType[*store.ValidationError](err); ok {
-					writeError("validation_failed", ve.Message, false,
-						withField(ve.Field),
-						withSuggestion("check --"+ve.Field+" value"),
-					)
-					exitWith(ExitUsage)
+					failValidation(ve, "check --"+ve.Field+" value")
 				}
 				writeError("list_failed", err.Error(), true)
 				exitWith(ExitError)

@@ -68,12 +68,7 @@ func newSaveCmd(a *app) *cobra.Command {
 						"learned": learned, "tags": tags,
 					}
 					flag := strings.ReplaceAll(ve.Field, "_", "-")
-					writeError("validation_failed", ve.Message, false,
-						withField(ve.Field),
-						withInput(map[string]string{ve.Field: fieldVals[ve.Field]}),
-						withSuggestion("check --"+flag+" value"),
-					)
-					exitWith(ExitUsage)
+					failValidation(ve, "check --"+flag+" value", withInput(map[string]string{ve.Field: fieldVals[ve.Field]}))
 				}
 				writeError("save_failed", err.Error(), true)
 				exitWith(ExitError)
@@ -115,8 +110,7 @@ func previewSave(cmd *cobra.Command, s *store.Store, req store.SaveRequest) erro
 	resp, err := s.Save(cmd.Context(), req)
 	if err != nil {
 		if ve, ok := errors.AsType[*store.ValidationError](err); ok {
-			writeError("validation_failed", ve.Message, false, withField(ve.Field))
-			exitWith(ExitUsage)
+			failValidation(ve, "")
 		}
 		writeError("save_failed", err.Error(), true)
 		exitWith(ExitError)

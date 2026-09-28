@@ -23,11 +23,7 @@ func newGetCmd(a *app) *cobra.Command {
 			mem, err := s.Get(cmd.Context(), id)
 			if err != nil {
 				if ve, ok := errors.AsType[*store.ValidationError](err); ok {
-					writeError("validation_failed", ve.Message, false,
-						withField(ve.Field),
-						withSuggestion("provide --id with a valid mem_ prefixed ID"),
-					)
-					exitWith(ExitUsage)
+					failValidation(ve, "provide --id with a valid mem_ prefixed ID")
 				}
 				writeError("get_failed", err.Error(), true)
 				exitWith(ExitError)

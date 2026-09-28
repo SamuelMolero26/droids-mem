@@ -83,8 +83,7 @@ or consolidate manually.`,
 
 func writePruneError(err error) {
 	if ve, ok := errors.AsType[*store.ValidationError](err); ok {
-		writeError(ve.Code, ve.Message, ve.Retryable, withField(ve.Field), withSuggestion(ve.Suggestion))
-		exitWith(ExitUsage)
+		failValidation(ve, "")
 	}
 	writeError("prune_failed", err.Error(), true)
 	exitWith(ExitError)

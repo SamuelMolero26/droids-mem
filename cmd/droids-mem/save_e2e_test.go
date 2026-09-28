@@ -74,3 +74,27 @@ func TestE2E_ScopeFlag(t *testing.T) {
 		"--title", "Bad scope", "--what", "w", "--learned", "l",
 		"--scope", "global")
 }
+
+// internal/store/save.go sets Retryable: true on its required-field
+// validators — the CLI must not silently report the opposite.
+func TestE2E_SaveMissingTitleIsRetryable(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "mem.db")
+
+	_, stderr, code := runBinary(t, dbPath, "save",
+		"--task-type", "crm_upload", "--kind", "task_pattern",
+		"--title", "   ", "--what", "w", "--learned", "l")
+	if code != 2 {
+		t.Fatalf("missing --title exit = %d, want 2 (stderr: %s)", code, stderr)
+	}
+	var env struct {
+		Field     string `json:"field"`
+		Retryable bool   `json:"retryable"`
+	}
+	mustParseJSON(t, []byte(stderr), &env)
+	if env.Field != "title" {
+		t.Fatalf("field = %q, want title (stderr: %s)", env.Field, stderr)
+	}
+	if !env.Retryable {
+		t.Fatalf("retryable = false, want true — store.Save sets Retryable: true for a missing --title (stderr: %s)", stderr)
+	}
+}
