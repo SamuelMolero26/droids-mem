@@ -57,7 +57,9 @@ function parseJSONOutput(out) {
 }
 
 async function startDaemon() {
-  const bin = fs.existsSync(binPath) ? binPath : buildBinary();
+  // Always rebuild: the UI is go:embed'ed, so a cached binary serves stale
+  // assets after any ui/ edit. go build is incremental, so this is cheap.
+  const bin = buildBinary();
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dm-e2e-home-'));
   const db = path.join(home, 'mem.db');
   const port = await freePort();
