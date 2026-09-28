@@ -1,0 +1,12 @@
+{
+  "name": "droids-mem-ui-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Full-daemon Playwright e2e for the graph viewer UI (feat/graph-ui-redesign)",
+  "scripts": {
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0"
+  }
+}
