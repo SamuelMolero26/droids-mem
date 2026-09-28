@@ -38,12 +38,7 @@ deep-read any browse-tier item.`,
 			})
 			if err != nil {
 				if ve, ok := errors.AsType[*store.ValidationError](err); ok {
-					code, suggestion, retryable := validationErrorFields(ve, "provide --"+ve.Field)
-					writeError(code, ve.Message, retryable,
-						withField(ve.Field),
-						withSuggestion(suggestion),
-					)
-					exitWith(ExitUsage)
+					failValidation(ve, "provide --"+ve.Field)
 				}
 				writeError("context_failed", err.Error(), true)
 				exitWith(ExitError)

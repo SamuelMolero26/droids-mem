@@ -86,19 +86,22 @@ func withSuggestion(s string) func(*errResponse) {
 	return func(e *errResponse) { e.Suggestion = s }
 }
 
-// validationErrorFields resolves the code/suggestion/retryable a
-// store.ValidationError should render as: its own Code/Suggestion when the
-// store set them, falling back to "validation_failed"/fallbackSuggestion
-// otherwise. Retryable always mirrors the store's own value — every
-// ValidationError sets it explicitly, so there is no fallback for it.
-func validationErrorFields(ve *store.ValidationError, fallbackSuggestion string) (code, suggestion string, retryable bool) {
-	code = ve.Code
+// failValidation writes ve as a usage error and exits. Retryable has no
+// fallback: every store ValidationError sets it.
+func failValidation(ve *store.ValidationError, fallbackSuggestion string, extra ...func(*errResponse)) {
+	code, suggestion := validationErrorFields(ve, fallbackSuggestion)
+	opts := append([]func(*errResponse){withField(ve.Field), withSuggestion(suggestion)}, extra...)
+	writeError(code, ve.Message, ve.Retryable, opts...)
+	exitWith(ExitUsage)
+}
+
+func validationErrorFields(ve *store.ValidationError, fallbackSuggestion string) (code, suggestion string) {
+	code, suggestion = ve.Code, ve.Suggestion
 	if code == "" {
 		code = "validation_failed"
 	}
-	suggestion = ve.Suggestion
 	if suggestion == "" {
 		suggestion = fallbackSuggestion
 	}
-	return code, suggestion, ve.Retryable
+	return code, suggestion
 }
