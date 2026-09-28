@@ -257,7 +257,7 @@ func shareRepo() string {
 }
 
 // identityHandler answers a challenge–response proof of token knowledge:
-// GET /identity?nonce=<client nonce> → {"server", "proof", "version", "pid", "pid_proof"}.
+// GET /identity?nonce=<client nonce> → {"server", "proof", "version", "pid", "pid_proof", "ui"}.
 // Unauthenticated by design — the proofs reveal nothing about the token, and
 // they let ensure-server verify that whatever answers on this port actually
 // holds the shared token before reporting "already_running" (anti
@@ -266,6 +266,12 @@ func shareRepo() string {
 // "proof" answers "does this listener hold the token"; "pid_proof" additionally
 // answers "which process is it", which a caller about to send a signal needs
 // and the token alone cannot establish.
+//
+// "ui" says this build ships the graph viewer. Local builds all report version
+// "dev", so it is what tells ensure-server that a daemon left running from an
+// older checkout lacks /ui/. It is a property of the build, not of whether the
+// viewer is mounted on this bind, so a non-loopback daemon is not replaced on
+// every call.
 func identityHandler(token, version string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		nonce := r.URL.Query().Get("nonce")
@@ -275,7 +281,7 @@ func identityHandler(token, version string) http.HandlerFunc {
 		}
 		pid := os.Getpid()
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"server":%q,"proof":%q,"version":%q,"pid":%d,"pid_proof":%q}`,
+		fmt.Fprintf(w, `{"server":%q,"proof":%q,"version":%q,"pid":%d,"pid_proof":%q,"ui":true}`,
 			ServerName, IdentityProof(token, nonce), version, pid,
 			IdentityPidProof(token, nonce, pid))
 	}
