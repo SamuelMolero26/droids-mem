@@ -1,0 +1,243 @@
+'use strict';
+// Shared plumbing: session bootstrap, API client, router, badges. Every view
+// renders through textContent / text nodes only (CSP forbids inline script and
+// style, and nothing here builds markup from strings).
+var DM = window.DM = { views: {}, seq: 0, opts: { depth: 2, dir: 'both' } };
+
+DM.BUILD_FAILED = 'Latest build failed; showing last good graph (may be stale). ' +
+  'Fix the error and re-run droids-mem graph ui to retry.';
+
+// el(tag, className, ...children): strings become text nodes, null is skipped.
+DM.el = function (tag, cls) {
+  var e = document.createElement(tag);
+  if (cls) e.className = cls;
+  for (var i = 2; i < arguments.length; i++) {
+    var k = arguments[i];
+    if (k == null) continue;
+    e.append(typeof k === 'object' ? k : document.createTextNode(String(k)));
+  }
+  return e;
+};
+
+DM.svg = function (tag, attrs) {
+  var e = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (var a in attrs) e.setAttribute(a, attrs[a]);
+  for (var i = 2; i < arguments.length; i++) {
+    var k = arguments[i];
+    e.append(typeof k === 'object' ? k : document.createTextNode(String(k)));
+  }
+  return e;
+};
+
+DM.link = function (hash, text, cls) {
+  var a = DM.el('a', cls, text);
+  a.href = hash;
+  return a;
+};
+DM.pkgHash = function (name) { return '#/pkg/' + encodeURIComponent(name); };
+DM.symHash = function (qname) { return '#/sym/' + encodeURIComponent(qname); };
+DM.flowHash = function (qname) { return '#/flow/' + encodeURIComponent(qname); };
+
+// Short display name. Mapper qnames are "<module>:<Container.name>", Go qnames
+// are "<import path>.<Name or Recv.Method>"; the full qname stays in a title.
+DM.short = function (q) {
+  var i = q.lastIndexOf(':');
+  if (i >= 0) return q.slice(i + 1);
+  var s = q.slice(q.lastIndexOf('/') + 1), j = s.indexOf('.');
+  return j >= 0 ? s.slice(j + 1) : s;
+};
+
+// Kind badge: a small outlined square with one glyph; unknown kinds show "·".
+var KIND = { func: 'ƒ', method: 'm', constructor: 'm', class: 'C', interface: 'I', type: 'T', const: 'c', var: 'v' };
+DM.kindBadge = function (kind) {
+  var b = DM.el('span', 'kb', KIND[kind] || '·');
+  b.setAttribute('role', 'img');
+  b.setAttribute('aria-label', kind || 'unknown kind');
+  b.title = kind || 'unknown kind';
+  return b;
+};
+
+// Row: the whole row is one link to the symbol; meta is plain muted text.
+DM.row = function (n, meta) {
+  var a = DM.link(DM.symHash(n.qname), null, 'row');
+  a.title = n.qname;
+  a.append(DM.kindBadge(n.kind), DM.el('span', 'nm', DM.short(n.qname)), meta ? DM.el('span', 'meta', meta) : null);
+  return a;
+};
+
+// ---- trail: symbols opened this browser session, most recent last ----
+var TRAIL_MAX = 50;
+DM.trail = function () {
+  var t;
+  try { t = JSON.parse(sessionStorage.getItem('dm.trail')); } catch (e) { t = null; }
+  return Array.isArray(t) ? t.filter(function (c) { return c && typeof c.q === 'string'; }) : [];
+};
+DM.lastSym = function () {
+  var t = DM.trail();
+  return t.length ? t[t.length - 1].q : '';
+};
+DM.renderTrail = function (activeQ) {
+  var box = document.getElementById('trail');
+  box.textContent = '';
+  DM.trail().forEach(function (c) {
+    var a = DM.link(DM.symHash(c.q), null, 'chip');
+    a.title = c.q;
+    a.append(DM.kindBadge(c.k), DM.short(c.q));
+    if (c.q === activeQ) a.setAttribute('aria-current', 'true');
+    box.append(a);
+  });
+};
+DM.trailPush = function (q, kind) {
+  var t = DM.trail().filter(function (c) { return c.q !== q; });
+  t.push({ q: q, k: kind });
+  sessionStorage.setItem('dm.trail', JSON.stringify(t.slice(-TRAIL_MAX)));
+  DM.renderTrail(q);
+};
+
+// Bootstrap: the launcher puts the key (and optionally a build error) in the
+// URL fragment. Move both into sessionStorage and strip the fragment so the key
+// does not linger in history or get copied from the address bar.
+(function bootstrap() {
+  if (location.hash.indexOf('#k=') !== 0) return;
+  var p = new URLSearchParams(location.hash.slice(1));
+  sessionStorage.setItem('dm.key', p.get('k') || '');
+  sessionStorage.removeItem('dm.err');
+  var e = p.get('err');
+  if (e) {
+    try {
+      var bin = atob(e.replace(/-/g, '+').replace(/_/g, '/'));
+      sessionStorage.setItem('dm.err', new TextDecoder().decode(Uint8Array.from(bin, function (c) { return c.charCodeAt(0); })));
+    } catch (x) {
+      sessionStorage.setItem('dm.err', '');
+    }
+  }
+  history.replaceState(null, '', location.pathname + location.search + '#/');
+})();
+
+DM.api = async function (path, params) {
+  var key = sessionStorage.getItem('dm.key');
+  if (!key) {
+    var none = new Error('no session key');
+    none.status = 401;
+    throw none;
+  }
+  var qs = params ? '?' + new URLSearchParams(params) : '';
+  var r = await fetch('/api/graph/' + path + qs, { headers: { Authorization: 'Bearer ' + key } });
+  var body = null;
+  try { body = await r.json(); } catch (x) { /* non-JSON error body */ }
+  if (!r.ok) {
+    var err = new Error((body && body.error) || r.statusText);
+    err.status = r.status;
+    throw err;
+  }
+  return body;
+};
+
+DM.showError = function (main, err) {
+  var msg = err.message;
+  if (err.status === 401) msg = 'Session expired — re-run droids-mem graph ui';
+  else if (err.status === 404) msg = msg + '. If this repo has not been indexed yet, run droids-mem graph ui.';
+  main.textContent = '';
+  main.append(DM.el('p', 'state error', msg));
+};
+
+DM.note = function (main, text) {
+  main.textContent = '';
+  main.append(DM.el('p', 'state', text));
+};
+
+// setBadges renders freshness/precision signals. o: {syntactic, carried, truncated}.
+DM.setBadges = function (f, o) {
+  var box = document.getElementById('badges');
+  box.textContent = '';
+  var add = function (cls, text, title) {
+    var b = DM.el('span', 'badge ' + cls, text);
+    if (title) b.title = title;
+    box.append(b);
+  };
+  o = o || {};
+  f = f || {};
+  if (o.syntactic) add('warn', 'approximate', 'Heuristic (syntactic) edges, not type-checked');
+  if (f.stale) add('warn', 'stale', 'Sources changed since the graph was built');
+  if (f.rebuilding) add('info', 'rebuilding');
+  if (o.carried || f.stale_units_total) add('warn', 'carried', 'Some packages use edges carried from an earlier build');
+  if (f.index_error) add('bad', 'index error', f.index_error);
+  if (o.truncated) add('info', 'truncated', 'Result was capped');
+};
+
+// setStats fills the header size line from overview.stats; older backends omit
+// it, so a falsy value leaves the slot hidden.
+DM.setStats = function (st) {
+  if (!st) return;
+  sessionStorage.setItem('dm.stats', JSON.stringify(st));
+  var el = document.getElementById('stats');
+  el.textContent = st.symbols + ' symbols · ' + st.edges + ' edges · ' + st.files + ' files';
+  el.hidden = false;
+};
+
+DM.route = async function () {
+  var h = location.hash.replace(/^#\/?/, '');
+  var i = h.indexOf('/');
+  var name = (i < 0 ? h : h.slice(0, i)) || 'map';
+  var arg = i < 0 ? '' : decodeURIComponent(h.slice(i + 1));
+  var t = ++DM.seq;
+  var main = document.getElementById('view');
+  document.getElementById('badges').textContent = '';
+  var view = DM.views[name];
+  if (!view) return DM.note(main, 'Page not found.');
+  var sf = name === 'sym' || name === 'flow';
+  // An empty #/sym/ or #/flow/ resolves to the last symbol in the trail.
+  if (sf && !arg) {
+    arg = DM.lastSym();
+    if (arg) history.replaceState(null, '', (name === 'sym' ? DM.symHash : DM.flowHash)(arg));
+  }
+  ['map', 'sym', 'flow'].forEach(function (n) {
+    var tab = document.getElementById('tab-' + n);
+    if (n === (sf ? name : 'map')) tab.setAttribute('aria-current', 'page');
+    else tab.removeAttribute('aria-current');
+  });
+  DM.renderTrail(sf ? arg : '');
+  if (name === 'search') document.getElementById('q').value = arg;
+  if (sf && !arg) return DM.note(main, 'Search or pick a symbol from the Map.');
+  DM.note(main, 'Loading…');
+  try {
+    await view({ main: main, arg: arg, alive: function () { return t === DM.seq; } });
+  } catch (err) {
+    if (t === DM.seq) DM.showError(main, err);
+  }
+};
+
+document.addEventListener('DOMContentLoaded', function () {
+  var banner = document.getElementById('banner');
+  var detail = sessionStorage.getItem('dm.err');
+  if (detail !== null) {
+    banner.textContent = DM.BUILD_FAILED;
+    if (detail) banner.append(DM.el('code', null, detail));
+    banner.hidden = false;
+  }
+  document.getElementById('clear').addEventListener('click', function () {
+    sessionStorage.setItem('dm.trail', '[]');
+    DM.renderTrail('');
+  });
+  // Search box: Enter searches, Escape leaves; "/" anywhere else focuses it.
+  var q = document.getElementById('q');
+  q.addEventListener('keydown', function (e) {
+    var v = q.value.trim();
+    if (e.key === 'Enter' && v) location.hash = '#/search/' + encodeURIComponent(v);
+    else if (e.key === 'Escape') q.blur();
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.target.isContentEditable || (e.target.closest && e.target.closest('input, select, textarea'))) return;
+    e.preventDefault();
+    q.focus();
+    q.select();
+  });
+  window.addEventListener('hashchange', DM.route);
+  // Header stats: the map fills them; elsewhere use the cache or fetch once.
+  var cached = null;
+  try { cached = JSON.parse(sessionStorage.getItem('dm.stats')); } catch (e) { /* stale cache */ }
+  if (cached) DM.setStats(cached);
+  else if (location.hash.replace(/^#\/?/, '')) DM.api('overview').then(function (d) { DM.setStats(d.stats); }, function () {});
+  DM.route();
+});

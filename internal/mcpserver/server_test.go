@@ -126,13 +126,14 @@ func TestIdentityHandler(t *testing.T) {
 			Version  string `json:"version"`
 			Pid      int    `json:"pid"`
 			PidProof string `json:"pid_proof"`
+			UI       bool   `json:"ui"`
 		}
 		var got identity
 		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 			t.Fatalf("decode body %q: %v", rec.Body.String(), err)
 		}
 		want := identity{ServerName, IdentityProof(token, "n1"), "v9.9.9",
-			os.Getpid(), IdentityPidProof(token, "n1", os.Getpid())}
+			os.Getpid(), IdentityPidProof(token, "n1", os.Getpid()), true}
 		if got != want {
 			t.Errorf("identity = %+v, want %+v", got, want)
 		}

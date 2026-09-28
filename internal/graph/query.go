@@ -101,6 +101,9 @@ type SymbolRequest struct {
 	To        string // optional path target
 	NoSource  bool   // omit the symbol's source body
 	NoTests   bool   // drop _test.go neighbors from rows (counts still reported)
+	// NoBuild answers from the graph already on disk and never builds or
+	// rebuilds; an unindexed repo is ErrNotFound. Read-only viewers set it.
+	NoBuild bool
 }
 
 // SymbolInfo is the full always-tier body of the queried symbol.
@@ -113,11 +116,13 @@ type SymbolInfo struct {
 	Signature string `json:"signature"`
 	Doc       string `json:"doc,omitempty"`
 	Source    string `json:"source,omitempty"`
+	Exported  bool   `json:"exported,omitempty"`
 }
 
 // Neighbor is a browse-tier stub: one line of signature, expand by qname.
 type Neighbor struct {
 	QName     string `json:"qname"`
+	Kind      string `json:"kind,omitempty"`
 	Signature string `json:"signature"`
 	File      string `json:"file"`
 	Line      int    `json:"line"`
@@ -259,12 +264,14 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	if strings.TrimSpace(req.Symbol) == "" {
 		return nil, fmt.Errorf("symbol is required: %w", ErrInvalidArgument)
 	}
-	conn, release, fresh, err := m.ensureFresh(ctx, req.Repo)
+	conn, release, fresh, err := m.openFor(ctx, req.Repo, req.NoBuild)
 	if err != nil {
 		return nil, err
 	}
 	defer release() // hold the handle for every statement below, not just the first
-	m.bump(req.Repo, "symbol")
+	if !req.NoBuild {
+		m.bump(req.Repo, "symbol")
+	}
 	resp := &SymbolResponse{Repo: req.Repo, Freshness: fresh, Hint: expandHint}
 	if fresh.Stale {
 		resp.Hint = staleGraphHint + "; " + expandHint
@@ -297,10 +304,10 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	var info SymbolInfo
 	var id int64
 	err = conn.QueryRowContext(ctx, `SELECT id, qname, kind, package, file, line, signature, doc,
-		CASE WHEN ? THEN '' ELSE source END
+		CASE WHEN ? THEN '' ELSE source END, exported
 		FROM symbols WHERE qname = ?`, req.NoSource, rows[0].QName).Scan(
 		&id, &info.QName, &info.Kind, &info.Package, &info.File, &info.Line,
-		&info.Signature, &info.Doc, &info.Source)
+		&info.Signature, &info.Doc, &info.Source, &info.Exported)
 	if err != nil {
 		return nil, err
 	}
@@ -513,7 +520,7 @@ func findSymbol(ctx context.Context, conn *sql.DB, name string) ([]Neighbor, err
 		{"qname LIKE ? ESCAPE '\\'", "%:" + escapedSuffix},
 	}
 	for _, q := range queries {
-		rows, err := conn.QueryContext(ctx, `SELECT qname, signature, file, line FROM symbols
+		rows, err := conn.QueryContext(ctx, `SELECT qname, kind, signature, file, line FROM symbols
 			WHERE `+q.where+` ORDER BY qname LIMIT ?`, q.arg, maxMatches+1) // #nosec G202 -- where clauses are compile-time constants above
 		if err != nil {
 			return nil, err
@@ -540,7 +547,7 @@ func searchSymbols(ctx context.Context, conn *sql.DB, task string) ([]Neighbor, 
 	if q == "" {
 		return nil, nil
 	}
-	rows, err := conn.QueryContext(ctx, `SELECT s.qname, s.signature, s.file, s.line
+	rows, err := conn.QueryContext(ctx, `SELECT s.qname, s.kind, s.signature, s.file, s.line
 		FROM symbols_fts f JOIN symbols s ON s.id = f.rowid
 		WHERE symbols_fts MATCH ? ORDER BY bm25(symbols_fts) LIMIT ?`, q, maxSeeds)
 	if err != nil {
@@ -598,7 +605,7 @@ func implementers(ctx context.Context, conn *sql.DB, id int64) (rows []Neighbor,
 	if err = conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM implements WHERE iface = ?`, id).Scan(&total); err != nil {
 		return nil, 0, false, err
 	}
-	r, err := conn.QueryContext(ctx, `SELECT s.qname, s.signature, s.file, s.line
+	r, err := conn.QueryContext(ctx, `SELECT s.qname, s.kind, s.signature, s.file, s.line
 		FROM implements i JOIN symbols s ON s.id = i.impl
 		WHERE i.iface = ? ORDER BY s.qname LIMIT ?`, id, maxNeighbors+1)
 	if err != nil {
@@ -620,7 +627,7 @@ func implementers(ctx context.Context, conn *sql.DB, id int64) (rows []Neighbor,
 // maxNeighbors with a truncation flag; no total (a type satisfies few
 // interfaces, never near the cap, so the shown list is its own count).
 func satisfies(ctx context.Context, conn *sql.DB, id int64) (rows []Neighbor, truncated bool, err error) {
-	r, err := conn.QueryContext(ctx, `SELECT s.qname, s.signature, s.file, s.line
+	r, err := conn.QueryContext(ctx, `SELECT s.qname, s.kind, s.signature, s.file, s.line
 		FROM implements i JOIN symbols s ON s.id = i.iface
 		WHERE i.impl = ? ORDER BY s.qname LIMIT ?`, id, maxNeighbors+1)
 	if err != nil {
@@ -642,7 +649,7 @@ func scanNeighbors(rows *sql.Rows, depth int) ([]Neighbor, error) {
 	var out []Neighbor
 	for rows.Next() {
 		var n Neighbor
-		if err := rows.Scan(&n.QName, &n.Signature, &n.File, &n.Line); err != nil {
+		if err := rows.Scan(&n.QName, &n.Kind, &n.Signature, &n.File, &n.Line); err != nil {
 			return nil, err
 		}
 		n.Depth = depth
@@ -691,7 +698,7 @@ func neighborLevel(ctx context.Context, conn *sql.DB, from, to string, frontier 
 	// frontier IN placeholders — positional order must match (issue #49).
 	// noTests filters at the row source so the cap is spent on production
 	// neighbors only; its arg sits between the IN list and startPkg.
-	rows, err := conn.QueryContext(ctx, fmt.Sprintf(`SELECT DISTINCT s.id, s.qname, s.signature, s.file, s.line
+	rows, err := conn.QueryContext(ctx, fmt.Sprintf(`SELECT DISTINCT s.id, s.qname, s.kind, s.signature, s.file, s.line
 		FROM edges e JOIN symbols s ON s.id = e.%s
 		WHERE e.%s IN (%s) AND (NOT ? OR s.file NOT LIKE '%%\_test.go' ESCAPE '\')
 		ORDER BY (s.file LIKE '%%\_test.go' ESCAPE '\'), (s.package != ?), s.qname`, to, from, placeholders(len(frontier))),
@@ -703,7 +710,7 @@ func neighborLevel(ctx context.Context, conn *sql.DB, from, to string, frontier 
 	for rows.Next() {
 		var id int64
 		var n Neighbor
-		if err := rows.Scan(&id, &n.QName, &n.Signature, &n.File, &n.Line); err != nil {
+		if err := rows.Scan(&id, &n.QName, &n.Kind, &n.Signature, &n.File, &n.Line); err != nil {
 			return nil, false, err
 		}
 		if seen[id] {
@@ -782,8 +789,8 @@ func callPath(ctx context.Context, conn *sql.DB, start int64, targetQName string
 	out := make([]Neighbor, 0, len(ids))
 	for i, id := range ids {
 		var n Neighbor
-		if err := conn.QueryRowContext(ctx, `SELECT qname, signature, file, line FROM symbols
-			WHERE id = ?`, id).Scan(&n.QName, &n.Signature, &n.File, &n.Line); err != nil {
+		if err := conn.QueryRowContext(ctx, `SELECT qname, kind, signature, file, line FROM symbols
+			WHERE id = ?`, id).Scan(&n.QName, &n.Kind, &n.Signature, &n.File, &n.Line); err != nil {
 			return nil, err
 		}
 		n.Depth = i

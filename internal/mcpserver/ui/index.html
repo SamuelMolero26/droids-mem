@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>droids-mem graph</title>
+<link rel="stylesheet" href="app.css">
+<script defer src="core.js"></script>
+<script defer src="map.js"></script>
+<script defer src="views.js"></script>
+<script defer src="symbol.js"></script>
+</head>
+<body>
+<header class="top">
+  <strong class="brand">droids-mem graph</strong>
+  <nav class="tabs">
+    <a id="tab-map" href="#/">Map</a>
+    <a id="tab-sym" href="#/sym/">Symbol</a>
+    <a id="tab-flow" href="#/flow/">Flow</a>
+  </nav>
+  <label class="vh" for="q">Search symbols</label>
+  <input id="q" class="search" type="search" placeholder="Search a symbol — press / to focus" aria-keyshortcuts="/" autocomplete="off">
+  <span id="stats" class="stats" hidden></span>
+</header>
+<div class="trailbar">
+  <span class="muted">Trail</span>
+  <div id="trail"></div>
+  <div id="badges"></div>
+  <button id="clear" type="button">Clear</button>
+</div>
+<div id="banner" class="banner" hidden></div>
+<main id="view"></main>
+</body>
+</html>
