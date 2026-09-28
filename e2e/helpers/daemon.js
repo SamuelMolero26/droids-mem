@@ -86,12 +86,10 @@ async function startDaemon() {
   }
   if (dead) throw new Error('daemon exited before health check passed');
   const state = { bin, home, db, addr, pid: proc.pid };
+  // The process object cannot cross into teardown; teardown signals by pid.
   proc.unref();
-  // Keep the handle reachable for teardown via state + pid; the process
-  // object itself cannot cross into teardown, so teardown signals by pid.
-  startDaemon.proc = proc;
   fs.writeFileSync(statePath, JSON.stringify({ ...state, url: null }, null, 2));
-  return { ...state, proc, env };
+  return state;
 }
 
 function mintUIUrl(state, repoDir) {
@@ -119,14 +117,9 @@ function readState() {
 }
 
 module.exports = {
-  repoRoot,
-  resultsDir,
-  binPath,
   statePath,
   fixtureDir: path.join(repoRoot, 'e2e', 'fixture'),
-  buildBinary,
   startDaemon,
   mintUIUrl,
   readState,
-  waitForHealth,
 };
