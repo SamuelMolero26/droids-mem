@@ -26,6 +26,12 @@ Thumbs.db
 *.swp
 *.swo
 
+# Node / Playwright e2e (root package.json; embed root internal/mcpserver/ui/ stays clean)
+node_modules/
+test-results/
+playwright-report/
+playwright/.cache/
+
 # Documentation and files 
 /docs/
 /files/
@@ -33,3 +39,6 @@ future.todo
 CONTEXT.mds
 *.local.md
 CONTEXT.md
+
+# ODD feature/task docs (local only)
+odd/
