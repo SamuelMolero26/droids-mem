@@ -9,11 +9,11 @@ import (
 	"github.com/samuelmolero26/droids-mem/internal/store"
 )
 
-// TestSearch_SurfacesNeedsReviewAndPinned is the [GUARD] for Phase 2: the
-// SearchResult projection must carry needs_review/pinned too (D2 — search
+// TestSearch_SurfacesNeedsReview is the [GUARD] for Phase 2: the
+// SearchResult projection must carry needs_review too (D2 — search
 // consumers still want the trust signal), computed the same audit-only way
 // as Context (D4): it never changes BM25 rank order, only adds the fields.
-func TestSearch_SurfacesNeedsReviewAndPinned(t *testing.T) {
+func TestSearch_SurfacesNeedsReview(t *testing.T) {
 	s, conn := newTestStoreWithConn(t)
 	taskType := "lifecycle_search"
 
@@ -29,10 +29,6 @@ func TestSearch_SurfacesNeedsReviewAndPinned(t *testing.T) {
 		TaskType: taskType, Kind: "error_resolution",
 		Title: "Phone mapping bug", What: "field mismatch", Learned: "map phone field", Tags: "phone",
 	})
-	pinnedID := saveAndGetID(store.SaveRequest{
-		TaskType: taskType, Kind: "task_pattern",
-		Title: "Pinned pattern", What: "csv normalization", Learned: "normalize csv dates", Tags: "csv",
-	})
 	normalID := saveAndGetID(store.SaveRequest{
 		TaskType: taskType, Kind: "user_rule",
 		Title: "Plain rule", What: "no marks here", Learned: "nothing special", Tags: "plain",
@@ -42,11 +38,8 @@ func TestSearch_SurfacesNeedsReviewAndPinned(t *testing.T) {
 	if _, err := conn.Exec(`UPDATE memories SET review_after = ? WHERE id = ?`, past, needsReviewID); err != nil {
 		t.Fatalf("seed review_after: %v", err)
 	}
-	if _, err := conn.Exec(`UPDATE memories SET pinned = 1 WHERE id = ?`, pinnedID); err != nil {
-		t.Fatalf("seed pinned: %v", err)
-	}
 
-	resp, err := s.Search(context.Background(), store.SearchRequest{Query: "phone csv plain", TaskType: taskType})
+	resp, err := s.Search(context.Background(), store.SearchRequest{Query: "phone plain", TaskType: taskType})
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -63,20 +56,6 @@ func TestSearch_SurfacesNeedsReviewAndPinned(t *testing.T) {
 	if !got.NeedsReview {
 		t.Error("NeedsReview = false, want true")
 	}
-	if got.Pinned {
-		t.Error("Pinned = true, want false")
-	}
-
-	got, ok = byID[pinnedID]
-	if !ok {
-		t.Fatal("expected pinned row in search results")
-	}
-	if !got.Pinned {
-		t.Error("Pinned = false, want true")
-	}
-	if got.NeedsReview {
-		t.Error("NeedsReview = true, want false")
-	}
 
 	got, ok = byID[normalID]
 	if !ok {
@@ -84,9 +63,6 @@ func TestSearch_SurfacesNeedsReviewAndPinned(t *testing.T) {
 	}
 	if got.NeedsReview {
 		t.Error("normal row NeedsReview = true, want false")
-	}
-	if got.Pinned {
-		t.Error("normal row Pinned = true, want false")
 	}
 }
 

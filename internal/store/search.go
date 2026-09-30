@@ -60,11 +60,10 @@ type SearchResult struct {
 	OverlapScore   float64 `json:"overlap_score"` // TokenOverlap(query, title+learned) — 0..1, higher = more literal token overlap
 	ExpandCount    int     `json:"expand_count"`
 	LastExpandedAt int64   `json:"last_expanded_at,omitempty"`
-	// ReviewAfter/Pinned/NeedsReview mirror Memory (inspect.go) — same
+	// ReviewAfter/NeedsReview mirror Memory (inspect.go) — same
 	// nullable-no-COALESCE scan and Go-computed derivation (D4). Audit-only:
 	// never filters or reorders search results (D2), only adds the fields.
 	ReviewAfter *int64 `json:"review_after,omitempty"`
-	Pinned      bool   `json:"pinned"`
 	NeedsReview bool   `json:"needs_review"`
 }
 
@@ -154,7 +153,7 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 	stmt := fmt.Sprintf(`
 		SELECT m.id, m.kind, m.title, m.learned, m.task_type, m.created_at,
 		       bm25(memories_fts, 3, 1, 2, 1) AS rank,
-		       m.expand_count, COALESCE(m.last_expanded_at, 0), m.review_after, m.pinned
+		       m.expand_count, COALESCE(m.last_expanded_at, 0), m.review_after
 		FROM memories_fts fts
 		JOIN memories m ON m.rowid = fts.rowid
 		WHERE %s
@@ -173,7 +172,7 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 		var r SearchResult
 		var reviewAfter sql.NullInt64
 		if err := rows.Scan(&r.ID, &r.Kind, &r.Title, &r.Learned, &r.TaskType, &r.CreatedAt, &r.Score,
-			&r.ExpandCount, &r.LastExpandedAt, &reviewAfter, &r.Pinned); err != nil {
+			&r.ExpandCount, &r.LastExpandedAt, &reviewAfter); err != nil {
 			return nil, fmt.Errorf("scan result: %w", err)
 		}
 		if reviewAfter.Valid {

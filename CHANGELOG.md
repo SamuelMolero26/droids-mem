@@ -39,6 +39,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   repeated qname means two different functions whose container was lost.
   Cached graphs rebuild once (indexer generation 10).
 
+### Removed
+- **The unused `pinned` column and field** (schema v10). Nothing ever wrote it,
+  so every read returned false. `pinned` no longer appears in `mem_search`,
+  `mem_context`, or `list` JSON; `review_after`/`needs_review` are unchanged.
+
 ## [1.3.0-beta.1] — 2026-09-14
 
 Headline: a multi-language code graph with Next.js and JSX awareness, safer

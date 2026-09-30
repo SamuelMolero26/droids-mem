@@ -62,7 +62,7 @@ func TestToCompactSearchResponse(t *testing.T) {
 			{
 				ID: "mem_01", Kind: "task_pattern", Title: "T", Learned: "short lesson",
 				TaskType: "proj", CreatedAt: 123, Score: -1.5, OverlapScore: 0.9,
-				ExpandCount: 3, LastExpandedAt: 456, Pinned: true,
+				ExpandCount: 3, LastExpandedAt: 456,
 			},
 			{
 				ID: "mem_02", Kind: "task_pattern", Title: "S", Learned: "x",
@@ -110,7 +110,7 @@ func TestToCompactSearchResponse(t *testing.T) {
 			t.Errorf("compact row missing %q: %v", want, byID["mem_01"])
 		}
 	}
-	for _, dropped := range []string{"learned", "score", "overlap_score", "expand_count", "created_at", "last_expanded_at"} {
+	for _, dropped := range []string{"learned", "score", "overlap_score", "expand_count", "created_at", "last_expanded_at", "pinned"} {
 		if _, ok := byID["mem_01"][dropped]; ok {
 			t.Errorf("compact row leaks %q: %v", dropped, byID["mem_01"])
 		}
@@ -118,14 +118,8 @@ func TestToCompactSearchResponse(t *testing.T) {
 	if byID["mem_01"]["learned_preview"] != "short lesson" {
 		t.Errorf("preview not applied: %v", byID["mem_01"]["learned_preview"])
 	}
-	if byID["mem_01"]["pinned"] != true {
-		t.Errorf("pinned row lost pinned: %v", byID["mem_01"])
-	}
 	if byID["mem_02"]["needs_review"] != true {
 		t.Errorf("stale row lost needs_review: %v", byID["mem_02"])
-	}
-	if _, ok := byID["mem_03"]["pinned"]; ok {
-		t.Errorf("plain row carries pinned=false: %v", byID["mem_03"])
 	}
 	if _, ok := byID["mem_03"]["needs_review"]; ok {
 		t.Errorf("plain row carries needs_review=false: %v", byID["mem_03"])

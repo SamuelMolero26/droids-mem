@@ -33,7 +33,6 @@ type Memory struct {
 	// sql.NullInt64, never COALESCEd, so a grandfathered NULL row stays nil
 	// here (ADR-0031 D1).
 	ReviewAfter *int64 `json:"review_after,omitempty"`
-	Pinned      bool   `json:"pinned"`
 	// NeedsReview is derived in Go at read time, never stored or SQL-filtered
 	// (D4): ReviewAfter != nil && *ReviewAfter < now. Audit-only — it never
 	// changes which rows are returned or their order.
@@ -102,7 +101,7 @@ func (s *Store) List(ctx context.Context, req ListRequest) (*ListResponse, error
 
 	stmt := fmt.Sprintf(`
 		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at,
-		       expand_count, COALESCE(last_expanded_at, 0), scope, review_after, pinned, authored_at
+		       expand_count, COALESCE(last_expanded_at, 0), scope, review_after, authored_at
 		FROM memories %s
 		ORDER BY created_at DESC, id DESC
 		LIMIT ?
@@ -118,7 +117,7 @@ func (s *Store) List(ctx context.Context, req ListRequest) (*ListResponse, error
 	for rows.Next() {
 		var m Memory
 		var reviewAfter sql.NullInt64
-		if err := rows.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &m.Scope, &reviewAfter, &m.Pinned, &m.AuthoredAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &m.Scope, &reviewAfter, &m.AuthoredAt); err != nil {
 			return nil, fmt.Errorf("scan memory: %w", err)
 		}
 		if reviewAfter.Valid {
@@ -170,7 +169,7 @@ func (s *Store) recent(ctx context.Context, where string, limit int) (*RecentSes
 	//nolint:gosec // where is a package constant, never input
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at,
-		       expand_count, COALESCE(last_expanded_at, 0), review_after, pinned, origin
+		       expand_count, COALESCE(last_expanded_at, 0), review_after, origin
 		FROM memories
 		WHERE `+where+`
 		ORDER BY created_at DESC, id DESC
@@ -185,7 +184,7 @@ func (s *Store) recent(ctx context.Context, where string, limit int) (*RecentSes
 	for rows.Next() {
 		var m Memory
 		var reviewAfter sql.NullInt64
-		if err := rows.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &reviewAfter, &m.Pinned, &m.Origin); err != nil {
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &reviewAfter, &m.Origin); err != nil {
 			return nil, fmt.Errorf("scan session: %w", err)
 		}
 		if reviewAfter.Valid {
@@ -214,9 +213,9 @@ func (s *Store) GetRow(ctx context.Context, id string) (*Memory, error) {
 	var reviewAfter sql.NullInt64
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at,
-		       expand_count, COALESCE(last_expanded_at, 0), scope, review_after, pinned, authored_at
+		       expand_count, COALESCE(last_expanded_at, 0), scope, review_after, authored_at
 		FROM memories WHERE id = ?
-	`, id).Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &m.Scope, &reviewAfter, &m.Pinned, &m.AuthoredAt)
+	`, id).Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &m.Scope, &reviewAfter, &m.AuthoredAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

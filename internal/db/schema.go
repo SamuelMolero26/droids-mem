@@ -44,7 +44,6 @@ CREATE TABLE IF NOT EXISTS memories (
     last_expanded_at      INTEGER,
     origin                TEXT    NOT NULL DEFAULT 'manual' CHECK(origin IN ('manual','auto')),
     review_after          INTEGER,
-    pinned                INTEGER NOT NULL DEFAULT 0,
     authored_at           INTEGER NOT NULL DEFAULT 0,
     CHECK(updated_at >= created_at)
 );
@@ -79,7 +78,6 @@ CREATE TABLE IF NOT EXISTS archived_memories (
     last_expanded_at      INTEGER,
     origin                TEXT    NOT NULL DEFAULT 'manual',
     review_after          INTEGER,
-    pinned                INTEGER NOT NULL DEFAULT 0,
     archived_at           INTEGER NOT NULL,
     authored_at           INTEGER NOT NULL DEFAULT 0
 );
