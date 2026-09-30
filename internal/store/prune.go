@@ -70,51 +70,43 @@ func (s *Store) Prune(ctx context.Context, req PruneRequest) (*PruneResponse, er
 	defer conn.Close()
 
 	// IMMEDIATE so the matched set cannot drift between SELECT and DELETE.
-	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return nil, fmt.Errorf("begin immediate: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+	var resp *PruneResponse
+	err = withTx(ctx, conn, "IMMEDIATE", "prune", func() error {
+		selectSQL := `SELECT id, kind, task_type, title, created_at FROM memories WHERE ` + where + ` ORDER BY created_at, id` // #nosec G202 -- where is built from hardcoded column predicates; values are parameterized
+		rows, err := conn.QueryContext(ctx, selectSQL, args...)
+		if err != nil {
+			return fmt.Errorf("select prune candidates: %w", err)
 		}
-	}()
+		defer rows.Close()
+		matched := []PrunedMemory{}
+		for rows.Next() {
+			var m PrunedMemory
+			if err := rows.Scan(&m.ID, &m.Kind, &m.TaskType, &m.Title, &m.CreatedAt); err != nil {
+				return fmt.Errorf("scan prune candidate: %w", err)
+			}
+			matched = append(matched, m)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("iterate prune candidates: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("close prune candidates: %w", err)
+		}
 
-	selectSQL := `SELECT id, kind, task_type, title, created_at FROM memories WHERE ` + where + ` ORDER BY created_at, id` // #nosec G202 -- where is built from hardcoded column predicates; values are parameterized
-	rows, err := conn.QueryContext(ctx, selectSQL, args...)
+		resp = &PruneResponse{Status: "dry_run", Count: len(matched), Matched: matched}
+		if req.Apply {
+			// FTS stays in sync via the AD trigger — never touch memories_fts here.
+			deleteSQL := `DELETE FROM memories WHERE ` + where // #nosec G202 -- where is built from hardcoded column predicates; values are parameterized
+			if _, err := conn.ExecContext(ctx, deleteSQL, args...); err != nil {
+				return fmt.Errorf("delete pruned rows: %w", err)
+			}
+			resp.Status = "pruned"
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("select prune candidates: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
-	matched := []PrunedMemory{}
-	for rows.Next() {
-		var m PrunedMemory
-		if err := rows.Scan(&m.ID, &m.Kind, &m.TaskType, &m.Title, &m.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan prune candidate: %w", err)
-		}
-		matched = append(matched, m)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate prune candidates: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, fmt.Errorf("close prune candidates: %w", err)
-	}
-
-	resp := &PruneResponse{Status: "dry_run", Count: len(matched), Matched: matched}
-	if req.Apply {
-		// FTS stays in sync via the AD trigger — never touch memories_fts here.
-		deleteSQL := `DELETE FROM memories WHERE ` + where // #nosec G202 -- where is built from hardcoded column predicates; values are parameterized
-		if _, err := conn.ExecContext(ctx, deleteSQL, args...); err != nil {
-			return nil, fmt.Errorf("delete pruned rows: %w", err)
-		}
-		resp.Status = "pruned"
-	}
-
-	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return nil, fmt.Errorf("commit prune: %w", err)
-	}
-	committed = true
 	return resp, nil
 }
 
@@ -355,21 +347,11 @@ func loadDupeRows(ctx context.Context, conn *sql.Conn, req SuggestDupesRequest) 
 	return out, rows.Err()
 }
 
-// dupeQuery builds the same capped, phrase-quoted OR query the save-time
-// near-duplicate check uses (decision #19; operator-keyword quoting per the
-// nearDuplicateConn threat model).
+// dupeQuery builds the same query the save-time near-duplicate check uses.
 func dupeQuery(text string) string {
-	terms := searchTerms(text)
+	terms, _ := dedupeTokens(text)
 	if len(terms) == 0 {
 		return ""
 	}
-	if len(terms) > bm25QueryTermCap {
-		sortTermsByIDF(terms)
-		terms = terms[:bm25QueryTermCap]
-	}
-	quoted := make([]string, len(terms))
-	for i, t := range terms {
-		quoted[i] = `"` + t + `"`
-	}
-	return strings.Join(quoted, " OR ")
+	return ftsOrQuery(terms)
 }

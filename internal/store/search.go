@@ -176,10 +176,7 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 			&r.ExpandCount, &r.LastExpandedAt, &reviewAfter, &r.Pinned); err != nil {
 			return nil, fmt.Errorf("scan result: %w", err)
 		}
-		if reviewAfter.Valid {
-			r.ReviewAfter = &reviewAfter.Int64
-		}
-		r.NeedsReview = needsReview(r.ReviewAfter)
+		r.ReviewAfter, r.NeedsReview = reviewState(reviewAfter)
 		r.OverlapScore = TokenOverlap(req.Query, r.Title+" "+r.Learned)
 		results = append(results, r)
 	}
