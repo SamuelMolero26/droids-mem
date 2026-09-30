@@ -21,6 +21,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   leaving the agent to infer it from `callers_via_interface`.
 
 ### Fixed
+- **`ensure-server` now replaces the daemon when called from a local build.**
+  Every build from source reports version `dev`, so a rebuilt binary kept
+  talking to the previous build's daemon and `graph ui` served stale API and
+  viewer code. A `dev` caller now always restarts the daemon (one restart per
+  call, local builds only); release builds still compare versions. The `ui`
+  field is gone from `/identity`.
+- **Graph viewer symbol flow walks up to depth 5**, the same bound as
+  `graph_symbol`; it was capped at 3. The build-error banner passed through the
+  viewer URL is gone: a failed build opens the last good graph marked stale,
+  and `graph ui` prints the error as `index_error`.
 - **Mapper tier now indexes TypeScript type aliases and Python module-level
   bindings.** `type X = ...` in `.ts`/`.tsx` and every top-level assignment in
   `.py` were missing from `graph_symbol` and `graph_package`, so querying
