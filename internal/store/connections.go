@@ -55,15 +55,7 @@ func (s *Store) Neighbors(ctx context.Context, id string, limit int) ([]Neighbor
 	if len(terms) == 0 {
 		return []Neighbor{}, nil
 	}
-	if len(terms) > bm25QueryTermCap {
-		sortTermsByIDF(terms)
-		terms = terms[:bm25QueryTermCap]
-	}
-	quoted := make([]string, len(terms))
-	for i, t := range terms {
-		quoted[i] = `"` + t + `"`
-	}
-	query := strings.Join(quoted, " OR ")
+	query := ftsOrQuery(terms)
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT m.id, m.kind, m.title, m.task_type, m.what, m.learned, m.tags

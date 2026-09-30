@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"net/url"
@@ -909,7 +910,7 @@ func buildNextNavigationGraph(
 				evidence:       site.evidence,
 				rawDestination: site.rawDestination,
 				certainty:      "unresolved",
-				reason:         nextReason(site.reason, "unsupported_expression"),
+				reason:         cmp.Or(site.reason, "unsupported_expression"),
 				line:           site.line,
 			})
 			ordinal++
@@ -932,13 +933,6 @@ func buildNextNavigationGraph(
 		}
 	}
 	return nextNavigationGraph{routes: routes, navigations: rows}
-}
-
-func nextReason(reason, fallback string) string {
-	if reason != "" {
-		return reason
-	}
-	return fallback
 }
 
 func resolveNextDestination(
@@ -1071,7 +1065,7 @@ func nextMatchSegments(patterns, destinations []string, symbolic bool) (bool, bo
 		for consumed := 0; consumed <= len(destinations); consumed++ {
 			conditional, ok := nextMatchSegments(patterns[1:], destinations[consumed:], symbolic)
 			if ok {
-				return conditional || symbolic && nextAnySymbolic(destinations[:consumed]), true
+				return conditional || symbolic && slices.ContainsFunc(destinations[:consumed], nextSymbolicSegment), true
 			}
 		}
 		return false, false
@@ -1079,7 +1073,7 @@ func nextMatchSegments(patterns, destinations []string, symbolic bool) (bool, bo
 		for consumed := 1; consumed <= len(destinations); consumed++ {
 			conditional, ok := nextMatchSegments(patterns[1:], destinations[consumed:], symbolic)
 			if ok {
-				return conditional || symbolic && nextAnySymbolic(destinations[:consumed]), true
+				return conditional || symbolic && slices.ContainsFunc(destinations[:consumed], nextSymbolicSegment), true
 			}
 		}
 		return false, false
@@ -1116,15 +1110,6 @@ func nextSegmentKind(segment string) string {
 	default:
 		return "static"
 	}
-}
-
-func nextAnySymbolic(segments []string) bool {
-	for _, segment := range segments {
-		if nextSymbolicSegment(segment) {
-			return true
-		}
-	}
-	return false
 }
 
 func nextSymbolicSegment(segment string) bool {

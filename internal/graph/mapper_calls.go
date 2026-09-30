@@ -8,7 +8,6 @@
 package graph
 
 import (
-	"os"
 	"path"
 	"sort"
 	"strings"
@@ -30,80 +29,6 @@ type mapperFileCalls struct {
 	file string
 	lang string
 	refs []gts.CallRef
-}
-
-// collectMapperCalls parses every file in files a second time — mapperSymbols
-// (mapper_symbols.go) already parsed each once for outlining, but gts.Parser
-// carries reuse state and is not safe to share, and a tree is not returned
-// from that pass — and extracts FactCalls via each language's compiled
-// FactProgram (mapperEngine.calls). Per-file failures are skip-and-continue,
-// mirroring mapperSymbols' own policy exactly, including the identical
-// #nosec justification: discovery already bounds files to regular, in-repo,
-// size-capped entries.
-func collectMapperCalls(files []mapperFile) ([]mapperFileCalls, mapperStats) {
-	var stats mapperStats
-	engines := mapperEngines{}
-	var out []mapperFileCalls
-
-	for _, f := range files {
-		// #nosec G304 -- discovery admits only regular files under repo, size-capped
-		// at maxMapperFileBytes; symlinks are dropped there so this read cannot
-		// resolve outside the indexed repo.
-		src, err := os.ReadFile(f.abs)
-		if err != nil {
-			stats.readErr++
-			continue // unreadable file is skip-and-continue, not fatal
-		}
-
-		eng := engines.get(f.entry)
-		if eng.lang == nil {
-			stats.parseErr++
-			continue
-		}
-
-		if refs := callsFromMapperFile(eng, f, src, &stats); len(refs) > 0 {
-			out = append(out, mapperFileCalls{file: f.rel, lang: f.entry.Name, refs: refs})
-		}
-	}
-	return out, stats
-}
-
-// extractMapperCalls is one file's parse-and-extract, extracted from
-// collectMapperCalls' loop for the same reason outlineMapperFile is (see its
-// comment): it gives the tree a scope, so `defer tree.Release()` returns its
-// borrowed arenas on every exit path without queueing behind the whole pass.
-//
-// Releasing is safe because gts.CallRef is a pure value struct — strings and
-// uint32 byte offsets, no *gts.Node — so the returned slice holds nothing
-// that points into the tree.
-func extractMapperCalls(eng *mapperEngine, src []byte, stats *mapperStats) []gts.CallRef {
-	tree, err := eng.parsers.Parse(src) // pooled: see mapperEngine.parsers
-	if err != nil {
-		stats.parseErr++
-		return nil // unparsable file is skip-and-continue, not fatal
-	}
-	defer tree.Release()
-
-	if eng.calls == nil {
-		stats.outlineDecline++ // FactProgram failed to compile for this language
-		return nil
-	}
-	return eng.calls.Extract(tree).Calls
-}
-
-var _ = extractMapperCalls // keep used: direct FactCalls testing even though collectMapperCalls now parses inline for JSX co-extraction
-
-// callsFromMapperFile is one file's parse-and-extract, scoped so
-// `defer tree.Release()` runs on every exit path — the same reason
-// outlineMapperFile and importsFromMapperFile are shaped this way.
-func callsFromMapperFile(eng *mapperEngine, f mapperFile, src []byte, stats *mapperStats) []gts.CallRef {
-	tree, err := eng.parsers.Parse(src) // pooled: see mapperEngine.parsers
-	if err != nil {
-		stats.parseErr++
-		return nil // unparsable file is skip-and-continue, not fatal
-	}
-	defer tree.Release()
-	return callsFromMapperTree(eng, f, src, tree, stats)
 }
 
 // callsFromMapperTree is the call extraction itself, over a tree the CALLER
@@ -376,13 +301,13 @@ func resolveSpecifier(importer, spec string, known map[string]bool, alias *alias
 		return ""
 	}
 	// No alias config: naive "@/→./" fallback.
-	if strings.HasPrefix(spec, "@/") {
-		return probeKnown(known, strings.TrimPrefix(spec, "@/"))
+	if rest, ok := strings.CutPrefix(spec, "@/"); ok {
+		return probeKnown(known, rest)
 	}
 	return ""
 }
 
-// resolveBindings turns mapperImports' raw binding -> SPECIFIER map into
+// resolveBindings turns importsFromMapperTree's raw binding -> SPECIFIER map into
 // rung 2a's binding -> repo FILE map, against the set of files this build
 // actually discovered. A binding whose specifier names no indexed file is
 // dropped here rather than carried as an unresolvable entry: the ladder's
@@ -469,7 +394,7 @@ func buildMapperLadderIndex(syms []mapperSym, importsByFile mapperResolvedImport
 }
 
 // isMapperClassLike mirrors spike's isClassLike over the Go-tier-normalized
-// kind vocabulary mapperSymbols already writes (mapper_symbols.go's
+// kind vocabulary the outline pass already writes (mapper_symbols.go's
 // normalizeOutlineKind) — "class"/"interface"/"struct"/"type" all count.
 func isMapperClassLike(kind string) bool {
 	return strings.Contains(kind, "class") || strings.Contains(kind, "interface") ||
@@ -623,7 +548,7 @@ func (ix *mapperLadderIndex) resolve(c mapperCallsite) (hits []int, total int) {
 // (index.go). fanoutCapped counts CALLSITES (not edges) whose rung-5
 // candidate set exceeded fanoutCap — a build-level partiality fact, feeding
 // meta.fanout_capped, not a per-edge one.
-// fileCalls comes from the caller rather than a collectMapperCalls call here:
+// fileCalls comes from the caller rather than a call extraction here:
 // buildIndex takes it from scanMapperFiles, which extracted it from the same
 // parse that produced mapperSyms.
 // alias holds the tsconfig/jsconfig paths mapping for this repo, loaded once

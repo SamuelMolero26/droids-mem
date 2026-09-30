@@ -26,8 +26,8 @@ import (
 )
 
 // mapperScanResult is everything the four mapper passes produce, gathered in
-// one traversal. Field-for-field it is what mapperSymbols, collectMapperCalls,
-// mapperImports and the carry ERROR probe returned separately.
+// one traversal. Symbols, calls, imports and carry's
+// ERROR probe used to be separate passes; they share this one result now.
 type mapperScanResult struct {
 	syms               []mapperSym
 	fileCalls          []mapperFileCalls
@@ -107,7 +107,7 @@ func detectDirective(src []byte, tree *gts.Tree, lang *gts.Language) string {
 	}
 
 	directive := ""
-	for i := 0; i < root.ChildCount(); i++ {
+	for i := range root.ChildCount() {
 		stmt := root.Child(i)
 		switch stmt.Type(lang) {
 		case "comment", "hash_bang_line":
@@ -121,7 +121,7 @@ func detectDirective(src []byte, tree *gts.Tree, lang *gts.Language) string {
 		}
 
 		var literal *gts.Node
-		for j := 0; j < stmt.ChildCount(); j++ {
+		for j := range stmt.ChildCount() {
 			child := stmt.Child(j)
 			if !child.IsNamed() || child.Type(lang) == "comment" {
 				continue
@@ -155,8 +155,7 @@ func detectDirective(src []byte, tree *gts.Tree, lang *gts.Language) string {
 
 // scanMapperFile is one file's single parse plus every extraction, scoped as
 // its own function so `defer tree.Release()` runs on each exit path instead of
-// queueing behind the whole scan — the same shape, and the same reason, as the
-// per-pass helpers it replaces. Release returns the node arenas to the pool for
+// queueing behind the whole scan — so Release returns the node arenas to the pool for
 // the next file; holding them to the end of the scan would defeat the pool
 // entirely.
 //

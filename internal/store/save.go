@@ -8,8 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -36,16 +37,16 @@ var validOrigins = map[string]bool{
 	"auto":   true,
 }
 
-// DefaultScope is what the save path stamps when the caller omits the scope
+// defaultScope is what the save path stamps when the caller omits the scope
 // field. Matches the column default in schema.go so behavior is consistent
 // whether the row arrives through the API or a direct INSERT. 'personal' by
 // default (ADR-0028): a memory never leaves the local store unless explicitly
 // shared via `share` or --scope shared.
-const DefaultScope = "personal"
+const defaultScope = "personal"
 
-// DefaultOrigin is stamped when the caller omits origin. 'auto' is reserved for
+// defaultOrigin is stamped when the caller omits origin. 'auto' is reserved for
 // the session-end enforcement path (ADR-0016); every explicit save is 'manual'.
-const DefaultOrigin = "manual"
+const defaultOrigin = "manual"
 
 // Field caps (locked decision #8). Hard limits — any field exceeding its cap
 // triggers a `field_too_large` rejection. Caps are forcing functions for
@@ -432,6 +433,30 @@ func logSaveOutcome(req SaveRequest, outcome string, jaccard float64, matched st
 	})
 }
 
+// withTx runs fn inside a transaction on conn. mode is the BEGIN flavor
+// ("IMMEDIATE" or "DEFERRED"); commitLabel names the commit in its error.
+// Any failure rolls back on a background ctx: cancellation is often exactly why
+// the rollback is needed, and it must still run on a dead request ctx.
+func withTx(ctx context.Context, conn *sql.Conn, mode, commitLabel string, fn func() error) error {
+	if _, err := conn.ExecContext(ctx, "BEGIN "+mode); err != nil {
+		return fmt.Errorf("begin %s: %w", strings.ToLower(mode), err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
+	if err := fn(); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("commit %s: %w", commitLabel, err)
+	}
+	committed = true
+	return nil
+}
+
 // endTxn finishes the save transaction: COMMIT normally, ROLLBACK when the
 // caller asked for a dry run. Dry-run thereby exercises the exact production
 // path (locks, dedupe, scrub, insert, prune) without persisting anything.
@@ -576,23 +601,7 @@ func nearDuplicateConn(ctx context.Context, conn *sql.Conn, req SaveRequest) (*m
 	if len(terms) == 0 {
 		return nil, 0, nil
 	}
-	// Cap query arity (decision #19).
-	if len(terms) > bm25QueryTermCap {
-		sortTermsByIDF(terms)
-		terms = terms[:bm25QueryTermCap]
-	}
-	// Wrap each term as an FTS5 phrase literal ("term") so that any FTS5
-	// operator keywords (NOT/AND/OR/NEAR, col:filter) that happen to appear
-	// in saved Memory content are treated as literal tokens, not query
-	// operators. searchTerms() already lowercases + strips punctuation, but
-	// not operator keywords — quoting closes that gap.
-	// Threat model differs from search.go (caller-supplied query, operators
-	// intentional). See ADR-0003.
-	quoted := make([]string, len(terms))
-	for i, t := range terms {
-		quoted[i] = `"` + t + `"`
-	}
-	query := strings.Join(quoted, " OR ")
+	query := ftsOrQuery(terms)
 
 	// m.id != ? exempts the supersedes target (ADR-0018): a replacement resembles
 	// what it replaces, so the target is the row most likely to trip the Jaccard
@@ -695,7 +704,7 @@ func validate(req *SaveRequest) (*scrub.ScrubReport, error) {
 	}
 
 	if req.Scope == "" {
-		req.Scope = DefaultScope
+		req.Scope = defaultScope
 	}
 	if !validScopes[req.Scope] {
 		return nil, &ValidationError{
@@ -707,7 +716,7 @@ func validate(req *SaveRequest) (*scrub.ScrubReport, error) {
 	}
 
 	if req.Origin == "" {
-		req.Origin = DefaultOrigin
+		req.Origin = defaultOrigin
 	}
 	if !validOrigins[req.Origin] {
 		return nil, &ValidationError{
@@ -837,11 +846,7 @@ func checkTagsForSecrets(tags string) error {
 			matched[name] = struct{}{}
 		}
 	}
-	patterns := make([]string, 0, len(matched))
-	for n := range matched {
-		patterns = append(patterns, n)
-	}
-	sort.Strings(patterns)
+	patterns := slices.Sorted(maps.Keys(matched))
 	return &ValidationError{
 		Code:            "tag_contains_secret",
 		Field:           "tags",
@@ -865,11 +870,7 @@ func checkIdentifierForSecrets(field, value string) error {
 	if rep.RedactionCount == 0 {
 		return nil
 	}
-	patterns := make([]string, 0, len(rep.PerPatternCounts))
-	for name := range rep.PerPatternCounts {
-		patterns = append(patterns, name)
-	}
-	sort.Strings(patterns)
+	patterns := slices.Sorted(maps.Keys(rep.PerPatternCounts))
 	return &ValidationError{
 		Code:            field + "_contains_secret",
 		Field:           field,
@@ -948,29 +949,26 @@ func fingerprint(taskType, kind, title, learned string) string {
 func normalizeForFP(s string) string {
 	s = strings.ToLower(s)
 	s = rePunct.ReplaceAllString(s, "")
-	s = reWhitespace.ReplaceAllString(s, " ")
-	s = strings.TrimSpace(s)
 	words := strings.Fields(s)
-	sort.Strings(words)
+	slices.Sort(words)
 	return strings.Join(words, " ")
 }
 
 // sortTermsByIDF orders terms longest-first (length proxies IDF) so capping
 // keeps the highest-signal tokens; alphabetical tie-break for stable runs.
 func sortTermsByIDF(terms []string) {
-	sort.Slice(terms, func(a, b int) bool {
-		if len(terms[a]) != len(terms[b]) {
-			return len(terms[a]) > len(terms[b])
+	slices.SortFunc(terms, func(a, b string) int {
+		if len(a) != len(b) {
+			return len(b) - len(a)
 		}
-		return terms[a] < terms[b]
+		return strings.Compare(a, b)
 	})
 }
 
 // dedupeTokens normalizes body once and returns both the ordered unique term
 // slice (for the BM25 candidate query) and the token set (for Jaccard scoring).
-// Folds what searchTerms + tokenSet previously did in two passes — each
-// re-lowercased and re-scanned the full ~13 KB concatenated body — into a
-// single ToLower → strip-punct → collapse-whitespace → Fields sweep.
+// One ToLower → strip-punct → Fields sweep over the full ~13 KB concatenated
+// body serves both outputs.
 //
 // Punctuation splits tokens (replaced with a space) so the BM25 query and the
 // Jaccard set index the same atoms the FTS5 unicode61 tokenizer produces —
@@ -979,8 +977,7 @@ func sortTermsByIDF(terms []string) {
 func dedupeTokens(body string) ([]string, map[string]struct{}) {
 	body = strings.ToLower(body)
 	body = rePunct.ReplaceAllString(body, " ")
-	body = reWhitespace.ReplaceAllString(body, " ")
-	words := strings.Fields(strings.TrimSpace(body))
+	words := strings.Fields(body)
 	set := make(map[string]struct{}, len(words))
 	terms := make([]string, 0, len(words))
 	for _, w := range words {
@@ -996,18 +993,27 @@ func dedupeTokens(body string) ([]string, map[string]struct{}) {
 	return terms, set
 }
 
-// searchTerms extracts unique lowercase words (len > 2) for BM25 queries.
+// ftsOrQuery builds the capped, phrase-quoted OR query shared by the
+// near-duplicate check, prune --suggest-dupes and neighbors. It must stay the
+// single copy: a divergence in term normalization between query builders once
+// made dupe suggestions disagree with the save-time gate (FTS5's unicode61
+// tokenizer splits punctuation, so terms must come from dedupeTokens).
 //
-// It kept its own normalization sweep until it was folded into dedupeTokens,
-// which also fixed a real divergence: this stripped punctuation to "" while
-// dedupeTokens and tokenSet replace it with " ". So "mem_save.Error" became
-// one token "mem_saveerror" here and two tokens there — and FTS5's unicode61
-// tokenizer, which the query has to match, splits it. dupeQuery documents
-// itself as building "the same query the save-time near-duplicate check
-// uses"; before the fold it demonstrably did not.
-func searchTerms(s string) []string {
-	terms, _ := dedupeTokens(s)
-	return terms
+// Each term becomes an FTS5 phrase literal ("term") so operator keywords
+// (NOT/AND/OR/NEAR, col:filter) in saved content are literal tokens, not query
+// operators. Threat model differs from search.go (caller-supplied query,
+// operators intentional). Terms are capped at bm25QueryTermCap, keeping the
+// highest-IDF ones (decision #19). Reorders terms when it caps.
+func ftsOrQuery(terms []string) string {
+	if len(terms) > bm25QueryTermCap {
+		sortTermsByIDF(terms)
+		terms = terms[:bm25QueryTermCap]
+	}
+	quoted := make([]string, len(terms))
+	for i, t := range terms {
+		quoted[i] = `"` + t + `"`
+	}
+	return strings.Join(quoted, " OR ")
 }
 
 // tokenSet builds the deduplicated set of meaningful tokens used for

@@ -3,6 +3,7 @@ package graph
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -178,18 +179,14 @@ func parseAliasConfig(data []byte, dir string, depth int, files *[]string) *alia
 	out := &aliasConfig{paths: map[string][]string{}}
 	if baseCfg != nil {
 		out.baseUrl = baseCfg.baseUrl
-		for k, v := range baseCfg.paths {
-			out.paths[k] = v
-		}
+		maps.Copy(out.paths, baseCfg.paths)
 	}
 	if curBase != "" {
 		out.baseUrl = curBase
 	} else if out.baseUrl == "" && baseCfg == nil {
 		out.baseUrl = ""
 	}
-	for k, v := range curPaths {
-		out.paths[k] = v
-	}
+	maps.Copy(out.paths, curPaths)
 	return out
 }
 
@@ -326,7 +323,7 @@ func stripJSONComments(data []byte) []byte {
 	var out []byte
 	inString := false
 	escape := false
-	for i := 0; i < len(data); i++ {
+	for i := 0; i < len(data); i++ { //nolint:intrange // i is advanced inside the body
 		c := data[i]
 		if inString {
 			out = append(out, c)
@@ -388,7 +385,7 @@ func stripTrailingCommas(data []byte) []byte {
 	var out []byte
 	inString := false
 	escape := false
-	for i := 0; i < len(data); i++ {
+	for i := range len(data) {
 		c := data[i]
 		if inString {
 			out = append(out, c)

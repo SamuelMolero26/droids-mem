@@ -16,8 +16,6 @@
 package graph
 
 import (
-	"os"
-
 	gts "github.com/odvcencio/gotreesitter"
 )
 
@@ -129,75 +127,16 @@ type mapperImportBinding struct {
 	defaultImport bool
 }
 
-// mapperImports parses every Python and JS-family file in files an EXTRA
-// time (mirroring mapperSymbols/collectMapperCalls/mapperCarry's own
-// established policy: gts.Parser is not safe to share across passes, and no
-// prior pass returns a tree) and extracts its import declarations — via
-// gts.ExtractImports for Python, via tsImportsQuery for the JS family.
-// Per-file failures (unreadable file, unparseable source) are
-// skip-and-continue, mirroring mapperSymbols/collectMapperCalls' own policy
-// exactly.
-func mapperImports(files []mapperFile) ([]importRow, mapperImportBindings, mapperStats) {
-	var stats mapperStats
-	engines := mapperEngines{}
-	var out []importRow
-	bindings := mapperImportBindings{}
-
-	for _, f := range files {
-		if f.entry == nil {
-			continue
-		}
-		isPython := f.entry.Name == "python"
-		if !isPython && !jsFamilyLanguages[f.entry.Name] {
-			continue
-		}
-		// #nosec G304 -- discovery admits only regular files under repo, size-capped
-		// at maxMapperFileBytes; symlinks are dropped there so this read cannot
-		// resolve outside the indexed repo.
-		src, err := os.ReadFile(f.abs)
-		if err != nil {
-			stats.readErr++
-			continue // unreadable file is skip-and-continue, not fatal
-		}
-
-		eng := engines.get(f.entry)
-		if eng.lang == nil {
-			stats.parseErr++ // no working language: the grammar failed to load
-			continue
-		}
-
-		importsFromMapperFile(eng, f, src, isPython, &out, bindings, &stats)
-	}
-	return out, bindings, stats
-}
-
-// importsFromMapperFile is one file's parse-and-extract, extracted from
-// mapperImports' loop for the same reason outlineMapperFile is (see its
-// comment): it scopes the tree so `defer tree.Release()` runs on every exit
-// path without queueing behind the whole pass.
+// importsFromMapperTree is the import extraction itself, over a tree the
+// CALLER owns and releases (see outlineMapperTree).
 //
 // This is the one mapper pass that touches *gts.Node directly —
 // QueryCapture.Node is a live pointer into the tree, and reading one after
-// Release would read a recycled arena. It is safe here because every capture
-// is consumed inside the loop that produced it: c.Text(src) returns
-// `string(src[a:b])`, a fresh copy taken from the CALLER's buffer, and no
-// capture, match, or node outlives this function. The Python branch is safe
-// for the plainer reason that gts.ImportRef is a pure value struct.
-func importsFromMapperFile(eng *mapperEngine, f mapperFile, src []byte, isPython bool, out *[]importRow, bindings mapperImportBindings, stats *mapperStats) {
-	tree, err := eng.parsers.Parse(src) // pooled: see mapperEngine.parsers
-	if err != nil {
-		stats.parseErr++
-		return // unparsable file is skip-and-continue, not fatal
-	}
-	defer tree.Release()
-	importsFromMapperTree(eng, f, src, tree, isPython, out, bindings, stats)
-}
-
-// importsFromMapperTree is the import extraction itself, over a tree the
-// CALLER owns and releases (see outlineMapperTree for why the scan driver can
-// hold it). The *gts.Node caution in importsFromMapperFile's comment is
-// unchanged and still load-bearing: every capture is consumed inside the loop
-// that produced it, so no node outlives this call either.
+// Release would read a recycled arena. It is safe because every capture is
+// consumed inside the loop that produced it: c.Text(src) returns
+// `string(src[a:b])`, a fresh copy from the CALLER's buffer, and no capture,
+// match, or node outlives this function. The Python branch is safe for the
+// plainer reason that gts.ImportRef is a pure value struct.
 func importsFromMapperTree(eng *mapperEngine, f mapperFile, src []byte, tree *gts.Tree, isPython bool, out *[]importRow, bindings mapperImportBindings, stats *mapperStats) {
 	if !isPython {
 		if eng.imports == nil {

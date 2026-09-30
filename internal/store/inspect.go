@@ -53,6 +53,15 @@ func needsReview(reviewAfter *int64) bool {
 	return reviewAfter != nil && *reviewAfter < time.Now().Unix()
 }
 
+// reviewState maps a nullable review_after column to its pointer form plus the
+// derived needs_review flag.
+func reviewState(n sql.NullInt64) (*int64, bool) {
+	if !n.Valid {
+		return nil, false
+	}
+	return &n.Int64, needsReview(&n.Int64)
+}
+
 type ListRequest struct {
 	TaskType string
 	Kind     string
@@ -101,12 +110,11 @@ func (s *Store) List(ctx context.Context, req ListRequest) (*ListResponse, error
 	args = append(args, limit)
 
 	stmt := fmt.Sprintf(`
-		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at,
-		       expand_count, COALESCE(last_expanded_at, 0), scope, review_after, pinned, authored_at
+		SELECT %s
 		FROM memories %s
 		ORDER BY created_at DESC, id DESC
 		LIMIT ?
-	`, where)
+	`, memoryCols, where)
 
 	rows, err := s.db.QueryContext(ctx, stmt, args...)
 	if err != nil {
@@ -116,15 +124,10 @@ func (s *Store) List(ctx context.Context, req ListRequest) (*ListResponse, error
 
 	memories := []Memory{}
 	for rows.Next() {
-		var m Memory
-		var reviewAfter sql.NullInt64
-		if err := rows.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &m.Scope, &reviewAfter, &m.Pinned, &m.AuthoredAt); err != nil {
+		m, err := scanMemory(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan memory: %w", err)
 		}
-		if reviewAfter.Valid {
-			m.ReviewAfter = &reviewAfter.Int64
-		}
-		m.NeedsReview = needsReview(m.ReviewAfter)
 		memories = append(memories, m)
 	}
 	if err := rows.Err(); err != nil {
@@ -188,10 +191,7 @@ func (s *Store) recent(ctx context.Context, where string, limit int) (*RecentSes
 		if err := rows.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &reviewAfter, &m.Pinned, &m.Origin); err != nil {
 			return nil, fmt.Errorf("scan session: %w", err)
 		}
-		if reviewAfter.Valid {
-			m.ReviewAfter = &reviewAfter.Int64
-		}
-		m.NeedsReview = needsReview(m.ReviewAfter)
+		m.ReviewAfter, m.NeedsReview = reviewState(reviewAfter)
 		sessions = append(sessions, m)
 	}
 	if err := rows.Err(); err != nil {
@@ -210,24 +210,29 @@ func (s *Store) GetRow(ctx context.Context, id string) (*Memory, error) {
 		return nil, &ValidationError{Field: "id", Message: "required"}
 	}
 
-	var m Memory
-	var reviewAfter sql.NullInt64
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at,
-		       expand_count, COALESCE(last_expanded_at, 0), scope, review_after, pinned, authored_at
-		FROM memories WHERE id = ?
-	`, id).Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &m.Scope, &reviewAfter, &m.Pinned, &m.AuthoredAt)
+	m, err := scanMemory(s.db.QueryRowContext(ctx, `SELECT `+memoryCols+` FROM memories WHERE id = ?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get memory: %w", err)
 	}
-	if reviewAfter.Valid {
-		m.ReviewAfter = &reviewAfter.Int64
-	}
-	m.NeedsReview = needsReview(m.ReviewAfter)
 	return &m, nil
+}
+
+// memoryCols is the column list scanMemory reads, in scan order.
+const memoryCols = `id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at,
+		       expand_count, COALESCE(last_expanded_at, 0), scope, review_after, pinned, authored_at`
+
+// scanMemory scans one memoryCols row from a *sql.Row or *sql.Rows.
+func scanMemory(sc interface{ Scan(...any) error }) (Memory, error) {
+	var m Memory
+	var reviewAfter sql.NullInt64
+	if err := sc.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &m.Scope, &reviewAfter, &m.Pinned, &m.AuthoredAt); err != nil {
+		return Memory{}, err
+	}
+	m.ReviewAfter, m.NeedsReview = reviewState(reviewAfter)
+	return m, nil
 }
 
 // CountsResponse is the static corpus census the Memory inspector sidebar shows:

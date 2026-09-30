@@ -208,7 +208,7 @@ func TestMapperFiles_SkipsSymlinkEscapingRepo(t *testing.T) {
 }
 
 // TestMapperFiles_SkipsOversizeFile pins the memory-exhaustion bound.
-// mapperSymbols reads each discovered file whole and hands it to a parser
+// scanMapperFiles reads each discovered file whole and hands it to a parser
 // that builds a tree over it; the mapper newly covers .js, where multi-MB
 // generated and minified bundles are routine and live outside the skipDir
 // set (public/, static/, assets/, a stray *.min.js under src/). droids-mem

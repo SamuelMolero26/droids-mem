@@ -57,7 +57,7 @@ func TestMapperSymbols_LineFromNameRange(t *testing.T) {
 	dir := t.TempDir()
 	f := mapMapperFile(t, dir, "a.ts", "// header\n// more header\nexport function Foo() {}\n", "a")
 
-	rows, stats := mapperSymbols([]mapperFile{f})
+	rows, stats := scanSymbols([]mapperFile{f})
 	if stats.parseErr != 0 || stats.outlineDecline != 0 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
@@ -77,7 +77,7 @@ func TestMapperSymbols_SignatureAndSourceTruncation(t *testing.T) {
 	src := "export function LongName(" + longParams + ") {\n" + body.String() + "}\n"
 	f := mapMapperFile(t, dir, "a.ts", src, "a")
 
-	rows, stats := mapperSymbols([]mapperFile{f})
+	rows, stats := scanSymbols([]mapperFile{f})
 	if stats.parseErr != 0 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
@@ -102,7 +102,7 @@ func TestMapperSymbols_DocAlwaysEmpty(t *testing.T) {
 	ts := mapMapperFile(t, dir, "a.ts", "// this is a doc comment\nexport function Foo() {}\n", "a")
 	py := mapMapperFile(t, dir, "b.py", "def foo():\n    \"\"\"docstring\"\"\"\n    pass\n", "b")
 
-	rows, stats := mapperSymbols([]mapperFile{ts, py})
+	rows, stats := scanSymbols([]mapperFile{ts, py})
 	if stats.parseErr != 0 || stats.outlineDecline != 0 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
@@ -139,7 +139,7 @@ func TestMapperSymbols_ExportedTSJS(t *testing.T) {
 	dir := t.TempDir()
 	f := mapMapperFile(t, dir, "a.ts", "export function foo() {}\nfunction bar() {}\nexport function _foo() {}\n", "a")
 
-	rows, _ := mapperSymbols([]mapperFile{f})
+	rows, _ := scanSymbols([]mapperFile{f})
 	want := map[string]bool{"foo": true, "bar": false, "_foo": true}
 	for name, exp := range want {
 		row := findSymRow(t, rows, name)
@@ -153,7 +153,7 @@ func TestMapperSymbols_ExportedNestedInheritsContainer(t *testing.T) {
 	dir := t.TempDir()
 	f := mapMapperFile(t, dir, "a.ts", "export class Outer {\n  method() {}\n}\n", "a")
 
-	rows, _ := mapperSymbols([]mapperFile{f})
+	rows, _ := scanSymbols([]mapperFile{f})
 	outer := findSymRow(t, rows, "Outer")
 	method := findSymRow(t, rows, "method")
 	if !outer.exported {
@@ -173,7 +173,7 @@ func TestMapperSymbols_ExportedBlockScopedFunctionNotInherited(t *testing.T) {
 	dir := t.TempDir()
 	f := mapMapperFile(t, dir, "a.ts", "export function foo() {}\nif (true) {\n  function bar() {}\n}\n", "a")
 
-	rows, _ := mapperSymbols([]mapperFile{f})
+	rows, _ := scanSymbols([]mapperFile{f})
 	bar := findSymRow(t, rows, "bar")
 	if bar.exported {
 		t.Error("bar.exported = true, want false — block-scoped, must not inherit an unrelated top-level export")
@@ -184,7 +184,7 @@ func TestMapperSymbols_ExportedPython(t *testing.T) {
 	dir := t.TempDir()
 	f := mapMapperFile(t, dir, "a.py", "def foo(): pass\ndef _bar(): pass\n", "a")
 
-	rows, _ := mapperSymbols([]mapperFile{f})
+	rows, _ := scanSymbols([]mapperFile{f})
 	foo := findSymRow(t, rows, "foo")
 	bar := findSymRow(t, rows, "_bar")
 	if !foo.exported {
@@ -199,7 +199,7 @@ func TestMapperSymbols_QnameContainerChain(t *testing.T) {
 	dir := t.TempDir()
 	f := mapMapperFile(t, dir, "a.ts", "export class Outer {\n  method() {}\n}\n", "src/util")
 
-	rows, _ := mapperSymbols([]mapperFile{f})
+	rows, _ := scanSymbols([]mapperFile{f})
 	outer := findSymRow(t, rows, "Outer")
 	method := findSymRow(t, rows, "method")
 	if outer.qname != "src/util:Outer" {
@@ -229,7 +229,7 @@ func TestMapperSymbols_ReadErrorCountedSkipAndContinue(t *testing.T) {
 	good := mapMapperFile(t, dir, "good.py", "def foo(): pass\n", "good")
 	bad := mapperFile{abs: filepath.Join(dir, "missing.py"), rel: "missing.py", entry: good.entry, modulePath: "missing"}
 
-	rows, stats := mapperSymbols([]mapperFile{bad, good})
+	rows, stats := scanSymbols([]mapperFile{bad, good})
 	if stats.readErr != 1 {
 		t.Errorf("readErr = %d, want 1", stats.readErr)
 	}
@@ -247,7 +247,7 @@ func TestMapperSymbols_EngineLoadFailureCountedSkipAndContinue(t *testing.T) {
 	broken := mapMapperFile(t, dir, "broken.py", "def bar(): pass\n", "broken")
 	broken.entry = &grammars.LangEntry{Name: "broken-lang-probe", Language: func() *gts.Language { return nil }}
 
-	rows, stats := mapperSymbols([]mapperFile{broken, good})
+	rows, stats := scanSymbols([]mapperFile{broken, good})
 	if stats.parseErr != 1 {
 		t.Errorf("parseErr = %d, want 1", stats.parseErr)
 	}
@@ -271,7 +271,7 @@ func TestMapperSymbols_OutlineDeclineCountedSkipAndContinue(t *testing.T) {
 	declined := mapMapperFile(t, dir, "declined.py", "def bar(): pass\n", "declined")
 	declined.entry = &grammars.LangEntry{Name: "", Language: realPy.Language}
 
-	rows, stats := mapperSymbols([]mapperFile{declined, good})
+	rows, stats := scanSymbols([]mapperFile{declined, good})
 	if stats.outlineDecline != 1 {
 		t.Errorf("outlineDecline = %d, want 1", stats.outlineDecline)
 	}
@@ -285,12 +285,12 @@ func TestMapperSymbols_OutlineDeclineCountedSkipAndContinue(t *testing.T) {
 // populated from the outline symbol's own byte range and lexical container
 // chain, not left zero-valued — even though PR-C wires no consumer for them
 // yet (design.md decision 8: the carrier is introduced here so PR-D's
-// FactCalls attribution adds no signature churn to mapperSymbols).
+// FactCalls attribution adds no signature churn to scanMapperFiles).
 func TestMapperSymbols_CarrierByteRangeAndContainer(t *testing.T) {
 	dir := t.TempDir()
 	f := mapMapperFile(t, dir, "a.ts", "export class Outer {\n  method() {}\n}\n", "a")
 
-	rows, _ := mapperSymbols([]mapperFile{f})
+	rows, _ := scanSymbols([]mapperFile{f})
 	outer := findMapperSym(t, rows, "Outer")
 	method := findMapperSym(t, rows, "method")
 
@@ -325,7 +325,7 @@ def score(item):
     return total
 `, "scorer")
 
-	rows, _ := mapperSymbols([]mapperFile{f})
+	rows, _ := scanSymbols([]mapperFile{f})
 
 	for _, name := range []string{"DEFAULT_WEIGHTS", "sep"} {
 		if got := findSymRow(t, rows, name).kind; got != "const" {
@@ -358,7 +358,7 @@ export interface Svc { run(): void }
 	for _, name := range []string{"button.ts", "button.tsx"} {
 		t.Run(name, func(t *testing.T) {
 			f := mapMapperFile(t, t.TempDir(), name, src, "button")
-			rows, _ := mapperSymbols([]mapperFile{f})
+			rows, _ := scanSymbols([]mapperFile{f})
 			for _, want := range []string{"ButtonProps", "Internal"} {
 				if got := findSymRow(t, rows, want).kind; got != "type" {
 					t.Errorf("%s kind = %q, want %q", want, got, "type")
@@ -379,7 +379,7 @@ export interface Svc { run(): void }
 // distinguishes "guarded correctly" from "all JS indexing is gone".
 func TestMapperSymbols_JavaScriptOutlinerStillCompiles(t *testing.T) {
 	f := mapMapperFile(t, t.TempDir(), "a.js", "export function Foo() {}\nexport const BAR = 1\n", "a")
-	rows, stats := mapperSymbols([]mapperFile{f})
+	rows, stats := scanSymbols([]mapperFile{f})
 	if len(rows) == 0 {
 		t.Fatalf("no symbols from a.js — outliner failed to compile; stats=%+v", stats)
 	}
