@@ -6,16 +6,13 @@ import (
 	"unicode/utf8"
 )
 
-// TestSearchTerms_SplitsPunctuationLikeFTS pins the invariant that folding
-// searchTerms into dedupeTokens established. dupeQuery (prune.go) documents
-// itself as building "the same capped, phrase-quoted OR query the save-time
-// near-duplicate check uses", but save-time runs on dedupeTokens while
-// searchTerms used to strip punctuation to "" instead of " ". A qualified
-// name collapsed into one token that FTS5's unicode61 tokenizer had indexed
-// as two, so the phrase-quoted term could never match.
-func TestSearchTerms_SplitsPunctuationLikeFTS(t *testing.T) {
+// TestDedupeTokens_SplitsPunctuationLikeFTS pins that punctuation splits
+// tokens (replaced with " ", not ""). Every FTS query builder (ftsOrQuery)
+// consumes dedupeTokens terms; a qualified name collapsing into one token
+// would never match what FTS5's unicode61 tokenizer indexed as two.
+func TestDedupeTokens_SplitsPunctuationLikeFTS(t *testing.T) {
 	t.Run("splits_punctuation_like_fts", func(t *testing.T) {
-		got := searchTerms("store.Save failed on mem_save.Error")
+		got, _ := dedupeTokens("store.Save failed on mem_save.Error")
 
 		want := map[string]bool{"store": true, "save": true, "failed": true, "mem_save": true, "error": true}
 		for _, term := range got {
@@ -30,18 +27,18 @@ func TestSearchTerms_SplitsPunctuationLikeFTS(t *testing.T) {
 	})
 }
 
-// TestTokenSet_AgreesWithSearchTerms guards the fold itself: both helpers now
+// TestTokenSet_AgreesWithDedupeTokens guards the fold itself: both helpers now
 // project one normalization sweep, so the set must hold exactly the slice's
 // terms. Divergence here means someone reintroduced a second sweep.
-func TestTokenSet_AgreesWithSearchTerms(t *testing.T) {
+func TestTokenSet_AgreesWithDedupeTokens(t *testing.T) {
 	t.Run("token_set_agrees_with_search_terms", func(t *testing.T) {
 		const body = "Fixed the N+1 query in UserList; see store.Search and mem_context."
 
-		terms := searchTerms(body)
+		terms, _ := dedupeTokens(body)
 		set := tokenSet(body)
 
 		if len(terms) != len(set) {
-			t.Fatalf("searchTerms has %d terms, tokenSet has %d: %v vs %v", len(terms), len(set), terms, set)
+			t.Fatalf("dedupeTokens has %d terms, tokenSet has %d: %v vs %v", len(terms), len(set), terms, set)
 		}
 		for _, term := range terms {
 			if _, ok := set[term]; !ok {

@@ -317,7 +317,7 @@ func TestServeE2E_InitializeExposesInstructions(t *testing.T) {
 		t.Fatalf("initialize: missing result; resp=%v", resp)
 	}
 	instr, _ := result["instructions"].(string)
-	for _, want := range []string{"mem_search", "mem_context", "mem_save", "authored_at"} {
+	for _, want := range []string{"mem_search", "mem_context", "mem_save"} {
 		if !strings.Contains(instr, want) {
 			t.Errorf("initialize instructions missing %q; got %q", want, instr)
 		}

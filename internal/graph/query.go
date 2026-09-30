@@ -264,7 +264,11 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	if strings.TrimSpace(req.Symbol) == "" {
 		return nil, fmt.Errorf("symbol is required: %w", ErrInvalidArgument)
 	}
-	conn, release, fresh, err := m.openFor(ctx, req.Repo, req.NoBuild)
+	open := m.ensureFresh
+	if req.NoBuild { // read-only viewers never trigger a build
+		open = m.openNoBuild
+	}
+	conn, release, fresh, err := open(ctx, req.Repo)
 	if err != nil {
 		return nil, err
 	}
@@ -525,7 +529,7 @@ func findSymbol(ctx context.Context, conn *sql.DB, name string) ([]Neighbor, err
 		if err != nil {
 			return nil, err
 		}
-		out, err := scanNeighbors(rows, 0)
+		out, err := scanNeighbors(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -553,7 +557,7 @@ func searchSymbols(ctx context.Context, conn *sql.DB, task string) ([]Neighbor, 
 	if err != nil {
 		return nil, err
 	}
-	return scanNeighbors(rows, 0)
+	return scanNeighbors(rows)
 }
 
 // ftsQuery turns a task phrase into a safe FTS5 OR-of-terms, dropping 1-char
@@ -611,7 +615,7 @@ func implementers(ctx context.Context, conn *sql.DB, id int64) (rows []Neighbor,
 	if err != nil {
 		return nil, 0, false, err
 	}
-	rows, err = scanNeighbors(r, 0)
+	rows, err = scanNeighbors(r)
 	if err != nil {
 		return nil, 0, false, err
 	}
@@ -633,7 +637,7 @@ func satisfies(ctx context.Context, conn *sql.DB, id int64) (rows []Neighbor, tr
 	if err != nil {
 		return nil, false, err
 	}
-	rows, err = scanNeighbors(r, 0)
+	rows, err = scanNeighbors(r)
 	if err != nil {
 		return nil, false, err
 	}
@@ -644,7 +648,7 @@ func satisfies(ctx context.Context, conn *sql.DB, id int64) (rows []Neighbor, tr
 	return rows, truncated, nil
 }
 
-func scanNeighbors(rows *sql.Rows, depth int) ([]Neighbor, error) {
+func scanNeighbors(rows *sql.Rows) ([]Neighbor, error) {
 	defer rows.Close()
 	var out []Neighbor
 	for rows.Next() {
@@ -652,7 +656,6 @@ func scanNeighbors(rows *sql.Rows, depth int) ([]Neighbor, error) {
 		if err := rows.Scan(&n.QName, &n.Kind, &n.Signature, &n.File, &n.Line); err != nil {
 			return nil, err
 		}
-		n.Depth = depth
 		out = append(out, n)
 	}
 	return out, rows.Err()

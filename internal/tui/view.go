@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -146,7 +147,7 @@ func (m Model) sidebarView() string {
 			n = m.counts[k]
 		}
 		label := fmt.Sprintf("%-17s", kindLabel(k))
-		count := countStyle.Render(fmt.Sprintf("%d", n))
+		count := countStyle.Render(strconv.Itoa(n))
 		if i == m.kindIdx {
 			b.WriteString(sidebarSel.Render("▸ " + label))
 		} else {
@@ -170,7 +171,7 @@ func (m Model) sidebarView() string {
 			n = m.shared
 		}
 		label := fmt.Sprintf("%-17s", scopeLabel(sc))
-		count := countStyle.Render(fmt.Sprintf("%d", n))
+		count := countStyle.Render(strconv.Itoa(n))
 		if sc == m.query.scope { // active filter — highlighted, not cursor-marked
 			b.WriteString(scopeActive.Render("▸ " + label))
 		} else {

@@ -7,6 +7,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **MCP server instructions cut from 4,252 to 1,757 chars, and one text for every
+  transport.** Claude Code shows the model only the first 2,048 chars of an MCP
+  server's instructions, so on every Claude Code surface the graph guidance, the
+  end-of-run `session_summary` rule, the blast-radius check and the no-secrets
+  rule never reached the model. A quiz against the served text scored 3/8 on
+  Claude Code before and 8/8 after (OpenCode 8/8 both). The numbered core loop
+  (search, graph before edits, save, end-of-run summary) now fits in the first
+  512 chars, which Codex relies on standing alone. The HTTP/stdio fork on the
+  summary sentence is gone: hooked hosts are told staging counts, and dedupe
+  absorbs a redundant save. `TestInstructions_Budget` holds both limits.
+
 ### Added
 - **`mem_search` and `mem_context` rows now carry `authored_at`** (unix
   seconds), replacing the removed `needs_review` staleness signal. It is when
@@ -34,6 +46,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   applies to droids-mem calls only, not every tool call.
 
 ### Fixed
+- **`ensure-server` now replaces the daemon when called from a local build.**
+  Every build from source reports version `dev`, so a rebuilt binary kept
+  talking to the previous build's daemon and `graph ui` served stale API and
+  viewer code. A `dev` caller now always restarts the daemon (one restart per
+  call, local builds only); release builds still compare versions. The `ui`
+  field is gone from `/identity`.
+- **Graph viewer symbol flow walks up to depth 5**, the same bound as
+  `graph_symbol`; it was capped at 3. The build-error banner passed through the
+  viewer URL is gone: a failed build opens the last good graph marked stale,
+  and `graph ui` prints the error as `index_error`.
 - **Mapper tier now indexes TypeScript type aliases and Python module-level
   bindings.** `type X = ...` in `.ts`/`.tsx` and every top-level assignment in
   `.py` were missing from `graph_symbol` and `graph_package`, so querying

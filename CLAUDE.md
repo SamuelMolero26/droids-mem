@@ -57,7 +57,9 @@ derived key so a plain `proof` of nonce `N:pid` can't forge it. `uninstall
 `ensure-server` uses that to **replace a stale daemon**: nothing else does, so
 without it a daemon serves superseded code until reboot (`upgrade` replaces the
 executable and returns). Any version difference counts, either direction — the
-daemon should be the build the caller actually has. It signals the *proven* PID
+daemon should be the build the caller actually has. A `dev` caller always
+replaces: every local build reports `dev`, so equal versions prove nothing
+there, and one restart per call is the whole cost. It signals the *proven* PID
 from `/identity`, never the pidfile, then spawns a replacement without waiting
 for the drain: `http.Server.Shutdown` closes listeners before waiting on
 in-flight connections, so the address frees in ms even when a live MCP stream
@@ -72,7 +74,7 @@ which is already listening. A daemon proving no PID is reported
 Single binary, layered. Don't bypass layers:
 
 1. **`cmd/droids-mem/`** — cobra subcommands. One `cmd_*.go` per command; delegates to store, emits JSON via `output.go`. No business logic.
-2. **`internal/mcpserver/`** — MCP bridge (`server.go` wires HTTP + auth, `stdio.go` the stdio transport for host-spawned servers (`serve --stdio` — no port/token; instructions string forks one summary sentence per transport), `tools.go` defines the 5 memory tools, `graph_tools.go` the 3 code-graph tools). Operator commands (`list`, `schema`, `doctor`, `prune`) intentionally not exposed here.
+2. **`internal/mcpserver/`** — MCP bridge (`server.go` wires HTTP + auth, `stdio.go` the stdio transport for host-spawned servers (`serve --stdio` — no port/token; same instructions string on both transports, held to a measured 2048-char / 512-char-core budget by `TestInstructions_Budget`), `tools.go` defines the 5 memory tools, `graph_tools.go` the 3 code-graph tools). Operator commands (`list`, `schema`, `doctor`, `prune`) intentionally not exposed here.
 3. **`internal/store/`** — all business logic shared by CLI and MCP. Key files:
    - `save.go` — validate → scrub → fingerprint → dedupe (2 layers) → insert; owns scrub *policy* (which fields, tag + identifier strict-reject, empty-after-scrub)
    - `search.go` — FTS5 MATCH queries
@@ -137,7 +139,7 @@ Session retention: on `session_summary` save, delete oldest if > 5 for that `tas
 8 tools: `mem_save`, `mem_search`, `mem_context`, `mem_get`, `mem_corpus` (memory) + `graph_symbol`, `graph_package`, `graph_build_wait` (code graph — signatures-first, agent passes `repo` = absolute project root).
 
 - `mem_context` mints `session_id` (stateless server — agent stores and reuses it).
-- Auth: `Authorization: Bearer <token>` on every `/mcp` request. Stdio transport (`serve --stdio`) has no port/token — the pipe is private to the spawning host; same tool surface, only the instructions string's summary sentence differs (stdio hosts self-save a `session_summary`).
+- Auth: `Authorization: Bearer <token>` on every `/mcp` request. Stdio transport (`serve --stdio`) has no port/token — the pipe is private to the spawning host; same tool surface and instructions. Claude Code shows the model only the first 2048 chars of `instructions` (measured), so rules past that never land: keep the numbered core loop in the first 512 chars and the whole string under 2048.
 - `*store.ValidationError` → MCP tool error `{error, field, message}`; other runtime errors → structured envelope `{status, error, message, retryable, suggestion}` (dominant case: transient `BEGIN IMMEDIATE` write-lock timeout).
 - SIGTERM → `http.Server.Shutdown` (10 s grace) → `db.Close`.
 

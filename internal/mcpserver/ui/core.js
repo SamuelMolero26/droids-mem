@@ -4,29 +4,23 @@
 // style, and nothing here builds markup from strings).
 var DM = window.DM = { views: {}, seq: 0, opts: { depth: 2, dir: 'both' } };
 
-DM.BUILD_FAILED = 'Latest build failed; showing last good graph (may be stale). ' +
-  'Fix the error and re-run droids-mem graph ui to retry.';
-
 // el(tag, className, ...children): strings become text nodes, null is skipped.
+function kids(e, args) {
+  for (var i = 2; i < args.length; i++) {
+    var k = args[i];
+    if (k != null) e.append(typeof k === 'object' ? k : document.createTextNode(String(k)));
+  }
+  return e;
+}
 DM.el = function (tag, cls) {
   var e = document.createElement(tag);
   if (cls) e.className = cls;
-  for (var i = 2; i < arguments.length; i++) {
-    var k = arguments[i];
-    if (k == null) continue;
-    e.append(typeof k === 'object' ? k : document.createTextNode(String(k)));
-  }
-  return e;
+  return kids(e, arguments);
 };
-
 DM.svg = function (tag, attrs) {
   var e = document.createElementNS('http://www.w3.org/2000/svg', tag);
   for (var a in attrs) e.setAttribute(a, attrs[a]);
-  for (var i = 2; i < arguments.length; i++) {
-    var k = arguments[i];
-    e.append(typeof k === 'object' ? k : document.createTextNode(String(k)));
-  }
-  return e;
+  return kids(e, arguments);
 };
 
 DM.link = function (hash, text, cls) {
@@ -94,23 +88,12 @@ DM.trailPush = function (q, kind) {
   DM.renderTrail(q);
 };
 
-// Bootstrap: the launcher puts the key (and optionally a build error) in the
-// URL fragment. Move both into sessionStorage and strip the fragment so the key
-// does not linger in history or get copied from the address bar.
+// Bootstrap: the launcher puts the key in the URL fragment. Move it into
+// sessionStorage and strip the fragment so the key does not linger in history
+// or get copied from the address bar.
 (function bootstrap() {
   if (location.hash.indexOf('#k=') !== 0) return;
-  var p = new URLSearchParams(location.hash.slice(1));
-  sessionStorage.setItem('dm.key', p.get('k') || '');
-  sessionStorage.removeItem('dm.err');
-  var e = p.get('err');
-  if (e) {
-    try {
-      var bin = atob(e.replace(/-/g, '+').replace(/_/g, '/'));
-      sessionStorage.setItem('dm.err', new TextDecoder().decode(Uint8Array.from(bin, function (c) { return c.charCodeAt(0); })));
-    } catch (x) {
-      sessionStorage.setItem('dm.err', '');
-    }
-  }
+  sessionStorage.setItem('dm.key', new URLSearchParams(location.hash.slice(1)).get('k') || '');
   history.replaceState(null, '', location.pathname + location.search + '#/');
 })();
 
@@ -165,11 +148,8 @@ DM.setBadges = function (f, o) {
   if (o.truncated) add('info', 'truncated', 'Result was capped');
 };
 
-// setStats fills the header size line from overview.stats; older backends omit
-// it, so a falsy value leaves the slot hidden.
+// setStats fills the header size line from overview.stats.
 DM.setStats = function (st) {
-  if (!st) return;
-  sessionStorage.setItem('dm.stats', JSON.stringify(st));
   var el = document.getElementById('stats');
   el.textContent = st.symbols + ' symbols · ' + st.edges + ' edges · ' + st.files + ' files';
   el.hidden = false;
@@ -208,13 +188,6 @@ DM.route = async function () {
 };
 
 document.addEventListener('DOMContentLoaded', function () {
-  var banner = document.getElementById('banner');
-  var detail = sessionStorage.getItem('dm.err');
-  if (detail !== null) {
-    banner.textContent = DM.BUILD_FAILED;
-    if (detail) banner.append(DM.el('code', null, detail));
-    banner.hidden = false;
-  }
   document.getElementById('clear').addEventListener('click', function () {
     sessionStorage.setItem('dm.trail', '[]');
     DM.renderTrail('');
@@ -234,10 +207,5 @@ document.addEventListener('DOMContentLoaded', function () {
     q.select();
   });
   window.addEventListener('hashchange', DM.route);
-  // Header stats: the map fills them; elsewhere use the cache or fetch once.
-  var cached = null;
-  try { cached = JSON.parse(sessionStorage.getItem('dm.stats')); } catch (e) { /* stale cache */ }
-  if (cached) DM.setStats(cached);
-  else if (location.hash.replace(/^#\/?/, '')) DM.api('overview').then(function (d) { DM.setStats(d.stats); }, function () {});
   DM.route();
 });

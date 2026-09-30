@@ -43,15 +43,6 @@ func RepoRoot(dir string) (string, error) {
 	return "", fmt.Errorf("%s is not inside a repository (no go.mod or .git above it): %w", dir, ErrInvalidArgument)
 }
 
-// openFor picks the handle policy: no-build for read-only viewers, the
-// build-on-demand path for everything else.
-func (m *Manager) openFor(ctx context.Context, repo string, noBuild bool) (*sql.DB, func(), Freshness, error) {
-	if noBuild {
-		return m.openNoBuild(ctx, repo)
-	}
-	return m.ensureFresh(ctx, repo)
-}
-
 // openNoBuild opens the repo's existing graph without ever building. It
 // returns ErrNotFound when no graph this binary can read exists.
 func (m *Manager) openNoBuild(ctx context.Context, repo string) (*sql.DB, func(), Freshness, error) {
@@ -293,7 +284,7 @@ func (m *Manager) SearchSymbols(ctx context.Context, repo, q string) (*StubsResp
 		if err != nil {
 			return err
 		}
-		got, err := scanNeighbors(rows, 0)
+		got, err := scanNeighbors(rows)
 		if err != nil {
 			return err
 		}
@@ -341,12 +332,11 @@ func (m *Manager) EntryPoints(ctx context.Context, repo string) (*StubsResponse,
 	if err != nil {
 		return nil, err
 	}
-	if resp.Symbols, err = scanNeighbors(rows, 0); err != nil {
+	got, err := scanNeighbors(rows)
+	if err != nil {
 		return nil, err
 	}
-	if resp.Symbols == nil {
-		resp.Symbols = []Neighbor{}
-	}
+	resp.Symbols = append(resp.Symbols, got...)
 	if len(resp.Symbols) > maxEntryPoints {
 		resp.Symbols = resp.Symbols[:maxEntryPoints]
 		resp.Truncated = true

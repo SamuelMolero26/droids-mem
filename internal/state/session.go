@@ -2,6 +2,7 @@ package state
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -80,10 +81,10 @@ func sessionsDir() (string, error) {
 func safeID(id string) (string, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return "", fmt.Errorf("session id required")
+		return "", errors.New("session id required")
 	}
 	if len(id) > 128 {
-		return "", fmt.Errorf("session id too long")
+		return "", errors.New("session id too long")
 	}
 	for _, r := range id {
 		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
@@ -107,20 +108,67 @@ func sessionPath(id, ext string) (string, error) {
 	return filepath.Join(dir, sid+ext), nil
 }
 
-func ensureSessionsDir() (string, error) {
+func ensureSessionsDir() error {
 	dir, err := sessionsDir()
 	if err != nil {
-		return "", err
+		return err
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("create sessions dir: %w", err)
+		return fmt.Errorf("create sessions dir: %w", err)
 	}
-	return dir, nil
+	return nil
+}
+
+// appendLines appends lines (newline-terminated) to the session sentinel file
+// ccID+ext, creating it 0600. what names the file in error messages.
+func appendLines(ccID, ext, what string, lines []string) error {
+	if err := ensureSessionsDir(); err != nil {
+		return err
+	}
+	path, err := sessionPath(ccID, ext)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) // #nosec G304
+	if err != nil {
+		return fmt.Errorf("open %s: %w", what, err)
+	}
+	if _, err := f.WriteString(strings.Join(lines, "\n") + "\n"); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write %s: %w", what, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", what, err)
+	}
+	return nil
+}
+
+// readLines returns the trimmed, non-empty lines of the session sentinel file
+// ccID+ext; a missing file yields nil.
+func readLines(ccID, ext, what string) ([]string, error) {
+	path, err := sessionPath(ccID, ext)
+	if err != nil {
+		return nil, err
+	}
+	b, err := os.ReadFile(path) // #nosec G304 -- path is sessionsDir/<safeID>.<ext>
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", what, err)
+	}
+	var out []string
+	for line := range strings.SplitSeq(string(b), "\n") {
+		if l := strings.TrimSpace(line); l != "" {
+			out = append(out, l)
+		}
+	}
+	return out, nil
 }
 
 // StageSummary writes (replacing) the staged summary for a CC session.
 func StageSummary(ccID string, s StagedSummary) error {
-	if _, err := ensureSessionsDir(); err != nil {
+	if err := ensureSessionsDir(); err != nil {
 		return err
 	}
 	path, err := sessionPath(ccID, stagedExt)
@@ -183,22 +231,13 @@ func StagedModTime(ccID string) (time.Time, bool, error) {
 // relevance-pull (ADR-0016 pt 8 dedupe — inject each memory at most once per
 // session).
 func InjectedSet(ccID string) (map[string]bool, error) {
-	path, err := sessionPath(ccID, injectedExt)
+	ids, err := readLines(ccID, injectedExt, "injected set")
 	if err != nil {
 		return nil, err
 	}
-	b, err := os.ReadFile(path) // #nosec G304 -- path is sessionsDir/<safeID>.injected
-	if os.IsNotExist(err) {
-		return map[string]bool{}, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("read injected set: %w", err)
-	}
-	set := map[string]bool{}
-	for line := range strings.SplitSeq(string(b), "\n") {
-		if id := strings.TrimSpace(line); id != "" {
-			set[id] = true
-		}
+	set := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		set[id] = true
 	}
 	return set, nil
 }
@@ -208,25 +247,7 @@ func RecordInjected(ccID string, ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	if _, err := ensureSessionsDir(); err != nil {
-		return err
-	}
-	path, err := sessionPath(ccID, injectedExt)
-	if err != nil {
-		return err
-	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) // #nosec G304
-	if err != nil {
-		return fmt.Errorf("open injected set: %w", err)
-	}
-	if _, err := f.WriteString(strings.Join(ids, "\n") + "\n"); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("write injected set: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("close injected set: %w", err)
-	}
-	return nil
+	return appendLines(ccID, injectedExt, "injected set", ids)
 }
 
 // AppendFiles records file paths touched during a CC session (ADR-0021 Phase 2
@@ -239,50 +260,23 @@ func AppendFiles(ccID string, paths []string) error {
 	if len(paths) == 0 {
 		return nil
 	}
-	if _, err := ensureSessionsDir(); err != nil {
-		return err
-	}
-	path, err := sessionPath(ccID, filesExt)
-	if err != nil {
-		return err
-	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) // #nosec G304
-	if err != nil {
-		return fmt.Errorf("open files sentinel: %w", err)
-	}
-	if _, err := f.WriteString(strings.Join(paths, "\n") + "\n"); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("write files sentinel: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("close files sentinel: %w", err)
-	}
-	return nil
+	return appendLines(ccID, filesExt, "files sentinel", paths)
 }
 
 // ReadFiles returns the deduped, order-preserving set of file paths captured for
 // a CC session (empty if none).
 func ReadFiles(ccID string) ([]string, error) {
-	path, err := sessionPath(ccID, filesExt)
+	lines, err := readLines(ccID, filesExt, "files sentinel")
 	if err != nil {
 		return nil, err
 	}
-	b, err := os.ReadFile(path) // #nosec G304 -- path is sessionsDir/<safeID>.files
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("read files sentinel: %w", err)
-	}
 	seen := map[string]bool{}
 	var out []string
-	for line := range strings.SplitSeq(string(b), "\n") {
-		p := strings.TrimSpace(line)
-		if p == "" || seen[p] {
-			continue
+	for _, p := range lines {
+		if !seen[p] {
+			seen[p] = true
+			out = append(out, p)
 		}
-		seen[p] = true
-		out = append(out, p)
 	}
 	return out, nil
 }
@@ -324,7 +318,7 @@ func ChangeCount(ccID string) (int, error) {
 
 // IncrementChange bumps and returns the meaningful-change tally for a CC session.
 func IncrementChange(ccID string) (int, error) {
-	if _, err := ensureSessionsDir(); err != nil {
+	if err := ensureSessionsDir(); err != nil {
 		return 0, err
 	}
 	n, err := ChangeCount(ccID)

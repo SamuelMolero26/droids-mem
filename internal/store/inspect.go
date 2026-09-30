@@ -82,12 +82,11 @@ func (s *Store) List(ctx context.Context, req ListRequest) (*ListResponse, error
 	args = append(args, limit)
 
 	stmt := fmt.Sprintf(`
-		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at,
-		       expand_count, COALESCE(last_expanded_at, 0), scope, authored_at
+		SELECT %s
 		FROM memories %s
 		ORDER BY created_at DESC, id DESC
 		LIMIT ?
-	`, where)
+	`, memoryCols, where)
 
 	rows, err := s.db.QueryContext(ctx, stmt, args...)
 	if err != nil {
@@ -97,8 +96,8 @@ func (s *Store) List(ctx context.Context, req ListRequest) (*ListResponse, error
 
 	memories := []Memory{}
 	for rows.Next() {
-		var m Memory
-		if err := rows.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &m.Scope, &m.AuthoredAt); err != nil {
+		m, err := scanMemory(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan memory: %w", err)
 		}
 		memories = append(memories, m)
@@ -181,12 +180,7 @@ func (s *Store) GetRow(ctx context.Context, id string) (*Memory, error) {
 		return nil, &ValidationError{Field: "id", Message: "required"}
 	}
 
-	var m Memory
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at,
-		       expand_count, COALESCE(last_expanded_at, 0), scope, authored_at
-		FROM memories WHERE id = ?
-	`, id).Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &m.Scope, &m.AuthoredAt)
+	m, err := scanMemory(s.db.QueryRowContext(ctx, `SELECT `+memoryCols+` FROM memories WHERE id = ?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -194,6 +188,19 @@ func (s *Store) GetRow(ctx context.Context, id string) (*Memory, error) {
 		return nil, fmt.Errorf("get memory: %w", err)
 	}
 	return &m, nil
+}
+
+// memoryCols is the column list scanMemory reads, in scan order.
+const memoryCols = `id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at,
+		       expand_count, COALESCE(last_expanded_at, 0), scope, authored_at`
+
+// scanMemory scans one memoryCols row from a *sql.Row or *sql.Rows.
+func scanMemory(sc interface{ Scan(...any) error }) (Memory, error) {
+	var m Memory
+	if err := sc.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &m.Scope, &m.AuthoredAt); err != nil {
+		return Memory{}, err
+	}
+	return m, nil
 }
 
 // CountsResponse is the static corpus census the Memory inspector sidebar shows:

@@ -3,7 +3,7 @@ package scrub
 import (
 	_ "embed"
 	"fmt"
-	"reflect"
+	"maps"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -71,21 +71,13 @@ func RunCorpus() (*CorpusReport, error) {
 		tc.Input = strings.ReplaceAll(tc.Input, CutMarker, "")
 		tc.Expected = strings.ReplaceAll(tc.Expected, CutMarker, "")
 		got, report := Scrub(tc.Input)
-		want := tc.Counts
-		if want == nil {
-			want = map[string]int{}
-		}
-		gotCounts := report.PerPatternCounts
-		if gotCounts == nil {
-			gotCounts = map[string]int{}
-		}
 		res := CorpusCaseResult{Name: tc.Name, Category: tc.Category, Pass: true}
 		if got != tc.Expected {
 			res.Pass = false
 			res.Diff = fmt.Sprintf("output mismatch: want %q got %q", tc.Expected, got)
-		} else if !reflect.DeepEqual(gotCounts, want) {
+		} else if !maps.Equal(report.PerPatternCounts, tc.Counts) {
 			res.Pass = false
-			res.Diff = fmt.Sprintf("counts mismatch: want %v got %v", want, gotCounts)
+			res.Diff = fmt.Sprintf("counts mismatch: want %v got %v", tc.Counts, report.PerPatternCounts)
 		}
 		if res.Pass {
 			rep.Passed++

@@ -55,49 +55,34 @@ const (
 	maxIdentityNonceLen = 128
 )
 
-// The instructions string is the proactive protocol surfaced to the model via
-// the MCP initialize response (ADR-0019, Layer 1). MCP has no auto-call
-// primitive, so this — plus the per-tool descriptions — is the only cross-host
-// lever to make an agent call droids-mem on its own. It is best-effort: the
-// floor is model judgment, backstopped by the store's dedup. Hard enforcement
-// stays a per-host hook concern (ADR-0016 is the Claude Code adapter).
+// serverInstructions is the proactive protocol surfaced to the model via the
+// MCP initialize response. MCP has no auto-call primitive, so this — plus the
+// per-tool descriptions — is the only cross-host lever to make an agent call
+// droids-mem on its own; hard enforcement stays a per-host hook concern.
 //
-// Only the session-summary sentence differs by transport: HTTP hosts (Claude
-// Code, ADR-0016) have hooks that record summaries automatically, so the model
-// must NOT double-save; stdio hosts (codex, opencode) have no such hook wired
-// by default, so the model must save one itself or the run leaves no
-// continuity. A host that does wire a flush hook is still safe — dedupe makes
-// the redundant self-save harmless.
-const instructionsCore = `droids-mem is your persistent memory across sessions: prior fixes, decisions, and conventions, so you do not relearn them. Call these tools on your own; do not wait to be asked.
+// Budget, measured (TestInstructions_Budget): Claude Code hands the model only
+// the first 2048 chars, and Codex relies on the first 512 standing alone. So
+// the numbered core loop comes first and fits in 512, and the whole text fits
+// in 2048 — a rule past the cut never reaches the model on any Claude Code
+// surface. One text for every transport: the summary rule tells a hooked host
+// that staging counts, and dedupe absorbs a redundant save.
+const serverInstructions = `droids-mem is your persistent memory and code graph. Use it on your own, without being asked:
+1. At task start and on topic shifts: mem_search a short description of the task.
+2. Code in Go/Python/TS/JS: graph_package to orient, graph_symbol for source + callers/callees, before grep or reading files. Before editing a function: graph_symbol direction=up depth=3; cite transitive_callers.
+3. Learned something reusable: mem_save it.
+4. End of a run: save ONE session_summary.
 
-AT THE START of a task, and whenever the topic shifts:
-- mem_search with a short description of the task. Results are ranked; read the full body with mem_get before relying on one. Each row has authored_at (unix seconds, when the lesson was written) — treat an old lesson about fast-moving code as possibly stale and verify it against current code.
-- mem_context with task_type = the repo or top-level directory name, the exact same string every session, for the last session summary and standing user rules.
+SEARCH: results are ranked previews; mem_get an id for the full body before relying on it. all_projects=true searches every repo. For continuity also call mem_context with task_type = the git repo name, reused verbatim every session.
 
-AS YOU WORK, mem_save each genuinely reusable lesson (not routine steps): error_resolution (problem + fix that worked), task_pattern (repeatable approach), user_rule (a correction or preference the user gave). The store deduplicates, so prefer saving over forgetting. Reuse one session_id for the whole run.
+SAVE: kind error_resolution (problem + fix), task_pattern (repeatable approach) or user_rule (a user correction or preference). Only reusable lessons; re-saving is harmless (deduped). Reuse the session_id from the first mem_context or mem_save on every later call in the run.
 
-AFTER EACH droids-mem call, say in one line what you learned and how it changes your approach (e.g. "graph_symbol: Store.Save has 15 transitive callers — keeping its signature"), so the user can see decisions come from memory and graph data.
+SUMMARY: when the task is done or the user wraps up, mem_save kind=session_summary: what happened, what you learned, what comes next. Once per run; if a host hook already asked you to stage one, that counts.
 
-FOR CODE in a Go, Python, TypeScript, or JavaScript repo, prefer graph_package (orient) and graph_symbol (one symbol + callers/callees) over grep and file reads. Pass the project root as repo.
-`
+GRAPH: re-query a stub's exact qname to expand it; 'to' returns a call path; pass the project root as 'repo'. freshness.stale: true means the whole previous index is served; carried: true or stale_units means that package rides on old edges. Mapper-tier (Python/TS/JS) edges are heuristic. Verify critical findings against source.
 
-const summaryPolicyHTTP = `Do NOT save session summaries here — your host records them at session end; saving one yourself would duplicate it.`
+After a memory or graph call, say in one line what it told you, e.g. "Store.Save has 15 transitive callers, keeping its signature".
 
-const summaryPolicyStdio = `AT THE END of a run, save ONE session_summary (what happened, what you learned, what comes next). No hook on this host records it for you.`
-
-const instructionsTail = `Never put secrets, tokens, or keys in any field. Tags are stored unscrubbed.
-
-BEFORE EDITING a function, call graph_symbol with direction=up depth=3 and mention its transitive_callers count — the blast radius of the change. Python/TS/JS (mapper-tier) callers are approximate; a stale or carried graph answer means verify against source before acting.`
-
-// instructions assembles the transport-appropriate protocol string. It carries
-// only when and why to call; parameter and output detail lives in the tool
-// descriptions, which every host already sends, so it is never repeated here.
-func instructions(stdio bool) string {
-	if stdio {
-		return instructionsCore + "\n" + summaryPolicyStdio + "\n\n" + instructionsTail
-	}
-	return instructionsCore + "\n" + summaryPolicyHTTP + "\n\n" + instructionsTail
-}
+Never put secrets, API keys or tokens in any field, tags included: tags are stored unscrubbed.`
 
 // Config controls the MCP bridge server. Zero values fall back to defaults.
 type Config struct {
@@ -130,7 +115,7 @@ func Run(ctx context.Context, cfg Config, st *store.Store) error {
 		logger = log.Default()
 	}
 
-	s := newMCPServer(cfg, st, false)
+	s := newMCPServer(cfg, st)
 
 	mcpHandler := server.NewStreamableHTTPServer(s,
 		server.WithEndpointPath(cfg.Endpoint),
@@ -250,7 +235,7 @@ func shareRepo() string {
 }
 
 // identityHandler answers a challenge–response proof of token knowledge:
-// GET /identity?nonce=<client nonce> → {"server", "proof", "version", "pid", "pid_proof", "ui"}.
+// GET /identity?nonce=<client nonce> → {"server", "proof", "version", "pid", "pid_proof"}.
 // Unauthenticated by design — the proofs reveal nothing about the token, and
 // they let ensure-server verify that whatever answers on this port actually
 // holds the shared token before reporting "already_running" (anti
@@ -259,12 +244,6 @@ func shareRepo() string {
 // "proof" answers "does this listener hold the token"; "pid_proof" additionally
 // answers "which process is it", which a caller about to send a signal needs
 // and the token alone cannot establish.
-//
-// "ui" says this build ships the graph viewer. Local builds all report version
-// "dev", so it is what tells ensure-server that a daemon left running from an
-// older checkout lacks /ui/. It is a property of the build, not of whether the
-// viewer is mounted on this bind, so a non-loopback daemon is not replaced on
-// every call.
 func identityHandler(token, version string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		nonce := r.URL.Query().Get("nonce")
@@ -274,7 +253,7 @@ func identityHandler(token, version string) http.HandlerFunc {
 		}
 		pid := os.Getpid()
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"server":%q,"proof":%q,"version":%q,"pid":%d,"pid_proof":%q,"ui":true}`,
+		fmt.Fprintf(w, `{"server":%q,"proof":%q,"version":%q,"pid":%d,"pid_proof":%q}`,
 			ServerName, IdentityProof(token, nonce), version, pid,
 			IdentityPidProof(token, nonce, pid))
 	}
