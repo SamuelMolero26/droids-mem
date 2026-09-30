@@ -15,23 +15,22 @@ func TestDecideStale(t *testing.T) {
 		action  staleAction
 	}{
 		{
-			name:    "same version with the viewer is left alone",
-			running: serverIdentity{Version: "v1.2.3", Pid: 4242, UI: true},
+			name:    "same release version is left alone",
+			running: serverIdentity{Version: "v1.2.3", Pid: 4242},
 			want:    "v1.2.3",
 			action:  keepServer,
 		},
 		{
-			// Every local build reports "dev", so equal versions cannot tell a
-			// daemon left running from an older checkout apart from this one.
-			// Lacking the viewer, it is superseded code: `graph ui` would open
-			// a /ui/ that 404s.
-			name:    "same dev version without the viewer is replaced",
+			// Every local build reports "dev", so equal versions cannot tell two
+			// builds apart: a dev caller always replaces, or a rebuilt viewer
+			// keeps talking to the previous build's daemon.
+			name:    "dev build replaces a dev daemon",
 			running: serverIdentity{Version: "dev", Pid: 4242},
 			want:    "dev",
 			action:  replaceServer,
 		},
 		{
-			name:    "same version without the viewer and no proven pid is reported",
+			name:    "dev daemon without a proven pid is reported",
 			running: serverIdentity{Version: "dev", Pid: 0},
 			want:    "dev",
 			action:  reportStale,
@@ -59,7 +58,7 @@ func TestDecideStale(t *testing.T) {
 		},
 		{
 			name:    "unproven pid on a matching version is still left alone",
-			running: serverIdentity{Version: "v1.2.3", Pid: 0, UI: true},
+			running: serverIdentity{Version: "v1.2.3", Pid: 0},
 			want:    "v1.2.3",
 			action:  keepServer,
 		},

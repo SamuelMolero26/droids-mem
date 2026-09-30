@@ -57,7 +57,9 @@ derived key so a plain `proof` of nonce `N:pid` can't forge it. `uninstall
 `ensure-server` uses that to **replace a stale daemon**: nothing else does, so
 without it a daemon serves superseded code until reboot (`upgrade` replaces the
 executable and returns). Any version difference counts, either direction — the
-daemon should be the build the caller actually has. It signals the *proven* PID
+daemon should be the build the caller actually has. A `dev` caller always
+replaces: every local build reports `dev`, so equal versions prove nothing
+there, and one restart per call is the whole cost. It signals the *proven* PID
 from `/identity`, never the pidfile, then spawns a replacement without waiting
 for the drain: `http.Server.Shutdown` closes listeners before waiting on
 in-flight connections, so the address frees in ms even when a live MCP stream
