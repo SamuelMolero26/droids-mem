@@ -7,7 +7,7 @@ import (
 
 // CurrentSchemaVersion is the user_version that a fully-initialized
 // database reports. Bump when adding a new entry to the migrations ladder.
-const CurrentSchemaVersion = 9
+const CurrentSchemaVersion = 10
 
 // migration is one rung in the PRAGMA user_version ladder. Each rung runs
 // inside its own transaction; partial failure rolls back atomically.
@@ -43,6 +43,7 @@ var migrations = []migration{
 	{from: 6, to: 7, sql: migrationV6ToV7},
 	{from: 7, to: 8, sql: migrationV7ToV8},
 	{from: 8, to: 9, sql: migrationV8ToV9},
+	{from: 9, to: 10, sql: migrationV9ToV10},
 }
 
 // migrationV0ToV1 widens the row shape and adds the meta table.
@@ -352,8 +353,7 @@ DROP INDEX IF EXISTS idx_memories_task_type;
 // created_at, for a memory's original authoring date. The two agree for a
 // locally-authored row and diverge on import, where ImportShared re-stamps
 // created_at to the local import time but carries the peer's authored_at
-// forward. authored_at is never an ORDER BY key and never drives review_after
-// — there is no decay clock in this change.
+// forward. authored_at is never an ORDER BY key.
 //
 // Backfilled to created_at rather than left at the DEFAULT 0: SQLite has no
 // ADD COLUMN ... DEFAULT (<other column>), so two statements per table. A
@@ -370,4 +370,14 @@ UPDATE memories SET authored_at = created_at;
 
 ALTER TABLE archived_memories ADD COLUMN authored_at INTEGER NOT NULL DEFAULT 0;
 UPDATE archived_memories SET authored_at = created_at;
+`
+
+// migrationV9ToV10 drops the never-wired pinned and review_after columns (both
+// added at 5→6). No index, trigger, or view references them, so DROP COLUMN is
+// safe. Rung 5→6 is frozen history and still adds them; this rung removes them.
+const migrationV9ToV10 = `
+ALTER TABLE memories DROP COLUMN pinned;
+ALTER TABLE archived_memories DROP COLUMN pinned;
+ALTER TABLE memories DROP COLUMN review_after;
+ALTER TABLE archived_memories DROP COLUMN review_after;
 `

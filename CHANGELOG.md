@@ -20,6 +20,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   absorbs a redundant save. `TestInstructions_Budget` holds both limits.
 
 ### Added
+- **`mem_search` and `mem_context` rows now carry `authored_at`** (unix
+  seconds), replacing the removed `needs_review` staleness signal. It is when
+  the lesson was originally written (imported lessons predate `created_at`); the
+  MCP instructions tell agents to verify old lessons about fast-moving code
+  against current code.
 - **`graph_symbol` `no_source` and `no_tests` options** (CLI: `--no-source`,
   `--no-tests`). `no_source` omits the queried symbol's own body; `no_tests`
   drops `_test.go` neighbors from the rows so the 50-row cap is spent on
@@ -31,6 +36,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   When more than half of the callers arrive only via interface dispatch, the hint
   now says they are CHA over-approximations to verify with grep, instead of
   leaving the agent to infer it from `callers_via_interface`.
+
+### Changed
+- **MCP initialize instructions cut from ~1,080 to ~480 tokens**, paid once per
+  agent session on every host. They now carry only when and why to call each
+  tool; parameter and output detail (`learned_preview`, `all_projects`,
+  `session_id` reuse, graph freshness/carried semantics) stays in the tool
+  descriptions that already carry it. The narrate-what-you-learned line now
+  applies to droids-mem calls only, not every tool call.
 
 ### Fixed
 - **`ensure-server` now replaces the daemon when called from a local build.**
@@ -60,6 +73,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   calls from any of them still attribute to it. TypeScript is untouched: there a
   repeated qname means two different functions whose container was lost.
   Cached graphs rebuild once (indexer generation 10).
+
+### Removed
+- **The unused `pinned` and `review_after` columns and the `needs_review`
+  flag** (schema v10). Nothing ever wrote them, so `pinned` was always false
+  and `needs_review` never fired. They no longer appear in `mem_search`,
+  `mem_context`, or `list` JSON; use `authored_at`/`created_at` for age.
 
 ## [1.3.0-beta.1] — 2026-09-14
 

@@ -30,8 +30,7 @@ const (
 
 // SearchCompactRow is the single default list projection (AXI §2 minimal
 // schema): identity + title + a rune-safe learned_preview, never the full
-// Learned. Pinned/needs_review ride along only when true so the lifecycle
-// trust signal survives without a full-detail flag. Ranking internals (score,
+// Learned. Ranking internals (score,
 // overlap, expand counts, timestamps) are dropped — result order already
 // implies relevance. The full body is one get/mem_get away (see Help).
 type SearchCompactRow struct {
@@ -40,8 +39,9 @@ type SearchCompactRow struct {
 	Title          string `json:"title"`
 	TaskType       string `json:"task_type"`
 	LearnedPreview string `json:"learned_preview"`
-	Pinned         bool   `json:"pinned,omitempty"`
-	NeedsReview    bool   `json:"needs_review,omitempty"`
+	// AuthoredAt (unix seconds) is when the lesson was originally written; for
+	// imported rows it predates created_at. It is the agent's age signal.
+	AuthoredAt int64 `json:"authored_at"`
 }
 
 // SearchCompactResponse is the list envelope both transports emit.
@@ -70,8 +70,7 @@ func ToCompactSearchResponse(resp *SearchResponse, help string) SearchCompactRes
 			Title:          r.Title,
 			TaskType:       r.TaskType,
 			LearnedPreview: LearnedPreview(r.Learned),
-			Pinned:         r.Pinned,
-			NeedsReview:    r.NeedsReview,
+			AuthoredAt:     r.AuthoredAt,
 		})
 	}
 	if len(out.Results) > 0 {
