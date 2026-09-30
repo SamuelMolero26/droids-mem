@@ -193,7 +193,6 @@ func TestLimitBody(t *testing.T) {
 	})
 }
 
-
 func TestIdentityPidProof(t *testing.T) {
 	const token = "tok-abc"
 
