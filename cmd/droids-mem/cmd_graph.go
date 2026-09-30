@@ -270,7 +270,7 @@ marked stale, and the build error is printed as index_error.`,
 }
 
 // openBrowser asks the OS to open u and reports whether the opener failed.
-// An opener still running after openerWait is taken as success: some xdg-open
+// An opener still running after 3s is taken as success: some xdg-open
 // setups run the browser in the foreground, and waiting on it would hang.
 func openBrowser(u string) error {
 	opener := "xdg-open"
@@ -286,12 +286,10 @@ func openBrowser(u string) error {
 	select {
 	case err := <-done:
 		return err
-	case <-time.After(openerWait):
+	case <-time.After(3 * time.Second):
 		return nil
 	}
 }
-
-const openerWait = 3 * time.Second
 
 // writeGraphErr emits the error envelope and exits (3 for misses, 1 otherwise).
 func writeGraphErr(err error) {
