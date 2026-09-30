@@ -2,7 +2,7 @@
 // Shared plumbing: session bootstrap, API client, router, badges. Every view
 // renders through textContent / text nodes only (CSP forbids inline script and
 // style, and nothing here builds markup from strings).
-var DM = window.DM = { views: {}, seq: 0, opts: { depth: 2, dir: 'both' } };
+var DM = window.DM = { views: {}, seq: 0, opts: { depth: 2, dir: 'both', symDepth: 1 } };
 
 // el(tag, className, ...children): strings become text nodes, null is skipped.
 function kids(e, args) {
