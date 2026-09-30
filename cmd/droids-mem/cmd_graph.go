@@ -196,12 +196,14 @@ automatically when the repo changes.`,
 	}
 	packageCmd.Flags().StringVar(&packageFlag, "package", "", "package path (alias for the positional arg; matches MCP graph_package)")
 
+	var noOpen bool
 	uiCmd := &cobra.Command{
 		Use:   "ui",
 		Short: "Open the graph viewer for this repo in the browser",
 		Long: `ui builds (or refreshes) the repo's graph, makes sure the local daemon is
 running, and opens the viewer in the default browser. The URL carries a signed
-key valid for 12 hours; it is printed as JSON in case the browser cannot open.
+key valid for 12 hours, so it is printed (as JSON "url") only when the browser
+could not be opened or --no-open is passed.
 
 If the build fails but an earlier graph exists, the viewer opens on that graph
 marked stale, and the build error is printed as index_error.`,
@@ -247,8 +249,12 @@ marked stale, and the build error is printed as index_error.`,
 			}
 			// The key rides in the URL fragment, which browsers never send to a server.
 			u := baseURL(addr) + "/ui/#k=" + mcpserver.UIKey(tok, root, time.Now().Add(mcpserver.UIKeyTTL))
-			openBrowser(u)
-			out := map[string]string{"status": "ok", "url": u, "repo": root}
+			out := map[string]string{"status": "ok", "repo": root}
+			// The URL is a replayable credential: keep it out of stdout (logs,
+			// agent transcripts) unless the user has to open it by hand.
+			if noOpen || openBrowser(u) != nil {
+				out["url"] = u
+			}
 			if indexErr != "" {
 				out["index_error"] = indexErr
 			}
@@ -257,18 +263,32 @@ marked stale, and the build error is printed as index_error.`,
 		},
 	}
 
+	uiCmd.Flags().BoolVar(&noOpen, "no-open", false, "do not open a browser; print the URL instead")
+
 	cmd.AddCommand(indexCmd, symbolCmd, packageCmd, uiCmd)
 	return cmd
 }
 
-// openBrowser asks the OS to open u. Failure is not an error: the URL is also
-// printed, so the user can open it by hand.
-func openBrowser(u string) {
+// openBrowser asks the OS to open u and reports whether the opener failed.
+// An opener still running after 3s is taken as success: some xdg-open
+// setups run the browser in the foreground, and waiting on it would hang.
+func openBrowser(u string) error {
 	opener := "xdg-open"
 	if runtime.GOOS == "darwin" {
 		opener = "open"
 	}
-	_ = exec.Command(opener, u).Start() // #nosec G204 -- fixed opener, URL is a single argv element, no shell
+	c := exec.Command(opener, u) // #nosec G204 -- fixed opener, URL is a single argv element, no shell
+	if err := c.Start(); err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- c.Wait() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(3 * time.Second):
+		return nil
+	}
 }
 
 // writeGraphErr emits the error envelope and exits (3 for misses, 1 otherwise).
