@@ -28,9 +28,9 @@ type Memory struct {
 	// Origin: "manual" (explicit save) or "auto" (session-end path); set by Recent*.
 	Origin string `json:"origin,omitempty"`
 	// AuthoredAt is when the lesson was originally WRITTEN, distinct from
-	// CreatedAt (when it entered this store). Projected by GetRow and List
-	// only — deliberately not search.go/context.go, so it does not spray an
-	// uninterpreted field across every agent bundle.
+	// CreatedAt (when it entered this store). Also projected on mem_search and
+	// mem_context rows as the agent-facing age signal; the MCP instructions
+	// teach how to read it.
 	AuthoredAt int64 `json:"authored_at"`
 }
 

@@ -50,6 +50,7 @@ type ContextMemory struct {
 	What           string `json:"what,omitempty"`
 	Snippet        string `json:"snippet,omitempty"`
 	CreatedAt      int64  `json:"created_at"`
+	AuthoredAt     int64  `json:"authored_at"`
 	ExpandCount    int    `json:"expand_count"`
 	LastExpandedAt int64  `json:"last_expanded_at,omitempty"`
 }
@@ -196,13 +197,13 @@ func (s *Store) Context(ctx context.Context, req ContextRequest) (*ContextRespon
 func fetchLastSessionConn(ctx context.Context, conn *sql.Conn, taskType string) (*ContextMemory, error) {
 	var m ContextMemory
 	err := conn.QueryRowContext(ctx, `
-		SELECT id, kind, title, learned, created_at,
+		SELECT id, kind, title, learned, created_at, authored_at,
 		       expand_count, COALESCE(last_expanded_at, 0)
 		FROM memories
 		WHERE task_type = ? AND kind = 'session_summary'
 		ORDER BY created_at DESC, id DESC
 		LIMIT 1
-	`, taskType).Scan(&m.ID, &m.Kind, &m.Title, &m.Learned, &m.CreatedAt, &m.ExpandCount, &m.LastExpandedAt)
+	`, taskType).Scan(&m.ID, &m.Kind, &m.Title, &m.Learned, &m.CreatedAt, &m.AuthoredAt, &m.ExpandCount, &m.LastExpandedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -225,7 +226,7 @@ const maxAlwaysTierUserRules = 5
 // as a full-body always-tier item and stubs is empty (deep mode, ADR-0012).
 func fetchUserRulesConn(ctx context.Context, conn *sql.Conn, taskType string, fullCap int) (rules, stubs []ContextMemory, total int, err error) {
 	rows, err := conn.QueryContext(ctx, `
-		SELECT id, kind, title, learned, created_at,
+		SELECT id, kind, title, learned, created_at, authored_at,
 		       expand_count, COALESCE(last_expanded_at, 0)
 		FROM memories
 		WHERE task_type = ? AND kind = 'user_rule'
@@ -240,7 +241,7 @@ func fetchUserRulesConn(ctx context.Context, conn *sql.Conn, taskType string, fu
 	for rows.Next() {
 		var m ContextMemory
 		var learned string
-		if err := rows.Scan(&m.ID, &m.Kind, &m.Title, &learned, &m.CreatedAt, &m.ExpandCount, &m.LastExpandedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.Kind, &m.Title, &learned, &m.CreatedAt, &m.AuthoredAt, &m.ExpandCount, &m.LastExpandedAt); err != nil {
 			return nil, nil, 0, fmt.Errorf("scan user rule: %w", err)
 		}
 		total++
@@ -294,7 +295,7 @@ func fetchBrowseKindConn(ctx context.Context, conn *sql.Conn, ftsQuery, taskType
 	if full {
 		learnedCol = `m.learned`
 	}
-	browseCols := `m.id, m.kind, m.title, m.what, ` + learnedCol + `, m.created_at,
+	browseCols := `m.id, m.kind, m.title, m.what, ` + learnedCol + `, m.created_at, m.authored_at,
 		       m.expand_count, COALESCE(m.last_expanded_at, 0)`
 
 	var (
@@ -335,7 +336,7 @@ func fetchBrowseKindConn(ctx context.Context, conn *sql.Conn, ftsQuery, taskType
 	for rows.Next() {
 		var m ContextMemory
 		var what, learned string
-		if err := rows.Scan(&m.ID, &m.Kind, &m.Title, &what, &learned, &m.CreatedAt, &m.ExpandCount, &m.LastExpandedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.Kind, &m.Title, &what, &learned, &m.CreatedAt, &m.AuthoredAt, &m.ExpandCount, &m.LastExpandedAt); err != nil {
 			return nil, fmt.Errorf("scan browse (%s): %w", kind, err)
 		}
 		m.Tier = "browse"

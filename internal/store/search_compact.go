@@ -39,6 +39,9 @@ type SearchCompactRow struct {
 	Title          string `json:"title"`
 	TaskType       string `json:"task_type"`
 	LearnedPreview string `json:"learned_preview"`
+	// AuthoredAt (unix seconds) is when the lesson was originally written; for
+	// imported rows it predates created_at. It is the agent's age signal.
+	AuthoredAt int64 `json:"authored_at"`
 }
 
 // SearchCompactResponse is the list envelope both transports emit.
@@ -67,6 +70,7 @@ func ToCompactSearchResponse(resp *SearchResponse, help string) SearchCompactRes
 			Title:          r.Title,
 			TaskType:       r.TaskType,
 			LearnedPreview: LearnedPreview(r.Learned),
+			AuthoredAt:     r.AuthoredAt,
 		})
 	}
 	if len(out.Results) > 0 {

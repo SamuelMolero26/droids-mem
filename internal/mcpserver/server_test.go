@@ -198,7 +198,7 @@ func TestInstructions_TransportFork(t *testing.T) {
 
 	// Both variants share the core protocol, graph tools, and secrets tail.
 	for _, s := range []string{httpVar, stdioVar} {
-		for _, want := range []string{"AT THE START of a task", "mem_save", "Never put secrets", "graph_symbol", "Available tools:"} {
+		for _, want := range []string{"AT THE START of a task", "mem_save", "Never put secrets", "graph_symbol", "Available tools:", "authored_at"} {
 			if !strings.Contains(s, want) {
 				t.Errorf("instructions missing %q", want)
 			}

@@ -61,7 +61,7 @@ func TestToCompactSearchResponse(t *testing.T) {
 		Results: []store.SearchResult{
 			{
 				ID: "mem_01", Kind: "task_pattern", Title: "T", Learned: "short lesson",
-				TaskType: "proj", CreatedAt: 123, Score: -1.5, OverlapScore: 0.9,
+				TaskType: "proj", CreatedAt: 123, AuthoredAt: 99, Score: -1.5, OverlapScore: 0.9,
 				ExpandCount: 3, LastExpandedAt: 456,
 			},
 			{
@@ -101,7 +101,7 @@ func TestToCompactSearchResponse(t *testing.T) {
 	for _, r := range decoded.Results {
 		byID[r["id"].(string)] = r
 	}
-	for _, want := range []string{"id", "kind", "title", "task_type", "learned_preview"} {
+	for _, want := range []string{"id", "kind", "title", "task_type", "learned_preview", "authored_at"} {
 		if _, ok := byID["mem_01"][want]; !ok {
 			t.Errorf("compact row missing %q: %v", want, byID["mem_01"])
 		}

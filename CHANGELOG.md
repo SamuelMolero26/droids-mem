@@ -8,6 +8,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`mem_search` and `mem_context` rows now carry `authored_at`** (unix
+  seconds), replacing the removed `needs_review` staleness signal. It is when
+  the lesson was originally written (imported lessons predate `created_at`); the
+  MCP instructions tell agents to verify old lessons about fast-moving code
+  against current code.
 - **`graph_symbol` `no_source` and `no_tests` options** (CLI: `--no-source`,
   `--no-tests`). `no_source` omits the queried symbol's own body; `no_tests`
   drops `_test.go` neighbors from the rows so the 50-row cap is spent on

@@ -55,6 +55,7 @@ type SearchResult struct {
 	Learned        string  `json:"learned"`
 	TaskType       string  `json:"task_type"`
 	CreatedAt      int64   `json:"created_at"`
+	AuthoredAt     int64   `json:"authored_at"`
 	Score          float64 `json:"score"`         // BM25 rank — more negative = better match
 	OverlapScore   float64 `json:"overlap_score"` // TokenOverlap(query, title+learned) — 0..1, higher = more literal token overlap
 	ExpandCount    int     `json:"expand_count"`
@@ -145,7 +146,7 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 	pageArgs := append(slices.Clip(args), internalLimit)
 	// #nosec G201 -- same as above: hardcoded conditions, parameterized values.
 	stmt := fmt.Sprintf(`
-		SELECT m.id, m.kind, m.title, m.learned, m.task_type, m.created_at,
+		SELECT m.id, m.kind, m.title, m.learned, m.task_type, m.created_at, m.authored_at,
 		       bm25(memories_fts, 3, 1, 2, 1) AS rank,
 		       m.expand_count, COALESCE(m.last_expanded_at, 0)
 		FROM memories_fts fts
@@ -164,7 +165,7 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 	results := []SearchResult{}
 	for rows.Next() {
 		var r SearchResult
-		if err := rows.Scan(&r.ID, &r.Kind, &r.Title, &r.Learned, &r.TaskType, &r.CreatedAt, &r.Score,
+		if err := rows.Scan(&r.ID, &r.Kind, &r.Title, &r.Learned, &r.TaskType, &r.CreatedAt, &r.AuthoredAt, &r.Score,
 			&r.ExpandCount, &r.LastExpandedAt); err != nil {
 			return nil, fmt.Errorf("scan result: %w", err)
 		}
