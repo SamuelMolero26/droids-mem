@@ -1,6 +1,8 @@
 'use strict';
 // Symbol page: Called by | detail with numbered source | Calls, from one
-// depth-1 request. Every string is a text node (source and docs are untrusted).
+// request at DM.opts.symDepth (default 1). True totals exist only at depth 1,
+// so deeper views count the rows shown. Every string is a text node (source
+// and docs are untrusted).
 (function () {
   var TRUNC = '…[truncated]';
   var isTest = function (n) { return /_test\.go$/.test(n.file); };
@@ -36,21 +38,42 @@
     return frag;
   }
 
-  function callersPane(d, s) {
+  // byDepth: at depth 1, render(items) as-is; deeper, a "depth k" header per
+  // level, each followed by render(rows at that level).
+  function byDepth(items, deep, render) {
+    if (!deep) return render(items);
+    var frag = document.createDocumentFragment();
+    for (var k = 1; k <= DM.opts.symDepth; k++) {
+      var rows = items.filter(function (n) { return n.depth === this; }, k);
+      if (!rows.length) continue;
+      frag.append(DM.el('div', 'grp-h', DM.el('span', null, 'depth ' + k), DM.el('span', 'muted', rows.length)), render(rows));
+    }
+    return frag;
+  }
+
+  // flatRows: one row per neighbor, file as the meta.
+  function flatRows(items) {
+    var frag = document.createDocumentFragment();
+    items.forEach(function (n) { frag.append(DM.row(n, n.file)); });
+    return frag;
+  }
+
+  function callersPane(d, s, deep) {
     var callers = d.callers || [];
-    var sec = pane('callers', 'h-callers', 'Called by', d.callers_total || callers.length, step('up', s.qname, '↑ step up'));
-    if (d.callers_via_interface > 0) sec.append(DM.el('p', 'note', DM.el('span', 'badge', d.callers_via_interface + ' via interface')));
+    var sec = pane('callers', 'h-callers', 'Called by', deep ? callers.length + ' shown' : d.callers_total || callers.length, step('up', s.qname, '↑ step up'));
+    if (d.callers_via_interface > 0) sec.append(DM.el('p', 'note', DM.el('span', 'badge', d.callers_via_interface + (deep ? ' direct' : '') + ' via interface')));
     if (s.kind === 'type' || s.kind === 'const' || s.kind === 'var') {
       sec.append(DM.el('p', 'note', d.hint || 'No callers.'));
       return sec;
     }
     var tests = callers.filter(isTest), prod = callers.filter(function (n) { return !isTest(n); });
     if (!callers.length && !d.callers_in_tests) sec.append(DM.el('p', 'note', 'No callers.'));
-    sec.append(groupByFile(prod));
-    var nt = d.callers_in_tests || tests.length;
+    sec.append(byDepth(prod, deep, groupByFile));
+    // callers_in_tests is a direct-caller count; deeper views count shown rows.
+    var nt = deep ? tests.length : d.callers_in_tests || tests.length;
     if (nt) {
       var det = DM.el('details', 'tests', DM.el('summary', null, 'Tests · ' + nt + (tests.length < nt ? ' (' + tests.length + ' shown)' : '')));
-      if (tests.length) det.append(groupByFile(tests));
+      if (tests.length) det.append(byDepth(tests, deep, groupByFile));
       else det.append(DM.el('p', 'note', 'Not in the capped list'));
       sec.append(det);
     }
@@ -58,8 +81,8 @@
     return sec;
   }
 
-  function callsPane(d, s) {
-    var rows, title, count, none, action = null;
+  function callsPane(d, s, deep) {
+    var rows, title, count, none, action = null, render = flatRows;
     if (s.kind === 'interface') {
       rows = d.implementers || [];
       title = 'Implemented by';
@@ -73,13 +96,14 @@
     } else {
       rows = d.callees || [];
       title = 'Calls';
-      count = d.callees_total || rows.length;
+      count = deep ? rows.length + ' shown' : d.callees_total || rows.length;
       none = 'No callees.';
       action = step('down', s.qname, 'step down ↓');
+      render = function (items) { return byDepth(items, deep, flatRows); };
     }
     var sec = pane('calls', 'h-calls', title, count, action);
     if (!rows.length) sec.append(DM.el('p', 'note', none));
-    rows.forEach(function (n) { sec.append(DM.row(n, n.file)); });
+    sec.append(render(rows));
     if (title === 'Calls' && d.callees_total) sec.append(DM.el('p', 'note', 'Showing ' + rows.length + ' of ' + d.callees_total + '.'));
     return sec;
   }
@@ -131,7 +155,8 @@
   }
 
   DM.views.sym = async function (ctx) {
-    var d = await DM.api('symbol', { symbol: ctx.arg, direction: 'both', depth: 1 });
+    var o = DM.opts, deep = o.symDepth > 1;
+    var d = await DM.api('symbol', { symbol: ctx.arg, direction: 'both', depth: o.symDepth });
     if (!ctx.alive()) return;
     DM.setBadges(d.freshness, { syntactic: d.precision === 'syntactic', carried: d.carried, truncated: d.truncated });
     var s = d.symbol;
@@ -145,6 +170,8 @@
     DM.trailPush(s.qname, s.kind);
     // DOM order is detail, callers, calls (reading order); the grid places them.
     ctx.main.textContent = '';
-    ctx.main.append(DM.el('div', 'sym', detailPane(d, s), callersPane(d, s), callsPane(d, s)));
+    // Depth only: the three-pane layout always shows both directions.
+    var bar = DM.el('div', 'toolbar', DM.selector('depth', [1, 2, 3, 4, 5], o.symDepth, function (v) { o.symDepth = +v; DM.route(); }));
+    ctx.main.append(bar, DM.el('div', 'sym', detailPane(d, s), callersPane(d, s, deep), callsPane(d, s, deep)));
   };
 })();

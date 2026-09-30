@@ -103,6 +103,7 @@
   };
 
   DM.stubList = stubList;
+  DM.selector = selector;
 
   // ---- search ----
   DM.views.search = async function (ctx) {
