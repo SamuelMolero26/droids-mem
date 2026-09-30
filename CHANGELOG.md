@@ -54,6 +54,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `toString` or `__proto__`.** Package names come from the indexed repo and
   resolved to `Object.prototype` members through the map view's `{}` dicts,
   so rendering threw. The dicts are null-prototype now.
+- **`graph ui` no longer prints the viewer URL once the browser opens.** The
+  URL carries a 12-hour key, and printing it always put a replayable credential
+  in logs and agent transcripts. `url` is now emitted only when the browser
+  could not be opened or with the new `--no-open` flag. An opener still running
+  after 3 s counts as opened, so a foreground `xdg-open` cannot hang the
+  command. The opener's own argv still carries the URL.
 - **`ensure-server` now replaces the daemon when called from a local build.**
   Every build from source reports version `dev`, so a rebuilt binary kept
   talking to the previous build's daemon and `graph ui` served stale API and
