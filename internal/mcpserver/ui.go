@@ -120,9 +120,10 @@ func registerUI(mux *http.ServeMux, token string, gm *graph.Manager) {
 		if dir != "up" && dir != "down" {
 			dir = "both"
 		}
+		// Symbol clamps depth to 1..5, the same bound graph_symbol gets.
 		return gm.Symbol(r.Context(), graph.SymbolRequest{
 			Repo: repo, Symbol: q.Get("symbol"), Direction: dir,
-			Depth: min(max(depth, 1), 3), NoBuild: true,
+			Depth: depth, NoBuild: true,
 		})
 	})
 }

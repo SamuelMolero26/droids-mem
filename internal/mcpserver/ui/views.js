@@ -69,7 +69,7 @@
     var s = d.symbol, callers = d.callers || [], callees = d.callees || [];
     var again = function () { DM.route(); };
     var head = DM.el('div', 'toolbar',
-      selector('depth', [1, 2, 3], o.depth, function (v) { o.depth = +v; again(); }),
+      selector('depth', [1, 2, 3, 4, 5], o.depth, function (v) { o.depth = +v; again(); }),
       selector('direction', ['both', 'up', 'down'], o.dir, function (v) { o.dir = v; again(); }));
     var stats = [];
     if (d.transitive_callers != null) stats.push('transitive callers: ' + d.transitive_callers);
