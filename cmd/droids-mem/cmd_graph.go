@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -205,7 +204,7 @@ running, and opens the viewer in the default browser. The URL carries a signed
 key valid for 12 hours; it is printed as JSON in case the browser cannot open.
 
 If the build fails but an earlier graph exists, the viewer opens on that graph
-and shows a banner with the build error.`,
+marked stale, and the build error is printed as index_error.`,
 		Args:        cobra.NoArgs,
 		Annotations: bypass,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -248,9 +247,6 @@ and shows a banner with the build error.`,
 			}
 			// The key rides in the URL fragment, which browsers never send to a server.
 			u := baseURL(addr) + "/ui/#k=" + mcpserver.UIKey(tok, root, time.Now().Add(mcpserver.UIKeyTTL))
-			if indexErr != "" {
-				u += "&err=" + base64.RawURLEncoding.EncodeToString([]byte(truncateRunes(indexErr, 300)))
-			}
 			openBrowser(u)
 			out := map[string]string{"status": "ok", "url": u, "repo": root}
 			if indexErr != "" {
@@ -273,13 +269,6 @@ func openBrowser(u string) {
 		opener = "open"
 	}
 	_ = exec.Command(opener, u).Start() // #nosec G204 -- fixed opener, URL is a single argv element, no shell
-}
-
-func truncateRunes(s string, n int) string {
-	if r := []rune(s); len(r) > n {
-		return string(r[:n]) + "…"
-	}
-	return s
 }
 
 // writeGraphErr emits the error envelope and exits (3 for misses, 1 otherwise).

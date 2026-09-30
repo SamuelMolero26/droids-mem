@@ -61,8 +61,6 @@ main > * { flex: none; }
 .muted, .state { color: var(--muted); }
 .state.error { color: var(--bad); }
 .small { font-size: 12px; }
-.banner { margin: 0; padding: 8px 16px; background: var(--warn); color: var(--bg); }
-.banner code { display: block; margin-top: 4px; font-size: 12px; white-space: pre-wrap; }
 .badge {
   display: inline-block; padding: 0 8px; background: var(--chip); border: 1px solid var(--rule);
   border-radius: 2px; color: var(--muted); font-size: 11px;
