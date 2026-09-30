@@ -4,67 +4,9 @@ import (
 	"context"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/samuelmolero26/droids-mem/internal/store"
 )
-
-// TestSearch_SurfacesNeedsReview is the [GUARD] for Phase 2: the
-// SearchResult projection must carry needs_review too (D2 — search
-// consumers still want the trust signal), computed the same audit-only way
-// as Context (D4): it never changes BM25 rank order, only adds the fields.
-func TestSearch_SurfacesNeedsReview(t *testing.T) {
-	s, conn := newTestStoreWithConn(t)
-	taskType := "lifecycle_search"
-
-	saveAndGetID := func(req store.SaveRequest) string {
-		resp, err := s.Save(context.Background(), req)
-		if err != nil {
-			t.Fatalf("seed save: %v", err)
-		}
-		return resp.ID
-	}
-
-	needsReviewID := saveAndGetID(store.SaveRequest{
-		TaskType: taskType, Kind: "error_resolution",
-		Title: "Phone mapping bug", What: "field mismatch", Learned: "map phone field", Tags: "phone",
-	})
-	normalID := saveAndGetID(store.SaveRequest{
-		TaskType: taskType, Kind: "user_rule",
-		Title: "Plain rule", What: "no marks here", Learned: "nothing special", Tags: "plain",
-	})
-
-	past := time.Now().Add(-time.Hour).Unix()
-	if _, err := conn.Exec(`UPDATE memories SET review_after = ? WHERE id = ?`, past, needsReviewID); err != nil {
-		t.Fatalf("seed review_after: %v", err)
-	}
-
-	resp, err := s.Search(context.Background(), store.SearchRequest{Query: "phone plain", TaskType: taskType})
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
-
-	byID := make(map[string]store.SearchResult, len(resp.Results))
-	for _, r := range resp.Results {
-		byID[r.ID] = r
-	}
-
-	got, ok := byID[needsReviewID]
-	if !ok {
-		t.Fatal("expected needs-review row in search results")
-	}
-	if !got.NeedsReview {
-		t.Error("NeedsReview = false, want true")
-	}
-
-	got, ok = byID[normalID]
-	if !ok {
-		t.Fatal("expected normal row in search results")
-	}
-	if got.NeedsReview {
-		t.Error("normal row NeedsReview = true, want false")
-	}
-}
 
 func seedMemories(t *testing.T, s *store.Store) {
 	t.Helper()

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 )
 
 type Memory struct {
@@ -28,28 +27,11 @@ type Memory struct {
 	Scope string `json:"scope,omitempty"`
 	// Origin: "manual" (explicit save) or "auto" (session-end path); set by Recent*.
 	Origin string `json:"origin,omitempty"`
-	// ReviewAfter is nil until a decay horizon is assigned (save/force-save/
-	// supersede in slice 3, or mark_reviewed in slice 2) — scanned as
-	// sql.NullInt64, never COALESCEd, so a grandfathered NULL row stays nil
-	// here (ADR-0031 D1).
-	ReviewAfter *int64 `json:"review_after,omitempty"`
-	// NeedsReview is derived in Go at read time, never stored or SQL-filtered
-	// (D4): ReviewAfter != nil && *ReviewAfter < now. Audit-only — it never
-	// changes which rows are returned or their order.
-	NeedsReview bool `json:"needs_review"`
 	// AuthoredAt is when the lesson was originally WRITTEN, distinct from
 	// CreatedAt (when it entered this store). Projected by GetRow and List
 	// only — deliberately not search.go/context.go, so it does not spray an
-	// uninterpreted field across every agent bundle the way ReviewAfter did.
+	// uninterpreted field across every agent bundle.
 	AuthoredAt int64 `json:"authored_at"`
-}
-
-// needsReview computes the audit-only decay flag (D4): a memory needs review
-// when it carries a review_after horizon that has already passed. nil (no
-// horizon assigned yet, or an exempt kind like session_summary) is never
-// needs_review.
-func needsReview(reviewAfter *int64) bool {
-	return reviewAfter != nil && *reviewAfter < time.Now().Unix()
 }
 
 type ListRequest struct {
@@ -101,7 +83,7 @@ func (s *Store) List(ctx context.Context, req ListRequest) (*ListResponse, error
 
 	stmt := fmt.Sprintf(`
 		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at,
-		       expand_count, COALESCE(last_expanded_at, 0), scope, review_after, authored_at
+		       expand_count, COALESCE(last_expanded_at, 0), scope, authored_at
 		FROM memories %s
 		ORDER BY created_at DESC, id DESC
 		LIMIT ?
@@ -116,14 +98,9 @@ func (s *Store) List(ctx context.Context, req ListRequest) (*ListResponse, error
 	memories := []Memory{}
 	for rows.Next() {
 		var m Memory
-		var reviewAfter sql.NullInt64
-		if err := rows.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &m.Scope, &reviewAfter, &m.AuthoredAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &m.Scope, &m.AuthoredAt); err != nil {
 			return nil, fmt.Errorf("scan memory: %w", err)
 		}
-		if reviewAfter.Valid {
-			m.ReviewAfter = &reviewAfter.Int64
-		}
-		m.NeedsReview = needsReview(m.ReviewAfter)
 		memories = append(memories, m)
 	}
 	if err := rows.Err(); err != nil {
@@ -169,7 +146,7 @@ func (s *Store) recent(ctx context.Context, where string, limit int) (*RecentSes
 	//nolint:gosec // where is a package constant, never input
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at,
-		       expand_count, COALESCE(last_expanded_at, 0), review_after, origin
+		       expand_count, COALESCE(last_expanded_at, 0), origin
 		FROM memories
 		WHERE `+where+`
 		ORDER BY created_at DESC, id DESC
@@ -183,14 +160,9 @@ func (s *Store) recent(ctx context.Context, where string, limit int) (*RecentSes
 	sessions := []Memory{}
 	for rows.Next() {
 		var m Memory
-		var reviewAfter sql.NullInt64
-		if err := rows.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &reviewAfter, &m.Origin); err != nil {
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &m.Origin); err != nil {
 			return nil, fmt.Errorf("scan session: %w", err)
 		}
-		if reviewAfter.Valid {
-			m.ReviewAfter = &reviewAfter.Int64
-		}
-		m.NeedsReview = needsReview(m.ReviewAfter)
 		sessions = append(sessions, m)
 	}
 	if err := rows.Err(); err != nil {
@@ -210,22 +182,17 @@ func (s *Store) GetRow(ctx context.Context, id string) (*Memory, error) {
 	}
 
 	var m Memory
-	var reviewAfter sql.NullInt64
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, session_id, task_type, kind, title, what, learned, tags, fingerprint, created_at, updated_at,
-		       expand_count, COALESCE(last_expanded_at, 0), scope, review_after, authored_at
+		       expand_count, COALESCE(last_expanded_at, 0), scope, authored_at
 		FROM memories WHERE id = ?
-	`, id).Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &m.Scope, &reviewAfter, &m.AuthoredAt)
+	`, id).Scan(&m.ID, &m.SessionID, &m.TaskType, &m.Kind, &m.Title, &m.What, &m.Learned, &m.Tags, &m.Fingerprint, &m.CreatedAt, &m.UpdatedAt, &m.ExpandCount, &m.LastExpandedAt, &m.Scope, &m.AuthoredAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get memory: %w", err)
 	}
-	if reviewAfter.Valid {
-		m.ReviewAfter = &reviewAfter.Int64
-	}
-	m.NeedsReview = needsReview(m.ReviewAfter)
 	return &m, nil
 }
 

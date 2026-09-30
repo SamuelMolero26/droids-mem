@@ -14,8 +14,7 @@ package db
 // THIS store. They are equal for a locally-authored row and diverge on
 // import, where ImportShared re-stamps created_at to the local import time
 // but carries the peer's authored_at forward. Pure provenance: it is never an
-// ORDER BY key and never drives review_after — an old peer lesson must not
-// jump the newest-first queue, and there is no decay clock in this change.
+// ORDER BY key — an old peer lesson must not jump the newest-first queue.
 //
 // Column comments live HERE, not inside the CREATE TABLE body: SQLite stores
 // the statement text verbatim in sqlite_master, but a column added later by
@@ -43,7 +42,6 @@ CREATE TABLE IF NOT EXISTS memories (
     expand_count          INTEGER NOT NULL DEFAULT 0,
     last_expanded_at      INTEGER,
     origin                TEXT    NOT NULL DEFAULT 'manual' CHECK(origin IN ('manual','auto')),
-    review_after          INTEGER,
     authored_at           INTEGER NOT NULL DEFAULT 0,
     CHECK(updated_at >= created_at)
 );
@@ -77,7 +75,6 @@ CREATE TABLE IF NOT EXISTS archived_memories (
     expand_count          INTEGER NOT NULL DEFAULT 0,
     last_expanded_at      INTEGER,
     origin                TEXT    NOT NULL DEFAULT 'manual',
-    review_after          INTEGER,
     archived_at           INTEGER NOT NULL,
     authored_at           INTEGER NOT NULL DEFAULT 0
 );

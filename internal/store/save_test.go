@@ -17,9 +17,7 @@ func newTestStore(t *testing.T) *store.Store {
 }
 
 // newTestStoreWithConn also returns the raw *sql.DB backing the store, so
-// tests can seed lifecycle columns (review_after) directly via SQL —
-// there is no write path for them yet in slice 1 (decay-on-save and pin/unpin
-// CLI land in slices 2-4).
+// tests can seed columns directly via SQL.
 func newTestStoreWithConn(t *testing.T) (*store.Store, *sql.DB) {
 	t.Helper()
 	conn, err := sql.Open("sqlite", ":memory:")

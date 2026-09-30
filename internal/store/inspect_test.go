@@ -8,54 +8,6 @@ import (
 	"github.com/samuelmolero26/droids-mem/internal/store"
 )
 
-// TestGetRow_ExposesLifecycleFields covers the Memory projection (inspect.go)
-// added by the v5→v6 lifecycle layer: ReviewAfter scanned from the DB,
-// NeedsReview computed in Go from ReviewAfter vs now.
-func TestGetRow_ExposesLifecycleFields(t *testing.T) {
-	s, conn := newTestStoreWithConn(t)
-	resp, err := s.Save(context.Background(), validReq())
-	if err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	past := time.Now().Add(-time.Hour).Unix()
-	if _, err := conn.Exec(`UPDATE memories SET review_after = ? WHERE id = ?`, past, resp.ID); err != nil {
-		t.Fatalf("seed lifecycle fields: %v", err)
-	}
-
-	m, err := s.GetRow(context.Background(), resp.ID)
-	if err != nil {
-		t.Fatalf("GetRow: %v", err)
-	}
-	if m.ReviewAfter == nil || *m.ReviewAfter != past {
-		t.Errorf("ReviewAfter = %v, want %d", m.ReviewAfter, past)
-	}
-	if !m.NeedsReview {
-		t.Error("NeedsReview = false, want true (review_after in the past)")
-	}
-}
-
-// TestGetRow_NullReviewAfterStaysNil guards D1/D4: a row with no review_after
-// (the grandfathered/no-decay-yet state — decay-on-save is slice 3) must
-// scan to a nil *int64, not a COALESCEd zero, and NeedsReview must be false.
-func TestGetRow_NullReviewAfterStaysNil(t *testing.T) {
-	s := newTestStore(t)
-	resp, err := s.Save(context.Background(), validReq())
-	if err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	m, err := s.GetRow(context.Background(), resp.ID)
-	if err != nil {
-		t.Fatalf("GetRow: %v", err)
-	}
-	if m.ReviewAfter != nil {
-		t.Errorf("ReviewAfter = %v, want nil", m.ReviewAfter)
-	}
-	if m.NeedsReview {
-		t.Error("NeedsReview = true, want false")
-	}
-}
-
 // TestGetRow_ProjectsAuthoredAt pins the D8 read surface: GetRow (the choke
 // point behind mem_get, the CLI, and the TUI detail pane) must project
 // authored_at as its own field, distinct from created_at.

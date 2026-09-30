@@ -117,7 +117,7 @@ func searchToolDef() mcp.Tool {
 	return mcp.NewTool("mem_search",
 		mcp.WithDescription(`Full-text search across stored memories ranked by BM25 with TokenOverlap re-ranking. Call this proactively at the start of a task and whenever the topic shifts — do not wait to be asked; prior fixes, decisions, and conventions live here.
 
-Each result carries a learned_preview (first 500 chars of the lesson, with a total-length marker when truncated) instead of the full body — ordering already implies relevance. Call mem_get with a result id to read the full body. needs_review appears only when true.
+Each result carries a learned_preview (first 500 chars of the lesson, with a total-length marker when truncated) instead of the full body — ordering already implies relevance. Call mem_get with a result id to read the full body.
 
 Pass all_projects=true to search across ALL task_types, not just the current project. Use this when investigating a problem that may span repos, or when you don't yet know which project owns the relevant memory. For code-structure questions in Go, Python, TypeScript or JavaScript repos, prefer graph_symbol/graph_package over text search.
 

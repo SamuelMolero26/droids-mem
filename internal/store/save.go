@@ -114,8 +114,7 @@ type SaveRequest struct {
 	// Zero (the normal case) means "authored here, now". Only ImportShared sets
 	// it, carrying the peer's stamp across the pool so the origin date survives
 	// independent of created_at (which always means "entered this store").
-	// Pure provenance: it is never an ordering key and never derives
-	// review_after — there is no decay clock in this change.
+	// Pure provenance: it is never an ordering key.
 	AuthoredAt int64 `json:"authored_at,omitempty"`
 }
 

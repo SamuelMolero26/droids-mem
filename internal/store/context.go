@@ -52,11 +52,6 @@ type ContextMemory struct {
 	CreatedAt      int64  `json:"created_at"`
 	ExpandCount    int    `json:"expand_count"`
 	LastExpandedAt int64  `json:"last_expanded_at,omitempty"`
-	// ReviewAfter/NeedsReview mirror Memory (inspect.go) — same
-	// nullable-no-COALESCE scan and Go-computed derivation (D4). Surfaced on
-	// both mem_context and mem_search per D2.
-	ReviewAfter *int64 `json:"review_after,omitempty"`
-	NeedsReview bool   `json:"needs_review"`
 }
 
 type ContextResponse struct {
@@ -200,25 +195,20 @@ func (s *Store) Context(ctx context.Context, req ContextRequest) (*ContextRespon
 
 func fetchLastSessionConn(ctx context.Context, conn *sql.Conn, taskType string) (*ContextMemory, error) {
 	var m ContextMemory
-	var reviewAfter sql.NullInt64
 	err := conn.QueryRowContext(ctx, `
 		SELECT id, kind, title, learned, created_at,
-		       expand_count, COALESCE(last_expanded_at, 0), review_after
+		       expand_count, COALESCE(last_expanded_at, 0)
 		FROM memories
 		WHERE task_type = ? AND kind = 'session_summary'
 		ORDER BY created_at DESC, id DESC
 		LIMIT 1
-	`, taskType).Scan(&m.ID, &m.Kind, &m.Title, &m.Learned, &m.CreatedAt, &m.ExpandCount, &m.LastExpandedAt, &reviewAfter)
+	`, taskType).Scan(&m.ID, &m.Kind, &m.Title, &m.Learned, &m.CreatedAt, &m.ExpandCount, &m.LastExpandedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("fetch last session: %w", err)
 	}
-	if reviewAfter.Valid {
-		m.ReviewAfter = &reviewAfter.Int64
-	}
-	m.NeedsReview = needsReview(m.ReviewAfter)
 	m.Tier = "always"
 	return &m, nil
 }
@@ -236,7 +226,7 @@ const maxAlwaysTierUserRules = 5
 func fetchUserRulesConn(ctx context.Context, conn *sql.Conn, taskType string, fullCap int) (rules, stubs []ContextMemory, total int, err error) {
 	rows, err := conn.QueryContext(ctx, `
 		SELECT id, kind, title, learned, created_at,
-		       expand_count, COALESCE(last_expanded_at, 0), review_after
+		       expand_count, COALESCE(last_expanded_at, 0)
 		FROM memories
 		WHERE task_type = ? AND kind = 'user_rule'
 		ORDER BY created_at DESC, id DESC
@@ -250,14 +240,9 @@ func fetchUserRulesConn(ctx context.Context, conn *sql.Conn, taskType string, fu
 	for rows.Next() {
 		var m ContextMemory
 		var learned string
-		var reviewAfter sql.NullInt64
-		if err := rows.Scan(&m.ID, &m.Kind, &m.Title, &learned, &m.CreatedAt, &m.ExpandCount, &m.LastExpandedAt, &reviewAfter); err != nil {
+		if err := rows.Scan(&m.ID, &m.Kind, &m.Title, &learned, &m.CreatedAt, &m.ExpandCount, &m.LastExpandedAt); err != nil {
 			return nil, nil, 0, fmt.Errorf("scan user rule: %w", err)
 		}
-		if reviewAfter.Valid {
-			m.ReviewAfter = &reviewAfter.Int64
-		}
-		m.NeedsReview = needsReview(m.ReviewAfter)
 		total++
 		if fullCap < 0 || len(rules) < fullCap {
 			m.Tier = "always"
@@ -310,7 +295,7 @@ func fetchBrowseKindConn(ctx context.Context, conn *sql.Conn, ftsQuery, taskType
 		learnedCol = `m.learned`
 	}
 	browseCols := `m.id, m.kind, m.title, m.what, ` + learnedCol + `, m.created_at,
-		       m.expand_count, COALESCE(m.last_expanded_at, 0), m.review_after`
+		       m.expand_count, COALESCE(m.last_expanded_at, 0)`
 
 	var (
 		rows *sql.Rows
@@ -350,14 +335,9 @@ func fetchBrowseKindConn(ctx context.Context, conn *sql.Conn, ftsQuery, taskType
 	for rows.Next() {
 		var m ContextMemory
 		var what, learned string
-		var reviewAfter sql.NullInt64
-		if err := rows.Scan(&m.ID, &m.Kind, &m.Title, &what, &learned, &m.CreatedAt, &m.ExpandCount, &m.LastExpandedAt, &reviewAfter); err != nil {
+		if err := rows.Scan(&m.ID, &m.Kind, &m.Title, &what, &learned, &m.CreatedAt, &m.ExpandCount, &m.LastExpandedAt); err != nil {
 			return nil, fmt.Errorf("scan browse (%s): %w", kind, err)
 		}
-		if reviewAfter.Valid {
-			m.ReviewAfter = &reviewAfter.Int64
-		}
-		m.NeedsReview = needsReview(m.ReviewAfter)
 		m.Tier = "browse"
 		if full {
 			m.What = what

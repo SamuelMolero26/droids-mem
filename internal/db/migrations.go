@@ -353,8 +353,7 @@ DROP INDEX IF EXISTS idx_memories_task_type;
 // created_at, for a memory's original authoring date. The two agree for a
 // locally-authored row and diverge on import, where ImportShared re-stamps
 // created_at to the local import time but carries the peer's authored_at
-// forward. authored_at is never an ORDER BY key and never drives review_after
-// — there is no decay clock in this change.
+// forward. authored_at is never an ORDER BY key.
 //
 // Backfilled to created_at rather than left at the DEFAULT 0: SQLite has no
 // ADD COLUMN ... DEFAULT (<other column>), so two statements per table. A
@@ -373,10 +372,12 @@ ALTER TABLE archived_memories ADD COLUMN authored_at INTEGER NOT NULL DEFAULT 0;
 UPDATE archived_memories SET authored_at = created_at;
 `
 
-// migrationV9ToV10 drops the never-wired pinned column (added at 5→6). No
-// index, trigger, or view references it, so DROP COLUMN is safe. Rung 5→6 is
-// frozen history and still adds the column; this rung removes it again.
+// migrationV9ToV10 drops the never-wired pinned and review_after columns (both
+// added at 5→6). No index, trigger, or view references them, so DROP COLUMN is
+// safe. Rung 5→6 is frozen history and still adds them; this rung removes them.
 const migrationV9ToV10 = `
 ALTER TABLE memories DROP COLUMN pinned;
 ALTER TABLE archived_memories DROP COLUMN pinned;
+ALTER TABLE memories DROP COLUMN review_after;
+ALTER TABLE archived_memories DROP COLUMN review_after;
 `

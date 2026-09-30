@@ -634,13 +634,6 @@ func TestOrigin_CheckConstraint(t *testing.T) {
 	}
 }
 
-func TestInit_FreshDBHasLifecycleColumns(t *testing.T) {
-	conn := newTestDB(t)
-	if !slices.Contains(tableColumns(t, conn, "memories"), "review_after") {
-		t.Error("fresh DB missing memories.review_after")
-	}
-}
-
 func TestInit_FreshDBHasArchivedMemoriesTable(t *testing.T) {
 	conn := newTestDB(t)
 	if !tableExists(t, conn, "archived_memories") {
@@ -648,9 +641,9 @@ func TestInit_FreshDBHasArchivedMemoriesTable(t *testing.T) {
 	}
 }
 
-// v5→v6 adds review_after (nullable) without backfilling it on existing rows
-// (D1 — grandfather NULL, never mass-flag legacy rows needs_review on day one).
-func TestMigrate_V5toV6AddsLifecycleColumnsGrandfathersRows(t *testing.T) {
+// v5→v6 adds archived_memories; a row seeded at v0 must survive the full
+// ladder (including the later column drops) intact.
+func TestMigrate_V5toV6AddsArchivedTableKeepsRows(t *testing.T) {
 	conn := loadFixture(t, "schema_v0.sql")
 	now := int64(1000000)
 	if _, err := conn.Exec(`
@@ -662,16 +655,9 @@ func TestMigrate_V5toV6AddsLifecycleColumnsGrandfathersRows(t *testing.T) {
 	if err := db.Migrate(conn); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	if !slices.Contains(tableColumns(t, conn, "memories"), "review_after") {
-		t.Fatal("migrated DB missing memories.review_after")
-	}
-
-	var reviewAfter sql.NullInt64
-	if err := conn.QueryRow(`SELECT review_after FROM memories WHERE id = 'mem_lc'`).Scan(&reviewAfter); err != nil {
-		t.Fatalf("read migrated row: %v", err)
-	}
-	if reviewAfter.Valid {
-		t.Errorf("migrated review_after = %v, want NULL (D1 — no backfill)", reviewAfter)
+	var title string
+	if err := conn.QueryRow(`SELECT title FROM memories WHERE id = 'mem_lc'`).Scan(&title); err != nil || title != "t" {
+		t.Fatalf("seeded row lost in migration: title=%q err=%v", title, err)
 	}
 	if !tableExists(t, conn, "archived_memories") {
 		t.Error("migrated DB missing archived_memories table")
@@ -827,9 +813,9 @@ func TestArchivedMemories_ColumnParityWithMemories(t *testing.T) {
 }
 
 // Schema v10 drops the never-wired pinned column from both tables. Fresh and
-// migrated-from-any-fixture databases must agree: no pinned column, current
-// user_version, review_after kept.
-func TestSchema_NoPinnedColumn(t *testing.T) {
+// migrated-from-any-fixture databases must agree: no pinned or review_after
+// column, current user_version.
+func TestSchema_NoLifecycleColumns(t *testing.T) {
 	check := func(t *testing.T, conn *sql.DB) {
 		t.Helper()
 		if got := userVersion(t, conn); got != 10 {
@@ -837,11 +823,10 @@ func TestSchema_NoPinnedColumn(t *testing.T) {
 		}
 		for _, table := range []string{"memories", "archived_memories"} {
 			cols := tableColumns(t, conn, table)
-			if slices.Contains(cols, "pinned") {
-				t.Errorf("%s still has pinned column", table)
-			}
-			if !slices.Contains(cols, "review_after") {
-				t.Errorf("%s lost review_after", table)
+			for _, dropped := range []string{"pinned", "review_after"} {
+				if slices.Contains(cols, dropped) {
+					t.Errorf("%s still has %s column", table, dropped)
+				}
 			}
 		}
 	}

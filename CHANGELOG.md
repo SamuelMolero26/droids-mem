@@ -40,9 +40,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Cached graphs rebuild once (indexer generation 10).
 
 ### Removed
-- **The unused `pinned` column and field** (schema v10). Nothing ever wrote it,
-  so every read returned false. `pinned` no longer appears in `mem_search`,
-  `mem_context`, or `list` JSON; `review_after`/`needs_review` are unchanged.
+- **The unused `pinned` and `review_after` columns and the `needs_review`
+  flag** (schema v10). Nothing ever wrote them, so `pinned` was always false
+  and `needs_review` never fired. They no longer appear in `mem_search`,
+  `mem_context`, or `list` JSON; use `authored_at`/`created_at` for age.
 
 ## [1.3.0-beta.1] — 2026-09-14
 
