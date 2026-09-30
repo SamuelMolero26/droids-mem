@@ -141,7 +141,6 @@ func ping(url string, timeout time.Duration) bool {
 type serverIdentity struct {
 	Pid     int
 	Version string
-	UI      bool // serves the graph viewer; absent from daemons that predate it
 }
 
 // The returned Pid is proven, not merely reported: it is bound into a second
@@ -170,7 +169,6 @@ func verifyServer(base, token string, timeout time.Duration) (serverIdentity, er
 		Version  string `json:"version"`
 		Pid      int    `json:"pid"`
 		PidProof string `json:"pid_proof"`
-		UI       bool   `json:"ui"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return serverIdentity{}, fmt.Errorf("identity probe: parse body: %w", err)
@@ -180,13 +178,13 @@ func verifyServer(base, token string, timeout time.Duration) (serverIdentity, er
 		return serverIdentity{}, fmt.Errorf("identity proof mismatch (server=%q)", payload.Server)
 	}
 	if payload.PidProof == "" {
-		return serverIdentity{Version: payload.Version, UI: payload.UI}, nil
+		return serverIdentity{Version: payload.Version}, nil
 	}
 	wantPid := mcpserver.IdentityPidProof(token, nonce, payload.Pid)
 	if !hmac.Equal([]byte(payload.PidProof), []byte(wantPid)) {
 		return serverIdentity{}, fmt.Errorf("identity pid proof mismatch (server=%q, pid=%d)", payload.Server, payload.Pid)
 	}
-	return serverIdentity{Pid: payload.Pid, Version: payload.Version, UI: payload.UI}, nil
+	return serverIdentity{Pid: payload.Pid, Version: payload.Version}, nil
 }
 
 // staleAction is what to do about a daemon that already answers on the
@@ -211,9 +209,8 @@ const (
 // should be running the build the caller actually has, and a downgrade leaves
 // code the caller did not build just as surely as an upgrade does.
 //
-// A matching version is not enough on its own: every local build reports
-// "dev", so a daemon without the graph viewer is older code even when the
-// versions agree.
+// A matching version is not enough for local builds: every one reports "dev",
+// so a dev caller always replaces. That costs one restart per call, dev only.
 //
 // A daemon that proves no PID is never signalled. It predates PID binding, so
 // acting on it would mean signalling a PID read from a file rather than one
@@ -221,7 +218,7 @@ const (
 // instead, which is a bounded, one-time cost: from the release that carries
 // this onward, every daemon can prove a PID.
 func decideStale(running serverIdentity, want string) staleAction {
-	if running.Version == want && running.UI {
+	if running.Version == want && want != "dev" {
 		return keepServer
 	}
 	if running.Pid == 0 {

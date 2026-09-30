@@ -126,14 +126,13 @@ func TestIdentityHandler(t *testing.T) {
 			Version  string `json:"version"`
 			Pid      int    `json:"pid"`
 			PidProof string `json:"pid_proof"`
-			UI       bool   `json:"ui"`
 		}
 		var got identity
 		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 			t.Fatalf("decode body %q: %v", rec.Body.String(), err)
 		}
 		want := identity{ServerName, IdentityProof(token, "n1"), "v9.9.9",
-			os.Getpid(), IdentityPidProof(token, "n1", os.Getpid()), true}
+			os.Getpid(), IdentityPidProof(token, "n1", os.Getpid())}
 		if got != want {
 			t.Errorf("identity = %+v, want %+v", got, want)
 		}
@@ -191,49 +190,6 @@ func TestLimitBody(t *testing.T) {
 			t.Fatalf("status = %d, want 413", rec.Code)
 		}
 	})
-}
-
-func TestInstructions_TransportFork(t *testing.T) {
-	httpVar, stdioVar := instructions(false), instructions(true)
-
-	// Both variants share the core protocol, graph tools, and secrets tail.
-	for _, s := range []string{httpVar, stdioVar} {
-		for _, want := range []string{"AT THE START of a task", "mem_save", "Never put secrets", "graph_symbol", "Available tools:"} {
-			if !strings.Contains(s, want) {
-				t.Errorf("instructions missing %q", want)
-			}
-		}
-	}
-
-	// Graph tools appear before the summary policy in both variants.
-	for _, s := range []string{httpVar, stdioVar} {
-		graphPos := strings.Index(s, "graph_symbol")
-		httpPolicyPos := strings.Index(s, "Do NOT save session summaries")
-		stdioPolicyPos := strings.Index(s, "AT THE END of a run")
-		if graphPos < 0 {
-			t.Errorf("graph tools not found in instructions")
-		}
-		if httpPolicyPos >= 0 && graphPos > httpPolicyPos {
-			t.Errorf("graph_symbol (%d) appears after HTTP summary policy (%d)", graphPos, httpPolicyPos)
-		}
-		if stdioPolicyPos >= 0 && graphPos > stdioPolicyPos {
-			t.Errorf("graph_symbol (%d) appears after stdio summary policy (%d)", graphPos, stdioPolicyPos)
-		}
-	}
-
-	// Only the session-summary sentence forks.
-	if !strings.Contains(httpVar, "Do NOT save session summaries") {
-		t.Errorf("HTTP variant lost the no-self-save policy")
-	}
-	if strings.Contains(httpVar, "AT THE END of a run") {
-		t.Errorf("HTTP variant carries the stdio self-save policy")
-	}
-	if !strings.Contains(stdioVar, "AT THE END of a run") {
-		t.Errorf("stdio variant missing the self-save policy")
-	}
-	if strings.Contains(stdioVar, "Do NOT save session summaries") {
-		t.Errorf("stdio variant carries the HTTP no-self-save policy")
-	}
 }
 
 func TestIdentityPidProof(t *testing.T) {

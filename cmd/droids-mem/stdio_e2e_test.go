@@ -14,8 +14,8 @@ import (
 )
 
 // TestE2E_ServeStdio drives `serve --stdio` over its stdin/stdout pipe:
-// initialize must return the stdio instructions variant (self-save summary
-// protocol), tools/list the full 6-tool surface, and closing stdin must end
+// initialize must return the instructions with the end-of-run summary rule,
+// tools/list the full 6-tool surface, and closing stdin must end
 // the process cleanly (host-managed lifecycle).
 func TestE2E_ServeStdio(t *testing.T) {
 	workDir := t.TempDir()
@@ -66,11 +66,8 @@ func TestE2E_ServeStdio(t *testing.T) {
 		t.Fatalf("initialize returned no result: %v", init)
 	}
 	instr, _ := result["instructions"].(string)
-	if !strings.Contains(instr, "AT THE END of a run") {
-		t.Errorf("stdio instructions missing self-save summary protocol; got %q", instr)
-	}
-	if strings.Contains(instr, "Do NOT save session summaries") {
-		t.Errorf("stdio instructions carry the HTTP summary policy")
+	if !strings.Contains(instr, "session_summary") {
+		t.Errorf("stdio instructions missing the end-of-run summary rule; got %q", instr)
 	}
 
 	send(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)

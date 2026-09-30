@@ -55,56 +55,34 @@ const (
 	maxIdentityNonceLen = 128
 )
 
-// The instructions string is the proactive protocol surfaced to the model via
-// the MCP initialize response (ADR-0019, Layer 1). MCP has no auto-call
-// primitive, so this — plus the per-tool descriptions — is the only cross-host
-// lever to make an agent call droids-mem on its own. It is best-effort: the
-// floor is model judgment, backstopped by the store's dedup. Hard enforcement
-// stays a per-host hook concern (ADR-0016 is the Claude Code adapter).
+// serverInstructions is the proactive protocol surfaced to the model via the
+// MCP initialize response. MCP has no auto-call primitive, so this — plus the
+// per-tool descriptions — is the only cross-host lever to make an agent call
+// droids-mem on its own; hard enforcement stays a per-host hook concern.
 //
-// Only the session-summary sentence differs by transport: HTTP hosts (Claude
-// Code, ADR-0016) have hooks that record summaries automatically, so the model
-// must NOT double-save; stdio hosts (codex, opencode) have no such hook wired
-// by default, so the model must save one itself or the run leaves no
-// continuity. A host that does wire a flush hook is still safe — dedupe makes
-// the redundant self-save harmless.
-const instructionsCore = `droids-mem is your persistent memory across sessions. Prior lessons — fixes, decisions, conventions — are stored here so you do not relearn them. Call these tools on your own; do not wait to be asked.
+// Budget, measured (TestInstructions_Budget): Claude Code hands the model only
+// the first 2048 chars, and Codex relies on the first 512 standing alone. So
+// the numbered core loop comes first and fits in 512, and the whole text fits
+// in 2048 — a rule past the cut never reaches the model on any Claude Code
+// surface. One text for every transport: the summary rule tells a hooked host
+// that staging counts, and dedupe absorbs a redundant save.
+const serverInstructions = `droids-mem is your persistent memory and code graph. Use it on your own, without being asked:
+1. At task start and on topic shifts: mem_search a short description of the task.
+2. Code in Go/Python/TS/JS: graph_package to orient, graph_symbol for source + callers/callees, before grep or reading files. Before editing a function: graph_symbol direction=up depth=3; cite transitive_callers.
+3. Learned something reusable: mem_save it.
+4. End of a run: save ONE session_summary.
 
-Available tools: mem_save, mem_search, mem_context, mem_get, mem_corpus, graph_symbol, graph_package, graph_build_wait
+SEARCH: results are ranked previews; mem_get an id for the full body before relying on it. all_projects=true searches every repo. For continuity also call mem_context with task_type = the git repo name, reused verbatim every session.
 
-AT THE START of a task, and again whenever the topic shifts:
-- Call mem_search with a short description of what you are about to do. This surfaces relevant prior lessons by relevance and needs no task_type. Results carry a learned_preview (first 500 chars of the lesson) instead of the full body — ordering already implies relevance, so judge by rank and call mem_get with a result id to read the full body before relying on it. If you are investigating a problem that may span repos, pass all_projects=true to search every project's memories.
-- If you know a stable workflow tag for this work, also call mem_context with that task_type for curated continuity (prior session summary + standing user rules). Derive task_type mechanically — the git repo name or top-level directory name — and reuse the exact same string every session for that project; inventing a new slug each time silently orphans prior continuity. A miss here is harmless — the search above already covers you.
+SAVE: kind error_resolution (problem + fix), task_pattern (repeatable approach) or user_rule (a user correction or preference). Only reusable lessons; re-saving is harmless (deduped). Reuse the session_id from the first mem_context or mem_save on every later call in the run.
 
-AS YOU WORK, when you learn something worth reusing next time, call mem_save:
-- error_resolution — a problem you hit and the fix that worked.
-- task_pattern — a repeatable approach worth reusing.
-- user_rule — a correction or stable preference the user gave you.
-Save only a genuinely reusable lesson, not routine steps. Re-saving the same lesson is harmless (the store deduplicates), so prefer saving over forgetting. Thread the session_id returned by mem_context (or the first mem_save) through later saves in the same run. If you call mem_context again in the same run (topic pivot, mode=refresh), pass that existing session_id back in — omitting it mints a new one and fragments the run's memories.
+SUMMARY: when the task is done or the user wraps up, mem_save kind=session_summary: what happened, what you learned, what comes next. Once per run; if a host hook already asked you to stage one, that counts.
 
-AFTER EVERY TOOL CALL, state briefly what you learned and how it affects your approach. For example: "mem_search found a prior fix for HTTP 429 retries — reusing that approach" or "graph_symbol shows Store.Save has 15 transitive callers — preserving the interface". This is the only way the user sees that your decisions come from memory and graph data, not just reasoning. A one-liner after the tool result is enough.
+GRAPH: re-query a stub's exact qname to expand it; 'to' returns a call path; pass the project root as 'repo'. freshness.stale: true means the whole previous index is served; carried: true or stale_units means that package rides on old edges. Mapper-tier (Python/TS/JS) edges are heuristic. Verify critical findings against source.
 
-FOR CODE QUESTIONS in a Go, Python, TypeScript, or JavaScript repo, prefer the graph tools over grep and file reading — they answer from a pre-built call graph in one call. graph_package orients you in an area (exported surface, signatures only); graph_symbol shows one symbol's source plus callers/callees as signature stubs, blast radius via direction=up depth>1, call paths via 'to'. Expand a stub by re-querying its exact qname. Pass your project root as 'repo'.
-`
+After a memory or graph call, say in one line what it told you, e.g. "Store.Save has 15 transitive callers, keeping its signature".
 
-const summaryPolicyHTTP = `Do NOT save session summaries here — your host may record those automatically at session end; saving one yourself would duplicate it.`
-
-const summaryPolicyStdio = `AT THE END of a run — task complete or user wrapping up — save ONE session_summary (kind=session_summary: what happened, what you learned, what comes next). No hook on this host records summaries automatically; skipping this leaves no continuity for the next session. If a summary hook is wired after all, the store's dedupe makes your save harmless.`
-
-const instructionsTail = `Never put secrets, tokens, or keys in any field; the store scrubs free-text fields on save, but tags are stored verbatim (unscrubbed) — keep secrets out of every field anyway.
-
-BEFORE EDITING a function, call graph_symbol with direction=up depth=3 to check its blast radius. The transitive_callers count tells you how many symbols depend on it. Mention this count when you state what you learned — it is the single most useful signal the graph gives you.
-
-When a graph response includes freshness.stale: true, a genuine build failure means the whole previous index is being served. A single package that does not type-check degrades alone instead: carried: true on a symbol, and freshness.stale_units naming the packages riding on the previous build's edges. Verify critical findings against actual source files before acting on either. When the hint says a symbol is mapper-tier (Python/TS/JS), callers/callees are heuristic — treat as approximate and cross-check with grep for constants/tests/notebooks.`
-
-// instructions assembles the transport-appropriate protocol string. The HTTP
-// variant is byte-identical to the pre-split serverInstructions const.
-func instructions(stdio bool) string {
-	if stdio {
-		return instructionsCore + "\n" + summaryPolicyStdio + "\n\n" + instructionsTail
-	}
-	return instructionsCore + "\n" + summaryPolicyHTTP + "\n\n" + instructionsTail
-}
+Never put secrets, API keys or tokens in any field, tags included: tags are stored unscrubbed.`
 
 // Config controls the MCP bridge server. Zero values fall back to defaults.
 type Config struct {
@@ -137,7 +115,7 @@ func Run(ctx context.Context, cfg Config, st *store.Store) error {
 		logger = log.Default()
 	}
 
-	s := newMCPServer(cfg, st, false)
+	s := newMCPServer(cfg, st)
 
 	mcpHandler := server.NewStreamableHTTPServer(s,
 		server.WithEndpointPath(cfg.Endpoint),
@@ -257,7 +235,7 @@ func shareRepo() string {
 }
 
 // identityHandler answers a challenge–response proof of token knowledge:
-// GET /identity?nonce=<client nonce> → {"server", "proof", "version", "pid", "pid_proof", "ui"}.
+// GET /identity?nonce=<client nonce> → {"server", "proof", "version", "pid", "pid_proof"}.
 // Unauthenticated by design — the proofs reveal nothing about the token, and
 // they let ensure-server verify that whatever answers on this port actually
 // holds the shared token before reporting "already_running" (anti
@@ -266,12 +244,6 @@ func shareRepo() string {
 // "proof" answers "does this listener hold the token"; "pid_proof" additionally
 // answers "which process is it", which a caller about to send a signal needs
 // and the token alone cannot establish.
-//
-// "ui" says this build ships the graph viewer. Local builds all report version
-// "dev", so it is what tells ensure-server that a daemon left running from an
-// older checkout lacks /ui/. It is a property of the build, not of whether the
-// viewer is mounted on this bind, so a non-loopback daemon is not replaced on
-// every call.
 func identityHandler(token, version string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		nonce := r.URL.Query().Get("nonce")
@@ -281,7 +253,7 @@ func identityHandler(token, version string) http.HandlerFunc {
 		}
 		pid := os.Getpid()
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"server":%q,"proof":%q,"version":%q,"pid":%d,"pid_proof":%q,"ui":true}`,
+		fmt.Fprintf(w, `{"server":%q,"proof":%q,"version":%q,"pid":%d,"pid_proof":%q}`,
 			ServerName, IdentityProof(token, nonce), version, pid,
 			IdentityPidProof(token, nonce, pid))
 	}

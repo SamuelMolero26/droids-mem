@@ -14,13 +14,12 @@ import (
 )
 
 // newMCPServer builds the MCP server with the full tool surface. Shared by
-// both transports; only the instructions string differs (session-summary
-// self-save policy, see instructions()).
-func newMCPServer(cfg Config, st *store.Store, stdio bool) *server.MCPServer {
+// both transports, instructions included.
+func newMCPServer(cfg Config, st *store.Store) *server.MCPServer {
 	s := server.NewMCPServer(ServerName, ServerVersion,
 		server.WithToolCapabilities(true),
 		server.WithLogging(),
-		server.WithInstructions(instructions(stdio)),
+		server.WithInstructions(serverInstructions),
 	)
 	registerTools(s, st)
 	if cfg.Graphs != nil {
@@ -43,7 +42,7 @@ func RunStdio(cfg Config, st *store.Store) error {
 	if logger == nil {
 		logger = log.Default()
 	}
-	s := newMCPServer(cfg, st, true)
+	s := newMCPServer(cfg, st)
 
 	// Boot auto-Fetch (ADR-0029 §5) runs here too, or the shared pool silently
 	// stops arriving for every stdio host. Deliberately per spawn rather than
