@@ -136,6 +136,16 @@ droids-mem tui
 ```
 ![droids-mem tui](assets/tui.png)
 
+## graph ui
+
+```sh
+droids-mem graph ui
+```
+
+![droids-mem graph tui](assets/graph-ui1.png)
+![droids-mem graph tui](assets/graph-ui2.png)
+
+
 ## Operations
 
 ```sh
