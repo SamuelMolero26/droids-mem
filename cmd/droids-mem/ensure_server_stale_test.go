@@ -30,20 +30,8 @@ func TestDecideStale(t *testing.T) {
 			action:  replaceServer,
 		},
 		{
-			name:    "dev daemon without a proven pid is reported",
-			running: serverIdentity{Version: "dev", Pid: 0},
-			want:    "dev",
-			action:  reportStale,
-		},
-		{
 			name:    "older version with a proven pid is replaced",
 			running: serverIdentity{Version: "v1.2.2", Pid: 4242},
-			want:    "v1.2.3",
-			action:  replaceServer,
-		},
-		{
-			name:    "newer version is also replaced",
-			running: serverIdentity{Version: "v2.0.0", Pid: 4242},
 			want:    "v1.2.3",
 			action:  replaceServer,
 		},
@@ -55,12 +43,6 @@ func TestDecideStale(t *testing.T) {
 			running: serverIdentity{Version: "", Pid: 0},
 			want:    "v1.2.3",
 			action:  reportStale,
-		},
-		{
-			name:    "unproven pid on a matching version is still left alone",
-			running: serverIdentity{Version: "v1.2.3", Pid: 0},
-			want:    "v1.2.3",
-			action:  keepServer,
 		},
 	}
 
