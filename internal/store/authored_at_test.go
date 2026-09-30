@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/samuelmolero26/droids-mem/internal/store"
 )
 
 const day = int64(86400)
@@ -302,4 +304,44 @@ func TestSave_ForcePreservesAuthoredAt(t *testing.T) {
 			t.Errorf("authored_at = %d, want the supplied %d", authored, want)
 		}
 	})
+}
+
+// TestReadSurfaces_ProjectAuthoredAt: mem_search and every mem_context tier
+// return the stored authored_at, not 0 or created_at.
+func TestReadSurfaces_ProjectAuthoredAt(t *testing.T) {
+	s, _ := newStoreWithDB(t)
+	ctx := context.Background()
+	past := time.Now().Unix() - 400*day
+	for _, r := range []struct{ kind, title string }{
+		{"session_summary", "session one"},
+		{"user_rule", "rule one"},
+		{"error_resolution", "zebra gateway retry"},
+	} {
+		req := store.SaveRequest{TaskType: "p", Kind: r.kind, Title: r.title, What: "w", Learned: r.title + " lesson", Tags: "t", AuthoredAt: past}
+		if _, err := s.Save(ctx, req); err != nil {
+			t.Fatalf("Save %q: %v", r.title, err)
+		}
+	}
+
+	sr, err := s.Search(ctx, store.SearchRequest{Query: "zebra"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(sr.Results) != 1 || sr.Results[0].AuthoredAt != past {
+		t.Errorf("search authored_at = %+v, want %d", sr.Results, past)
+	}
+
+	cr, err := s.Context(ctx, store.ContextRequest{TaskType: "p"})
+	if err != nil {
+		t.Fatalf("Context: %v", err)
+	}
+	if cr.LastSession == nil || cr.LastSession.AuthoredAt != past {
+		t.Errorf("last_session authored_at = %+v, want %d", cr.LastSession, past)
+	}
+	if len(cr.UserRules) != 1 || cr.UserRules[0].AuthoredAt != past {
+		t.Errorf("user_rules authored_at = %+v, want %d", cr.UserRules, past)
+	}
+	if len(cr.Browse) != 1 || cr.Browse[0].AuthoredAt != past {
+		t.Errorf("browse authored_at = %+v, want %d", cr.Browse, past)
+	}
 }
