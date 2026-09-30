@@ -264,7 +264,11 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	if strings.TrimSpace(req.Symbol) == "" {
 		return nil, fmt.Errorf("symbol is required: %w", ErrInvalidArgument)
 	}
-	conn, release, fresh, err := m.openFor(ctx, req.Repo, req.NoBuild)
+	open := m.ensureFresh
+	if req.NoBuild { // read-only viewers never trigger a build
+		open = m.openNoBuild
+	}
+	conn, release, fresh, err := open(ctx, req.Repo)
 	if err != nil {
 		return nil, err
 	}

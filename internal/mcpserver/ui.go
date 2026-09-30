@@ -44,18 +44,14 @@ func IsLoopbackAddr(addr string) bool {
 	return err == nil && isLoopbackHost(host)
 }
 
-// uiMACKey derives the UI signing key from the bearer token. It must not be
+// uiKeyMAC signs a key's claim with a key derived from the bearer token, never
 // the token itself: /identity hands any caller HMAC(token, nonce) for a nonce
 // of their choosing, so a UI key MACed directly with the token would be
 // forgeable from that oracle. The derivation label differs from every label
 // /identity uses, so nothing it returns is a UI key.
-func uiMACKey(token string) []byte {
-	h := sha256.Sum256([]byte("droids-mem/ui-key/v1\x00" + token))
-	return h[:]
-}
-
 func uiKeyMAC(token, exp, repo string) []byte {
-	mac := hmac.New(sha256.New, uiMACKey(token))
+	k := sha256.Sum256([]byte("droids-mem/ui-key/v1\x00" + token))
+	mac := hmac.New(sha256.New, k[:])
 	mac.Write([]byte("v1\n" + exp + "\n" + repo))
 	return mac.Sum(nil)
 }

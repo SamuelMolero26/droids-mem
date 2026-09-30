@@ -123,7 +123,7 @@
     DM.setBadges(d.freshness, { truncated: d.truncated });
     ctx.main.textContent = '';
     ctx.main.append(DM.el('h2', null, 'Entry points'),
-      DM.el('p', 'muted', 'heuristic — may include false roots' + (d.hint ? '. ' + d.hint : '')));
+      DM.el('p', 'muted', d.hint));
     if (!d.symbols.length) return ctx.main.append(DM.el('p', 'state', 'No entry points found.'));
     ctx.main.append(stubList(d.symbols));
   };
