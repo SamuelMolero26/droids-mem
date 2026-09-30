@@ -1,8 +1,6 @@
 'use strict';
 // Symbol page: Called by | detail with numbered source | Calls, from one
-// request at DM.opts.symDepth (default 1). True totals exist only at depth 1,
-// so deeper views count the rows shown. Every string is a text node (source
-// and docs are untrusted).
+// request. Every string is a text node (source and docs are untrusted).
 (function () {
   var TRUNC = '…[truncated]';
   var isTest = function (n) { return /_test\.go$/.test(n.file); };
@@ -23,8 +21,11 @@
     return a;
   }
 
+  // dtag prefixes a row's meta with its hop count when the page is deeper than 1.
+  function dtag(n, deep) { return deep && n.depth ? 'd' + n.depth + ' · ' : ''; }
+
   // groupByFile: a file header with its count, then rows ordered by declaration line.
-  function groupByFile(items) {
+  function groupByFile(items, deep) {
     var by = new Map(), frag = document.createDocumentFragment();
     items.forEach(function (n) {
       if (!by.has(n.file)) by.set(n.file, []);
@@ -33,28 +34,8 @@
     by.forEach(function (rows, file) {
       rows.sort(function (a, b) { return a.line - b.line; });
       frag.append(DM.el('div', 'grp-h', DM.el('span', 'path', file), DM.el('span', 'muted', rows.length)));
-      rows.forEach(function (n) { frag.append(DM.row(n, ':' + n.line)); });
+      rows.forEach(function (n) { frag.append(DM.row(n, dtag(n, deep) + ':' + n.line)); });
     });
-    return frag;
-  }
-
-  // byDepth: at depth 1, render(items) as-is; deeper, a "depth k" header per
-  // level, each followed by render(rows at that level).
-  function byDepth(items, deep, render) {
-    if (!deep) return render(items);
-    var frag = document.createDocumentFragment();
-    for (var k = 1; k <= DM.opts.symDepth; k++) {
-      var rows = items.filter(function (n) { return n.depth === this; }, k);
-      if (!rows.length) continue;
-      frag.append(DM.el('div', 'grp-h', DM.el('span', null, 'depth ' + k), DM.el('span', 'muted', rows.length)), render(rows));
-    }
-    return frag;
-  }
-
-  // flatRows: one row per neighbor, file as the meta.
-  function flatRows(items) {
-    var frag = document.createDocumentFragment();
-    items.forEach(function (n) { frag.append(DM.row(n, n.file)); });
     return frag;
   }
 
@@ -68,12 +49,12 @@
     }
     var tests = callers.filter(isTest), prod = callers.filter(function (n) { return !isTest(n); });
     if (!callers.length && !d.callers_in_tests) sec.append(DM.el('p', 'note', 'No callers.'));
-    sec.append(byDepth(prod, deep, groupByFile));
-    // callers_in_tests is a direct-caller count; deeper views count shown rows.
+    sec.append(groupByFile(prod, deep));
+    // True totals exist only at depth 1; deeper views count the rows shown.
     var nt = deep ? tests.length : d.callers_in_tests || tests.length;
     if (nt) {
       var det = DM.el('details', 'tests', DM.el('summary', null, 'Tests · ' + nt + (tests.length < nt ? ' (' + tests.length + ' shown)' : '')));
-      if (tests.length) det.append(byDepth(tests, deep, groupByFile));
+      if (tests.length) det.append(groupByFile(tests, deep));
       else det.append(DM.el('p', 'note', 'Not in the capped list'));
       sec.append(det);
     }
@@ -82,7 +63,7 @@
   }
 
   function callsPane(d, s, deep) {
-    var rows, title, count, none, action = null, render = flatRows;
+    var rows, title, count, none, action = null;
     if (s.kind === 'interface') {
       rows = d.implementers || [];
       title = 'Implemented by';
@@ -99,11 +80,10 @@
       count = deep ? rows.length + ' shown' : d.callees_total || rows.length;
       none = 'No callees.';
       action = step('down', s.qname, 'step down ↓');
-      render = function (items) { return byDepth(items, deep, flatRows); };
     }
     var sec = pane('calls', 'h-calls', title, count, action);
     if (!rows.length) sec.append(DM.el('p', 'note', none));
-    sec.append(render(rows));
+    rows.forEach(function (n) { sec.append(DM.row(n, dtag(n, deep) + n.file)); });
     if (title === 'Calls' && d.callees_total) sec.append(DM.el('p', 'note', 'Showing ' + rows.length + ' of ' + d.callees_total + '.'));
     return sec;
   }
