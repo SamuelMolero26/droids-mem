@@ -14,7 +14,7 @@ import (
 // mapMapperFile is defined in mapper_symbols_test.go and reused here.
 
 // TestPythonImports_SimpleImportProducesRowWithExplicitPrecision pins F.7's
-// unit-level shape: mapperImports on a single "import foo.bar" Python file
+// unit-level shape: the import scan on a single "import foo.bar" Python file
 // yields exactly one importRow with the exact fields the spec's scenario
 // names, and a non-empty precision (the column has no default — an empty
 // insert would fail at the DB layer, but this asserts it directly at the
@@ -23,7 +23,7 @@ func TestPythonImports_SimpleImportProducesRowWithExplicitPrecision(t *testing.T
 	dir := t.TempDir()
 	f := mapMapperFile(t, dir, "a.py", "import foo.bar\n", "a")
 
-	rows, _, stats := mapperImports([]mapperFile{f})
+	rows, _, stats := scanImports([]mapperFile{f})
 	if stats.parseErr != 0 || stats.readErr != 0 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
@@ -54,7 +54,7 @@ func TestTSImports_DefaultImportProducesSpecifierRow(t *testing.T) {
 	dir := t.TempDir()
 	f := mapMapperFile(t, dir, "a.ts", "import Baz from \"./y\";\n", "a")
 
-	rows, _, stats := mapperImports([]mapperFile{f})
+	rows, _, stats := scanImports([]mapperFile{f})
 	if stats.parseErr != 0 || stats.readErr != 0 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
@@ -77,12 +77,12 @@ func TestTSImports_DefaultImportProducesSpecifierRow(t *testing.T) {
 // require() form (distinct query branch from the ES-module import_statement
 // form above) for a plain .js file — proving the query's second reference
 // kind and the javascript grammar (not just typescript) both wire through
-// mapperImports.
+// the import scan.
 func TestJSImports_RequireCallProducesSpecifierRow(t *testing.T) {
 	dir := t.TempDir()
 	f := mapMapperFile(t, dir, "a.js", "const cjs = require(\"./g\");\n", "a")
 
-	rows, _, stats := mapperImports([]mapperFile{f})
+	rows, _, stats := scanImports([]mapperFile{f})
 	if stats.parseErr != 0 || stats.readErr != 0 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
@@ -135,7 +135,7 @@ func TestBuildIndex_TSImportLandsInImportsTable(t *testing.T) {
 // wiring pin: a real buildIndex run over a Python file containing an import
 // must populate the imports table with a row whose precision is non-empty
 // (confirming the wiring reaches writeGraphDB's INSERT, not just the pure
-// mapperImports function).
+// import scan).
 func TestBuildIndex_PythonImportLandsInImportsTable(t *testing.T) {
 	repo := t.TempDir()
 	writeFile(t, repo, "a.py", "import foo.bar\n\ndef use():\n    pass\n")
@@ -191,7 +191,7 @@ notRequire("./NOT-AN-IMPORT");
 console.log("./ALSO-NOT");
 `, "a")
 
-	rows, _, stats := mapperImports([]mapperFile{f})
+	rows, _, stats := scanImports([]mapperFile{f})
 	if stats.parseErr != 0 || stats.readErr != 0 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
@@ -224,7 +224,7 @@ func TestTSBindings_AliasedNamedImportRecordsLocalNameOnly(t *testing.T) {
 	dir := t.TempDir()
 	f := mapMapperFile(t, dir, "a.ts", "import { Foo as Bar, Plain } from \"./x\";\n", "a")
 
-	_, bindings, stats := mapperImports([]mapperFile{f})
+	_, bindings, stats := scanImports([]mapperFile{f})
 	if stats.parseErr != 0 || stats.readErr != 0 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
@@ -247,7 +247,7 @@ func TestTSBindings_DefaultAndNamespaceImports(t *testing.T) {
 	dir := t.TempDir()
 	f := mapMapperFile(t, dir, "a.ts", "import Baz from \"./y\";\nimport * as ns from \"./c\";\n", "a")
 
-	_, bindings, _ := mapperImports([]mapperFile{f})
+	_, bindings, _ := scanImports([]mapperFile{f})
 	got := bindings[f.rel]
 	if got["Baz"].specifier != "./y" || !got["Baz"].defaultImport {
 		t.Errorf("bindings[\"Baz\"] = %+v, want default specifier ./y", got["Baz"])
@@ -266,7 +266,7 @@ import { type InlineType, RuntimeValue } from "./mixed";
 export function invalidRuntimeUse() { OnlyType(); AliasType(); InlineType(); }
 `, "a")
 
-	rows, bindings, stats := mapperImports([]mapperFile{f})
+	rows, bindings, stats := scanImports([]mapperFile{f})
 	if stats.parseErr != 0 || stats.readErr != 0 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
@@ -288,7 +288,7 @@ func TestBindings_SideEffectImportAndPythonBindNothing(t *testing.T) {
 	ts := mapMapperFile(t, dir, "a.ts", "import \"./side-effect\";\n", "a")
 	py := mapMapperFile(t, dir, "b.py", "import foo.bar\n", "b")
 
-	rows, bindings, _ := mapperImports([]mapperFile{ts, py})
+	rows, bindings, _ := scanImports([]mapperFile{ts, py})
 	if len(bindings[ts.rel]) != 0 {
 		t.Errorf("side-effect import bound %v, want nothing", bindings[ts.rel])
 	}

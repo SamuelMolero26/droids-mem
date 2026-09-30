@@ -293,7 +293,7 @@ func (m *Manager) SearchSymbols(ctx context.Context, repo, q string) (*StubsResp
 		if err != nil {
 			return err
 		}
-		got, err := scanNeighbors(rows, 0)
+		got, err := scanNeighbors(rows)
 		if err != nil {
 			return err
 		}
@@ -341,7 +341,7 @@ func (m *Manager) EntryPoints(ctx context.Context, repo string) (*StubsResponse,
 	if err != nil {
 		return nil, err
 	}
-	if resp.Symbols, err = scanNeighbors(rows, 0); err != nil {
+	if resp.Symbols, err = scanNeighbors(rows); err != nil {
 		return nil, err
 	}
 	if resp.Symbols == nil {

@@ -270,7 +270,7 @@ func TestMapperCarry_CarriedUnitsKeyedByModulePath_FreshnessCarriedFires(t *test
 // edge must be DROPPED, never remapped onto the possibly-wrong last-wins row
 // collision produces. Uses the SAME genuine modulePath collision as PR-C's
 // C.4/C.5 (a/b/__init__.py vs a/b.py, both -> module "a.b" via the real
-// modulePath function), run through the real mapperFiles -> mapperSymbols ->
+// modulePath function), run through the real mapperFiles -> scanMapperFiles ->
 // buildByQName pipeline — not a re-derivation — so collidedQNames is proven
 // non-empty for THIS fixture before the drop is even asserted. A distinct
 // caller module (never itself part of the collision) is included so the
@@ -286,7 +286,7 @@ func TestMapperCarriedEdges_DropsOnCalleeQNameCollision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mSyms, _ := mapperSymbols(mFiles)
+	mSyms, _ := scanSymbols(mFiles)
 	if len(mSyms) == 0 {
 		t.Fatal("test setup: no mapper symbols produced")
 	}

@@ -525,7 +525,7 @@ func idxRowID(ix *mapperLadderIndex, i int) int64 { return ix.syms[i].row.id }
 
 // TestBuildIndex_Rung2a_ResolvesThroughRealImport is the end-to-end pin for
 // G2.8's wiring, and it exists for the same reason PR-E's E.6 did: rung 2a's
-// input arrives from a DIFFERENT function (mapperImports' bindings, routed
+// input arrives from a DIFFERENT function (the import scan's bindings, routed
 // through resolveBindings), so a test that only exercises the ladder with a
 // hand-built map passes identically against a build where that map never
 // arrives. This one runs the real buildIndex.

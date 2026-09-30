@@ -103,7 +103,7 @@ func TestBuildIndex_MapperQNameCollisionCounted(t *testing.T) {
 
 // TestGoSymbols_ByPos_ExcludesMapperSymbols is task C.7: byPos (Go's
 // SSA-function-matching map) must contain zero mapper-tier symbols, pinned
-// directly rather than inferred from other tests. mapperSymbols has no byPos
+// directly rather than inferred from other tests. the mapper tier has no byPos
 // parameter at all, so this holds by construction — this test guards that
 // invariant against ever being broken by a future refactor that threads one
 // in.
@@ -135,7 +135,7 @@ func TestGoSymbols_ByPos_ExcludesMapperSymbols(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mSyms, _ := mapperSymbols(mFiles)
+	mSyms, _ := scanSymbols(mFiles)
 	if len(mSyms) == 0 {
 		t.Fatal("test setup: no mapper symbols produced")
 	}
