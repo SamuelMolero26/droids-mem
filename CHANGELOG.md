@@ -31,6 +31,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   When more than half of the callers arrive only via interface dispatch, the hint
   now says they are CHA over-approximations to verify with grep, instead of
   leaving the agent to infer it from `callers_via_interface`.
+- **Depth selector on the graph viewer's Symbol page.** Pick depth 1–5, as in
+  Flow; the page still opens at depth 1, where true caller and callee totals
+  exist. Deeper views group rows by depth and count the rows shown ("50 shown")
+  rather than presenting the capped list as a total.
 
 ### Fixed
 - **`ensure-server` now replaces the daemon when called from a local build.**
