@@ -68,37 +68,30 @@ const (
 // by default, so the model must save one itself or the run leaves no
 // continuity. A host that does wire a flush hook is still safe — dedupe makes
 // the redundant self-save harmless.
-const instructionsCore = `droids-mem is your persistent memory across sessions. Prior lessons — fixes, decisions, conventions — are stored here so you do not relearn them. Call these tools on your own; do not wait to be asked.
+const instructionsCore = `droids-mem is your persistent memory across sessions: prior fixes, decisions, and conventions, so you do not relearn them. Call these tools on your own; do not wait to be asked.
 
-Available tools: mem_save, mem_search, mem_context, mem_get, mem_corpus, graph_symbol, graph_package, graph_build_wait
+AT THE START of a task, and whenever the topic shifts:
+- mem_search with a short description of the task. Results are ranked; read the full body with mem_get before relying on one. Each row has authored_at (unix seconds, when the lesson was written) — treat an old lesson about fast-moving code as possibly stale and verify it against current code.
+- mem_context with task_type = the repo or top-level directory name, the exact same string every session, for the last session summary and standing user rules.
 
-AT THE START of a task, and again whenever the topic shifts:
-- Call mem_search with a short description of what you are about to do. This surfaces relevant prior lessons by relevance and needs no task_type. Results carry a learned_preview (first 500 chars of the lesson) instead of the full body — ordering already implies relevance, so judge by rank and call mem_get with a result id to read the full body before relying on it. Rows carry authored_at (unix seconds): when the lesson was originally written — for imported lessons it predates created_at; weigh an old lesson about fast-moving code as possibly stale and verify it against current code before relying on it. If you are investigating a problem that may span repos, pass all_projects=true to search every project's memories.
-- If you know a stable workflow tag for this work, also call mem_context with that task_type for curated continuity (prior session summary + standing user rules). Derive task_type mechanically — the git repo name or top-level directory name — and reuse the exact same string every session for that project; inventing a new slug each time silently orphans prior continuity. A miss here is harmless — the search above already covers you.
+AS YOU WORK, mem_save each genuinely reusable lesson (not routine steps): error_resolution (problem + fix that worked), task_pattern (repeatable approach), user_rule (a correction or preference the user gave). The store deduplicates, so prefer saving over forgetting. Reuse one session_id for the whole run.
 
-AS YOU WORK, when you learn something worth reusing next time, call mem_save:
-- error_resolution — a problem you hit and the fix that worked.
-- task_pattern — a repeatable approach worth reusing.
-- user_rule — a correction or stable preference the user gave you.
-Save only a genuinely reusable lesson, not routine steps. Re-saving the same lesson is harmless (the store deduplicates), so prefer saving over forgetting. Thread the session_id returned by mem_context (or the first mem_save) through later saves in the same run. If you call mem_context again in the same run (topic pivot, mode=refresh), pass that existing session_id back in — omitting it mints a new one and fragments the run's memories.
+AFTER EACH droids-mem call, say in one line what you learned and how it changes your approach (e.g. "graph_symbol: Store.Save has 15 transitive callers — keeping its signature"), so the user can see decisions come from memory and graph data.
 
-AFTER EVERY TOOL CALL, state briefly what you learned and how it affects your approach. For example: "mem_search found a prior fix for HTTP 429 retries — reusing that approach" or "graph_symbol shows Store.Save has 15 transitive callers — preserving the interface". This is the only way the user sees that your decisions come from memory and graph data, not just reasoning. A one-liner after the tool result is enough.
-
-FOR CODE QUESTIONS in a Go, Python, TypeScript, or JavaScript repo, prefer the graph tools over grep and file reading — they answer from a pre-built call graph in one call. graph_package orients you in an area (exported surface, signatures only); graph_symbol shows one symbol's source plus callers/callees as signature stubs, blast radius via direction=up depth>1, call paths via 'to'. Expand a stub by re-querying its exact qname. Pass your project root as 'repo'.
+FOR CODE in a Go, Python, TypeScript, or JavaScript repo, prefer graph_package (orient) and graph_symbol (one symbol + callers/callees) over grep and file reads. Pass the project root as repo.
 `
 
-const summaryPolicyHTTP = `Do NOT save session summaries here — your host may record those automatically at session end; saving one yourself would duplicate it.`
+const summaryPolicyHTTP = `Do NOT save session summaries here — your host records them at session end; saving one yourself would duplicate it.`
 
-const summaryPolicyStdio = `AT THE END of a run — task complete or user wrapping up — save ONE session_summary (kind=session_summary: what happened, what you learned, what comes next). No hook on this host records summaries automatically; skipping this leaves no continuity for the next session. If a summary hook is wired after all, the store's dedupe makes your save harmless.`
+const summaryPolicyStdio = `AT THE END of a run, save ONE session_summary (what happened, what you learned, what comes next). No hook on this host records it for you.`
 
-const instructionsTail = `Never put secrets, tokens, or keys in any field; the store scrubs free-text fields on save, but tags are stored verbatim (unscrubbed) — keep secrets out of every field anyway.
+const instructionsTail = `Never put secrets, tokens, or keys in any field. Tags are stored unscrubbed.
 
-BEFORE EDITING a function, call graph_symbol with direction=up depth=3 to check its blast radius. The transitive_callers count tells you how many symbols depend on it. Mention this count when you state what you learned — it is the single most useful signal the graph gives you.
+BEFORE EDITING a function, call graph_symbol with direction=up depth=3 and mention its transitive_callers count — the blast radius of the change. Python/TS/JS (mapper-tier) callers are approximate; a stale or carried graph answer means verify against source before acting.`
 
-When a graph response includes freshness.stale: true, a genuine build failure means the whole previous index is being served. A single package that does not type-check degrades alone instead: carried: true on a symbol, and freshness.stale_units naming the packages riding on the previous build's edges. Verify critical findings against actual source files before acting on either. When the hint says a symbol is mapper-tier (Python/TS/JS), callers/callees are heuristic — treat as approximate and cross-check with grep for constants/tests/notebooks.`
-
-// instructions assembles the transport-appropriate protocol string. The HTTP
-// variant is byte-identical to the pre-split serverInstructions const.
+// instructions assembles the transport-appropriate protocol string. It carries
+// only when and why to call; parameter and output detail lives in the tool
+// descriptions, which every host already sends, so it is never repeated here.
 func instructions(stdio bool) string {
 	if stdio {
 		return instructionsCore + "\n" + summaryPolicyStdio + "\n\n" + instructionsTail

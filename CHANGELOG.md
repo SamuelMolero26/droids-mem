@@ -25,6 +25,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   now says they are CHA over-approximations to verify with grep, instead of
   leaving the agent to infer it from `callers_via_interface`.
 
+### Changed
+- **MCP initialize instructions cut from ~1,080 to ~480 tokens**, paid once per
+  agent session on every host. They now carry only when and why to call each
+  tool; parameter and output detail (`learned_preview`, `all_projects`,
+  `session_id` reuse, graph freshness/carried semantics) stays in the tool
+  descriptions that already carry it. The narrate-what-you-learned line now
+  applies to droids-mem calls only, not every tool call.
+
 ### Fixed
 - **Mapper tier now indexes TypeScript type aliases and Python module-level
   bindings.** `type X = ...` in `.ts`/`.tsx` and every top-level assignment in
