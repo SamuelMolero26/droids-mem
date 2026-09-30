@@ -193,46 +193,27 @@ func TestLimitBody(t *testing.T) {
 	})
 }
 
-func TestInstructions_TransportFork(t *testing.T) {
-	httpVar, stdioVar := instructions(false), instructions(true)
-
-	// Both variants share the core protocol, graph tools, and secrets tail.
-	for _, s := range []string{httpVar, stdioVar} {
-		for _, want := range []string{"AT THE START of a task", "mem_save", "Never put secrets", "graph_symbol", "Available tools:"} {
-			if !strings.Contains(s, want) {
-				t.Errorf("instructions missing %q", want)
-			}
+// TestInstructions_Budget pins the measured host limits: Claude Code hands the
+// model only the first 2048 chars of an MCP server's instructions, and Codex
+// docs say only the first 512 should be relied on to stand alone. Every rule
+// past the cut silently never reaches the model, so the core loop must sit
+// inside 512 and the whole text inside 2048.
+func TestInstructions_Budget(t *testing.T) {
+	const claudeCodeCut, codexCore = 2048, 512
+	s := serverInstructions
+	if len(s) > claudeCodeCut {
+		t.Errorf("instructions are %d chars, over the %d Claude Code shows the model", len(s), claudeCodeCut)
+	}
+	core := s[:min(len(s), codexCore)]
+	for _, want := range []string{"mem_search", "graph_package", "graph_symbol direction=up depth=3", "transitive_callers", "mem_save", "session_summary"} {
+		if !strings.Contains(core, want) {
+			t.Errorf("core loop (first %d chars) missing %q", codexCore, want)
 		}
 	}
-
-	// Graph tools appear before the summary policy in both variants.
-	for _, s := range []string{httpVar, stdioVar} {
-		graphPos := strings.Index(s, "graph_symbol")
-		httpPolicyPos := strings.Index(s, "Do NOT save session summaries")
-		stdioPolicyPos := strings.Index(s, "AT THE END of a run")
-		if graphPos < 0 {
-			t.Errorf("graph tools not found in instructions")
+	for _, want := range []string{"mem_get", "all_projects", "mem_context", "error_resolution", "task_pattern", "user_rule", "freshness.stale", "Never put secrets", "tags included"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("instructions missing %q", want)
 		}
-		if httpPolicyPos >= 0 && graphPos > httpPolicyPos {
-			t.Errorf("graph_symbol (%d) appears after HTTP summary policy (%d)", graphPos, httpPolicyPos)
-		}
-		if stdioPolicyPos >= 0 && graphPos > stdioPolicyPos {
-			t.Errorf("graph_symbol (%d) appears after stdio summary policy (%d)", graphPos, stdioPolicyPos)
-		}
-	}
-
-	// Only the session-summary sentence forks.
-	if !strings.Contains(httpVar, "Do NOT save session summaries") {
-		t.Errorf("HTTP variant lost the no-self-save policy")
-	}
-	if strings.Contains(httpVar, "AT THE END of a run") {
-		t.Errorf("HTTP variant carries the stdio self-save policy")
-	}
-	if !strings.Contains(stdioVar, "AT THE END of a run") {
-		t.Errorf("stdio variant missing the self-save policy")
-	}
-	if strings.Contains(stdioVar, "Do NOT save session summaries") {
-		t.Errorf("stdio variant carries the HTTP no-self-save policy")
 	}
 }
 

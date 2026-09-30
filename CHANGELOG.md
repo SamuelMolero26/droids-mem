@@ -7,6 +7,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **MCP server instructions cut from 4,252 to 1,757 chars, and one text for every
+  transport.** Claude Code shows the model only the first 2,048 chars of an MCP
+  server's instructions, so on every Claude Code surface the graph guidance, the
+  end-of-run `session_summary` rule, the blast-radius check and the no-secrets
+  rule never reached the model. A quiz against the served text scored 3/8 on
+  Claude Code before and 8/8 after (OpenCode 8/8 both). The numbered core loop
+  (search, graph before edits, save, end-of-run summary) now fits in the first
+  512 chars, which Codex relies on standing alone. The HTTP/stdio fork on the
+  summary sentence is gone: hooked hosts are told staging counts, and dedupe
+  absorbs a redundant save. `TestInstructions_Budget` holds both limits.
+
 ### Added
 - **`graph_symbol` `no_source` and `no_tests` options** (CLI: `--no-source`,
   `--no-tests`). `no_source` omits the queried symbol's own body; `no_tests`
