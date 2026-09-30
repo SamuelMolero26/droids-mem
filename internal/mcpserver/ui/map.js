@@ -8,7 +8,7 @@
   // layout assigns a column and row to every package. Same input, same output.
   function layout(nodes, edges) {
     var names = nodes.map(function (n) { return n.name; }).sort();
-    var n = names.length, idx = {};
+    var n = names.length, idx = Object.create(null);
     names.forEach(function (s, i) { idx[s] = i; });
     var out = names.map(function () { return []; });
     var deg = names.map(function () { return 0; });
@@ -23,7 +23,7 @@
 
     // DFS from uncalled packages first; an edge into a package still on the
     // stack closes a cycle and is drawn as a dashed back edge.
-    var state = names.map(function () { return 0; }), post = [], back = {};
+    var state = names.map(function () { return 0; }), post = [], back = Object.create(null);
     function dfs(u) {
       state[u] = 1;
       out[u].forEach(function (v) {
@@ -54,10 +54,10 @@
     for (u = 0; u < n; u++) if (deg[u] === 0) col[u] = anyLinked ? maxCol + 1 : 0;
 
     // Row order within a column: by average caller row to limit crossings.
-    var row = names.map(function () { return 0; }), cols = {};
+    var row = names.map(function () { return 0; }), cols = Object.create(null);
     for (u = 0; u < n; u++) (cols[col[u]] = cols[col[u]] || []).push(u);
     Object.keys(cols).map(Number).sort(function (x, y) { return x - y; }).forEach(function (c) {
-      var key = {};
+      var key = Object.create(null);
       cols[c].forEach(function (v) {
         var p = preds[v];
         key[v] = p.length ? p.reduce(function (s, q) { return s + row[q]; }, 0) / p.length : Infinity;
@@ -72,7 +72,7 @@
 
   function draw(d, scale, holder) {
     var L = layout(d.packages, d.edges);
-    var byName = {};
+    var byName = Object.create(null);
     d.packages.forEach(function (p) { byName[p.name] = p; });
     var maxCol = 0, maxRow = 0;
     L.names.forEach(function (_, i) { maxCol = Math.max(maxCol, L.col[i]); maxRow = Math.max(maxRow, L.row[i]); });
@@ -81,7 +81,7 @@
     var svg = DM.svg('svg', { viewBox: '0 0 ' + w + ' ' + h, width: w * scale, height: h * scale, role: 'img' });
     var pos = function (name) { return { x: PAD + L.row[L.idx[name]] * DX, y: PAD + L.col[L.idx[name]] * DY }; };
 
-    var incident = {};
+    var incident = Object.create(null);
     d.edges.forEach(function (e) {
       if (L.idx[e.from] === undefined || L.idx[e.to] === undefined || e.from === e.to) return;
       var a = pos(e.from), b = pos(e.to);

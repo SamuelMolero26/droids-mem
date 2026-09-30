@@ -50,6 +50,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   applies to droids-mem calls only, not every tool call.
 
 ### Fixed
+- **Graph viewer map no longer breaks on packages named `constructor`,
+  `toString` or `__proto__`.** Package names come from the indexed repo and
+  resolved to `Object.prototype` members through the map view's `{}` dicts,
+  so rendering threw. The dicts are null-prototype now.
 - **`ensure-server` now replaces the daemon when called from a local build.**
   Every build from source reports version `dev`, so a rebuilt binary kept
   talking to the previous build's daemon and `graph ui` served stale API and

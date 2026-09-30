@@ -3,11 +3,13 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -50,6 +52,27 @@ func TestVerifyUIKey(t *testing.T) {
 				t.Fatalf("repo = %q, want %q", got, repo)
 			}
 		})
+	}
+}
+
+// Package and symbol names come from the indexed repo, so a package named
+// constructor or toString must not hit Object.prototype through a `{}` dict.
+func TestUIAssets_NoPrototypeDicts(t *testing.T) {
+	dict := regexp.MustCompile(`=\s*\{\}`)
+	files, err := fs.Glob(uiAssets, "ui/*.js")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("glob ui/*.js: %v (%d files)", err, len(files))
+	}
+	for _, f := range files {
+		b, err := uiAssets.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(b), "\n") {
+			if dict.MatchString(line) {
+				t.Errorf("%s:%d uses a {} dict; use Object.create(null): %s", f, i+1, strings.TrimSpace(line))
+			}
+		}
 	}
 }
 
