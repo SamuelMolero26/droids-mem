@@ -7,19 +7,31 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed
-- **MCP server instructions cut from 4,252 to 1,757 chars, and one text for every
-  transport.** Claude Code shows the model only the first 2,048 chars of an MCP
-  server's instructions, so on every Claude Code surface the graph guidance, the
-  end-of-run `session_summary` rule, the blast-radius check and the no-secrets
-  rule never reached the model. A quiz against the served text scored 3/8 on
-  Claude Code before and 8/8 after (OpenCode 8/8 both). The numbered core loop
-  (search, graph before edits, save, end-of-run summary) now fits in the first
-  512 chars, which Codex relies on standing alone. The HTTP/stdio fork on the
-  summary sentence is gone: hooked hosts are told staging counts, and dedupe
-  absorbs a redundant save. `TestInstructions_Budget` holds both limits.
+## [1.3.0] — 2026-09-30
+
+Headline: a browser viewer for the code graph, leaner `mem_search` and
+`graph_symbol` responses, MCP instructions that fit what hosts actually show,
+and one-command setup for Codex and OpenCode. This section lists what changed
+since `1.3.0-beta.1`; upgrading from `1.2.1`, read that section too.
+
+**Breaking:** default `search`/`mem_search` rows are compact (see Changed), and
+the `pinned`, `review_after` and `needs_review` fields are gone from all JSON
+output (see Removed). The database migrates to schema v10 on first open.
 
 ### Added
+- **`droids-mem graph ui`: a browser viewer for the code graph.** Served by the
+  existing daemon on loopback behind a time-limited key, it shows the same graph
+  agents read through `graph_symbol`/`graph_package`: a package map with
+  drill-down to symbols, a three-pane Symbol page (called by, source, calls),
+  a Flow view, search and entry points.
+- **`install --all` also registers detected Codex and OpenCode hosts** and
+  skips absent ones; `uninstall --all` reverses it. One failing host no longer
+  aborts the rest.
+- **Install writes code-graph guidance for the agent.** `install --all` appends
+  a code-graph block to `CLAUDE.md`, and `install --host codex|opencode
+  --project` to `./AGENTS.md`, creating the file when missing and only after the
+  host config succeeded. A `--project` install at a git root also starts one
+  detached `graph index`, so the agent's first query is not a cold build.
 - **`mem_search` and `mem_context` rows now carry `authored_at`** (unix
   seconds), replacing the removed `needs_review` staleness signal. It is when
   the lesson was originally written (imported lessons predate `created_at`); the
@@ -42,14 +54,48 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rather than presenting the capped list as a total.
 
 ### Changed
-- **MCP initialize instructions cut from ~1,080 to ~480 tokens**, paid once per
-  agent session on every host. They now carry only when and why to call each
-  tool; parameter and output detail (`learned_preview`, `all_projects`,
-  `session_id` reuse, graph freshness/carried semantics) stays in the tool
-  descriptions that already carry it. The narrate-what-you-learned line now
-  applies to droids-mem calls only, not every tool call.
+- **Default `search` and `mem_search` rows are compact.** Each row carries
+  `id`, `kind`, `title`, `task_type`, `authored_at` and a `learned_preview` of
+  up to 500 characters (suffixed `... (N chars total)` only when truncated);
+  `score`, `overlap_score`, the other timestamps and the full `learned` body are
+  no longer in list output. `get --id` / `mem_get` is the way to the full body.
+- **An empty search says why and what to try.** A scoped search with no match
+  suggests widening the scope (`--all-projects` on the CLI, `all_projects=true`
+  over MCP); a global one suggests different keywords. A punctuation-only query
+  returns a definitive empty result without touching the database. Both exit 0,
+  and `total == 0` remains the machine check.
+- **MCP server instructions cut from 4,252 to 1,757 chars (about 1,080 to 480
+  tokens), and one text for every transport.** Claude Code shows the model only
+  the first 2,048 chars of an MCP server's instructions, so on every Claude Code
+  surface the graph guidance, the end-of-run `session_summary` rule, the
+  blast-radius check and the no-secrets rule never reached the model. A quiz
+  against the served text scored 3/8 on Claude Code before and 8/8 after
+  (OpenCode 8/8 both). The numbered core loop (search, graph before edits, save,
+  end-of-run summary) now fits in the first 512 chars, which Codex relies on
+  standing alone. The instructions carry only when and why to call each tool;
+  parameter and output detail (`learned_preview`, `all_projects`, `session_id`
+  reuse, graph freshness/carried semantics) stays in the tool descriptions, and
+  the narrate-what-you-learned line applies to droids-mem calls only. The
+  HTTP/stdio fork on the summary sentence is gone: hooked hosts are told staging
+  counts, and dedupe absorbs a redundant save. `TestInstructions_Budget` holds
+  both limits.
+- **`mem_corpus` `recent_sessions` includes manually saved summaries**, tagged
+  with their origin, not only hook-staged ones.
+- **Dependencies:** `mark3labs/mcp-go` 1.1.0, `modernc.org/sqlite` 1.59.0.
 
 ### Fixed
+- **`save` validation errors report the real `retryable` value.** `save`
+  answered `retryable: false` for every validation error, although a missing
+  `--title`, `--what`, `--learned` or `--task-type` and a rejected tag are all
+  fixable by the caller and retryable. `search`, `get` and `list` now pass the
+  store's own `code` and `suggestion` through as well instead of a generic one.
+- **`save --force --dry-run` previews the overwrite.** The dry run dropped
+  `--force` and predicted a duplicate skip for a save that would have
+  overwritten.
+- **`graph_symbol` rejects an invalid `direction`** with a validation error
+  instead of returning an empty success.
+- **`save`, `search`, `context` and `get` reject stray positional arguments**
+  with a usage error instead of silently ignoring them.
 - **Graph viewer map no longer breaks on packages named `constructor`,
   `toString` or `__proto__`.** Package names come from the indexed repo and
   resolved to `Object.prototype` members through the map view's `{}` dicts,
@@ -528,7 +574,8 @@ normally.
 - `workspace.yml` / inline scrub config → v1.1. v1.0 pattern set + order are
   hardcoded.
 
-[Unreleased]: https://github.com/SamuelMolero26/droids-mem/compare/v1.3.0-beta.1...HEAD
+[Unreleased]: https://github.com/SamuelMolero26/droids-mem/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/SamuelMolero26/droids-mem/compare/v1.3.0-beta.1...v1.3.0
 [1.3.0-beta.1]: https://github.com/SamuelMolero26/droids-mem/compare/v1.2.1...v1.3.0-beta.1
 [1.2.1]: https://github.com/SamuelMolero26/droids-mem/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/SamuelMolero26/droids-mem/compare/v1.1.1...v1.2.0
