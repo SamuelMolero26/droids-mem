@@ -24,7 +24,6 @@ const (
 	minSearchLen     = 2
 	entryPointsHint  = "heuristic: exported or main/init/route functions with no non-test callers; dynamic dispatch, reflection and framework wiring are invisible to the call graph, so this is a starting point, not the full list of entry points"
 	notIndexedHint   = "not indexed: run `droids-mem graph ui` in the repository to build the graph"
-	testFileOf       = `%s.file LIKE '%%\_test.go' ESCAPE '\'`
 )
 
 // RepoRoot resolves dir to the repository scope a graph is keyed by, and
@@ -172,7 +171,7 @@ func (m *Manager) PackageOverview(ctx context.Context, repo string) (*OverviewRe
 
 	erows, err := conn.QueryContext(ctx, `SELECT cs.package, ce.package, COUNT(*)
 		FROM edges e JOIN symbols cs ON cs.id = e.caller JOIN symbols ce ON ce.id = e.callee
-		WHERE cs.package <> ce.package AND NOT `+fmt.Sprintf(testFileOf, "cs")+` AND NOT `+fmt.Sprintf(testFileOf, "ce")+`
+		WHERE cs.package <> ce.package AND NOT `+testFileOf("cs")+` AND NOT `+testFileOf("ce")+`
 		GROUP BY cs.package, ce.package ORDER BY COUNT(*) DESC, cs.package, ce.package LIMIT ?`, maxOverviewEdges+1) // #nosec G202 -- fragments are compile-time constants
 	if err != nil {
 		return nil, err
@@ -324,10 +323,10 @@ func (m *Manager) EntryPoints(ctx context.Context, repo string) (*StubsResponse,
 	resp := &StubsResponse{Repo: repo, Freshness: fresh, Symbols: []Neighbor{}, Hint: entryPointsHint}
 
 	rows, err := conn.QueryContext(ctx, `SELECT s.qname, s.kind, s.signature, s.file, s.line FROM symbols s
-		WHERE s.kind IN ('func', 'method') AND NOT `+fmt.Sprintf(testFileOf, "s")+`
+		WHERE s.kind IN ('func', 'method') AND NOT `+testFileOf("s")+`
 		AND (s.name IN ('main', 'init') OR s.exported = 1 OR lower(s.name) LIKE '%route%')
 		AND NOT EXISTS (SELECT 1 FROM edges e JOIN symbols c ON c.id = e.caller
-			WHERE e.callee = s.id AND NOT `+fmt.Sprintf(testFileOf, "c")+`)
+			WHERE e.callee = s.id AND NOT `+testFileOf("c")+`)
 		ORDER BY (s.name = 'main') DESC, s.package, s.file, s.line LIMIT ?`, maxEntryPoints+1) // #nosec G202 -- fragments are compile-time constants
 	if err != nil {
 		return nil, err

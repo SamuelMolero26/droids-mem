@@ -494,7 +494,7 @@ func calleeCount(ctx context.Context, conn *sql.DB, id int64) (int, error) {
 func callerSplit(ctx context.Context, conn *sql.DB, id int64) (total, inTests, viaInterface int, err error) {
 	err = conn.QueryRowContext(ctx, `SELECT
 			COUNT(DISTINCT e.caller),
-			COUNT(DISTINCT CASE WHEN s.file LIKE '%\_test.go' ESCAPE '\' THEN e.caller END),
+			COUNT(DISTINCT CASE WHEN `+testFileOf("s")+` THEN e.caller END),
 			COUNT(DISTINCT CASE WHEN e.dispatch = 'interface' THEN e.caller END)
 		FROM edges e JOIN symbols s ON s.id = e.caller
 		WHERE e.callee = ?`, id).Scan(&total, &inTests, &viaInterface)
@@ -703,8 +703,8 @@ func neighborLevel(ctx context.Context, conn *sql.DB, from, to string, frontier 
 	// neighbors only; its arg sits between the IN list and startPkg.
 	rows, err := conn.QueryContext(ctx, fmt.Sprintf(`SELECT DISTINCT s.id, s.qname, s.kind, s.signature, s.file, s.line
 		FROM edges e JOIN symbols s ON s.id = e.%s
-		WHERE e.%s IN (%s) AND (NOT ? OR s.file NOT LIKE '%%\_test.go' ESCAPE '\')
-		ORDER BY (s.file LIKE '%%\_test.go' ESCAPE '\'), (s.package != ?), s.qname`, to, from, placeholders(len(frontier))),
+		WHERE e.%s IN (%s) AND (NOT ? OR NOT %s)
+		ORDER BY (%[4]s), (s.package != ?), s.qname`, to, from, placeholders(len(frontier)), testFileOf("s")),
 		append(idArgs(frontier), noTests, startPkg)...)
 	if err != nil {
 		return nil, false, err
@@ -870,6 +870,9 @@ type PackageResponse struct {
 // escape is required: '_' is a LIKE single-character wildcard, so an unescaped
 // '%_test.go' would also match "mytest.go".
 const isTestFile = `file LIKE '%\_test.go' ESCAPE '\'`
+
+// testFileOf is isTestFile qualified by a table alias.
+func testFileOf(alias string) string { return alias + "." + isTestFile }
 
 // pkgCount holds the scalars a package surface reports alongside its rows.
 // mapper is decided from every row in the package, not the listed ones: a

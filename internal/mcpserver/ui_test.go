@@ -181,6 +181,7 @@ func TestUIAPI(t *testing.T) {
 		{"search too short", "/api/graph/search?q=a", key, http.StatusBadRequest},
 		{"entrypoints", "/api/graph/entrypoints", key, http.StatusOK},
 		{"symbol", "/api/graph/symbol?symbol=f", key, http.StatusOK},
+		{"symbol bad direction", "/api/graph/symbol?symbol=f&direction=sideways", key, http.StatusBadRequest},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

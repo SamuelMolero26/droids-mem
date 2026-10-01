@@ -112,13 +112,10 @@ func registerUI(mux *http.ServeMux, token string, gm *graph.Manager) {
 	api("symbol", func(r *http.Request, repo string) (any, error) {
 		q := r.URL.Query()
 		depth, _ := strconv.Atoi(q.Get("depth"))
-		dir := q.Get("direction")
-		if dir != "up" && dir != "down" {
-			dir = "both"
-		}
-		// Symbol clamps depth to 1..5, the same bound graph_symbol gets.
+		// Symbol clamps depth to 1..5, the same bound graph_symbol gets, and
+		// validates direction (empty means both).
 		return gm.Symbol(r.Context(), graph.SymbolRequest{
-			Repo: repo, Symbol: q.Get("symbol"), Direction: dir,
+			Repo: repo, Symbol: q.Get("symbol"), Direction: q.Get("direction"),
 			Depth: depth, NoBuild: true,
 		})
 	})
