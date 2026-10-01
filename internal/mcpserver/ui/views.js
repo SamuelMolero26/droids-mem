@@ -4,10 +4,11 @@
   function where(s) { return s.file ? s.file + (s.line ? ':' + s.line : '') : ''; }
 
   // ---- shared: a list of symbol stubs ----
-  function stubList(items) {
+  // extra, if given, maps a stub to a suffix for its meta text.
+  function stubList(items, extra) {
     var ul = DM.el('ul', 'list');
     items.forEach(function (s) {
-      var li = DM.el('li', null, DM.row(s, where(s)));
+      var li = DM.el('li', null, DM.row(s, where(s) + (extra ? extra(s) : '')));
       if (s.signature && s.signature !== s.qname) li.append(DM.el('div', 'sig', s.signature));
       ul.append(li);
     });
@@ -21,14 +22,10 @@
     DM.setBadges(d.freshness, { truncated: d.truncated });
     var syms = d.symbols.filter(function (s) { return s.exported; })
       .concat(d.symbols.filter(function (s) { return !s.exported; }));
-    var ul = DM.el('ul', 'list');
-    syms.forEach(function (s) {
-      ul.append(DM.el('li', null, DM.row(s, where(s) + (s.exported ? '' : ' · unexported')),
-        DM.el('div', 'sig', s.signature)));
-    });
     ctx.main.textContent = '';
     ctx.main.append(DM.el('h2', null, d.package),
-      DM.el('p', 'muted', d.truncated ? 'Showing ' + d.symbols.length + ' of ' + d.total + ' symbols.' : d.symbols.length + ' symbols.'), ul);
+      DM.el('p', 'muted', d.truncated ? 'Showing ' + d.symbols.length + ' of ' + d.total + ' symbols.' : d.symbols.length + ' symbols.'),
+      stubList(syms, function (s) { return s.exported ? '' : ' · unexported'; }));
   };
 
   // ---- flow: callers | focus | callees columns ----
@@ -36,7 +33,7 @@
     var col = DM.el('section', 'col', DM.el('h3', null, title));
     if (!items.length) col.append(DM.el('p', 'muted small', 'none'));
     items.forEach(function (n) {
-      var a = DM.link(DM.flowHash(n.qname), DM.short(n.qname));
+      var a = DM.link(DM.hash('flow', n.qname), DM.short(n.qname));
       a.title = n.qname + '\n' + n.signature + '\n' + where(n);
       col.append(DM.el('div', 'nb', a));
     });
@@ -79,8 +76,8 @@
     if (d.callers_via_interface) stats.push('callers via interface: ' + d.callers_via_interface);
 
     var focus = DM.el('section', 'col focus', DM.el('h3', null, 'Focus'),
-      DM.el('div', 'nb', DM.link(DM.symHash(s.qname), DM.short(s.qname))),
-      DM.el('div', 'sig', s.signature), DM.link(DM.pkgHash(s.package), s.package),
+      DM.el('div', 'nb', DM.link(DM.hash('sym', s.qname), DM.short(s.qname))),
+      DM.el('div', 'sig', s.signature), DM.link(DM.hash('pkg', s.package), s.package),
       DM.el('div', 'muted small', where(s)));
     if (s.doc) focus.append(DM.el('p', 'small', s.doc));
     if (s.source) focus.append(DM.el('pre', null, s.source));
@@ -105,27 +102,25 @@
   DM.stubList = stubList;
   DM.selector = selector;
 
+  // Shared body of the search and entry-point views.
+  function stubPage(ctx, d, title, hint, empty) {
+    DM.setBadges(d.freshness, { truncated: d.truncated });
+    ctx.main.textContent = '';
+    ctx.main.append(DM.el('h2', null, title));
+    if (hint) ctx.main.append(DM.el('p', 'muted', hint));
+    ctx.main.append(d.symbols.length ? stubList(d.symbols) : DM.el('p', 'state', empty));
+  }
+
   // ---- search ----
   DM.views.search = async function (ctx) {
     if (ctx.arg.length < 2) return DM.note(ctx.main, 'Type at least 2 characters and press Enter.');
     var d = await DM.api('search', { q: ctx.arg });
-    if (!ctx.alive()) return;
-    DM.setBadges(d.freshness, { truncated: d.truncated });
-    ctx.main.textContent = '';
-    ctx.main.append(DM.el('h2', null, 'Search: ' + ctx.arg));
-    if (!d.symbols.length) return ctx.main.append(DM.el('p', 'state', 'No matches.'));
-    ctx.main.append(stubList(d.symbols));
+    if (ctx.alive()) stubPage(ctx, d, 'Search: ' + ctx.arg, null, 'No matches.');
   };
 
   // ---- entry points ----
   DM.views.entry = async function (ctx) {
     var d = await DM.api('entrypoints');
-    if (!ctx.alive()) return;
-    DM.setBadges(d.freshness, { truncated: d.truncated });
-    ctx.main.textContent = '';
-    ctx.main.append(DM.el('h2', null, 'Entry points'),
-      DM.el('p', 'muted', d.hint));
-    if (!d.symbols.length) return ctx.main.append(DM.el('p', 'state', 'No entry points found.'));
-    ctx.main.append(stubList(d.symbols));
+    if (ctx.alive()) stubPage(ctx, d, 'Entry points', d.hint, 'No entry points found.');
   };
 })();

@@ -16,7 +16,7 @@
 
   // step links open Flow in one direction; click runs before hashchange.
   function step(dir, q, text) {
-    var a = DM.link(DM.flowHash(q), text);
+    var a = DM.link(DM.hash('flow', q), text);
     a.addEventListener('click', function () { DM.opts.dir = dir; });
     return a;
   }
@@ -121,13 +121,13 @@
     if (d.carried) pill('carried');
     if (d.transitive_callers != null) pill(d.transitive_callers + ' transitive callers');
     var sec = DM.el('section', 'pane detail', h1, DM.el('p', 'meta', meta.join(' · ')),
-      DM.el('p', 'meta', 'in ', DM.link(DM.pkgHash(s.package), s.package)));
+      DM.el('p', 'meta', 'in ', DM.link(DM.hash('pkg', s.package), s.package)));
     sec.setAttribute('aria-labelledby', 'h-sym');
     if (pills.children.length) sec.append(pills);
     if (s.signature) sec.append(DM.el('pre', 'sig', s.signature));
     (s.doc ? s.doc.split(/\n\s*\n/) : []).forEach(function (p) { sec.append(DM.el('p', 'doc', p.trim())); });
     if (src) {
-      var code = DM.el('section', 'code', DM.el('h2', 'vh', 'Source'), src.box);
+      var code = DM.el('section', null, DM.el('h2', 'vh', 'Source'), src.box);
       if (src.cut) code.append(DM.el('p', 'note', 'Source truncated at 8 KB — open ' + s.file + ':' + s.line));
       sec.append(DM.el('hr'), code);
     }

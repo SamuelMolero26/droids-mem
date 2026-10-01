@@ -28,9 +28,7 @@ DM.link = function (hash, text, cls) {
   a.href = hash;
   return a;
 };
-DM.pkgHash = function (name) { return '#/pkg/' + encodeURIComponent(name); };
-DM.symHash = function (qname) { return '#/sym/' + encodeURIComponent(qname); };
-DM.flowHash = function (qname) { return '#/flow/' + encodeURIComponent(qname); };
+DM.hash = function (kind, q) { return '#/' + kind + '/' + encodeURIComponent(q); };
 
 // Short display name. Mapper qnames are "<module>:<Container.name>", Go qnames
 // are "<import path>.<Name or Recv.Method>"; the full qname stays in a title.
@@ -53,7 +51,7 @@ DM.kindBadge = function (kind) {
 
 // Row: the whole row is one link to the symbol; meta is plain muted text.
 DM.row = function (n, meta) {
-  var a = DM.link(DM.symHash(n.qname), null, 'row');
+  var a = DM.link(DM.hash('sym', n.qname), null, 'row');
   a.title = n.qname;
   a.append(DM.kindBadge(n.kind), DM.el('span', 'nm', DM.short(n.qname)), meta ? DM.el('span', 'meta', meta) : null);
   return a;
@@ -66,15 +64,11 @@ DM.trail = function () {
   try { t = JSON.parse(sessionStorage.getItem('dm.trail')); } catch (e) { t = null; }
   return Array.isArray(t) ? t.filter(function (c) { return c && typeof c.q === 'string'; }) : [];
 };
-DM.lastSym = function () {
-  var t = DM.trail();
-  return t.length ? t[t.length - 1].q : '';
-};
 DM.renderTrail = function (activeQ) {
   var box = document.getElementById('trail');
   box.textContent = '';
   DM.trail().forEach(function (c) {
-    var a = DM.link(DM.symHash(c.q), null, 'chip');
+    var a = DM.link(DM.hash('sym', c.q), null, 'chip');
     a.title = c.q;
     a.append(DM.kindBadge(c.k), DM.short(c.q));
     if (c.q === activeQ) a.setAttribute('aria-current', 'true');
@@ -138,8 +132,6 @@ DM.setBadges = function (f, o) {
     if (title) b.title = title;
     box.append(b);
   };
-  o = o || {};
-  f = f || {};
   if (o.syntactic) add('warn', 'approximate', 'Heuristic (syntactic) edges, not type-checked');
   if (f.stale) add('warn', 'stale', 'Sources changed since the graph was built');
   if (f.rebuilding) add('info', 'rebuilding');
@@ -168,8 +160,9 @@ DM.route = async function () {
   var sf = name === 'sym' || name === 'flow';
   // An empty #/sym/ or #/flow/ resolves to the last symbol in the trail.
   if (sf && !arg) {
-    arg = DM.lastSym();
-    if (arg) history.replaceState(null, '', (name === 'sym' ? DM.symHash : DM.flowHash)(arg));
+    var trail = DM.trail();
+    arg = trail.length ? trail[trail.length - 1].q : '';
+    if (arg) history.replaceState(null, '', DM.hash(name, arg));
   }
   ['map', 'sym', 'flow'].forEach(function (n) {
     var tab = document.getElementById('tab-' + n);

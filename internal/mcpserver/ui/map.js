@@ -74,8 +74,7 @@
     var L = layout(d.packages, d.edges);
     var byName = Object.create(null);
     d.packages.forEach(function (p) { byName[p.name] = p; });
-    var maxCol = 0, maxRow = 0;
-    L.names.forEach(function (_, i) { maxCol = Math.max(maxCol, L.col[i]); maxRow = Math.max(maxRow, L.row[i]); });
+    var maxCol = Math.max(0, ...L.col), maxRow = Math.max(0, ...L.row);
     // A layer (col) is a horizontal band; row is the position within it.
     var w = PAD * 2 + maxRow * DX + W, h = PAD * 2 + maxCol * DY + H;
     var svg = DM.svg('svg', { viewBox: '0 0 ' + w + ' ' + h, width: w * scale, height: h * scale, role: 'img' });
@@ -103,7 +102,7 @@
       var tags = [];
       if (p.carried) tags.push('carried');
       if (p.precision === 'syntactic') tags.push('approx');
-      var g = DM.svg('a', { href: DM.pkgHash(name), class: cls },
+      var g = DM.svg('a', { href: DM.hash('pkg', name), class: cls },
         DM.svg('title', {}, name + ' — ' + p.symbols + ' symbols' + (p.carried ? ' (carried from earlier build)' : '')),
         DM.svg('rect', { x: at.x, y: at.y, width: W, height: H, rx: 3, class: 'card' }),
         DM.svg('rect', { x: at.x + 8, y: at.y + 8, width: 16, height: 16, rx: 2, class: 'icon' }),
