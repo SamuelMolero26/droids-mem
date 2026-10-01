@@ -98,3 +98,31 @@ func TestE2E_SaveMissingTitleIsRetryable(t *testing.T) {
 		t.Fatalf("retryable = false, want true — store.Save sets Retryable: true for a missing --title (stderr: %s)", stderr)
 	}
 }
+
+// The store's own Code/Suggestion win; unset ones fall back to the command's.
+func TestE2E_ValidationErrorCodeAndSuggestion(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "mem.db")
+	for _, tc := range []struct {
+		name                     string
+		args                     []string
+		wantCode, wantSuggestion string
+	}{
+		{"store fields win", []string{"prune"}, "prune_unfiltered", "pass --id, or at least one of --kind, --task-type, --older-than-days"},
+		{"fallback", []string{"save", "--task-type", "t", "--kind", "task_pattern", "--title", " ", "--what", "w", "--learned", "l"}, "validation_failed", "check --title value"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, stderr, code := runBinary(t, dbPath, tc.args...)
+			if code != 2 {
+				t.Fatalf("exit = %d, want 2 (stderr: %s)", code, stderr)
+			}
+			var env struct {
+				Code       string `json:"code"`
+				Suggestion string `json:"suggestion"`
+			}
+			mustParseJSON(t, []byte(stderr), &env)
+			if env.Code != tc.wantCode || env.Suggestion != tc.wantSuggestion {
+				t.Errorf("got (%q, %q), want (%q, %q)", env.Code, env.Suggestion, tc.wantCode, tc.wantSuggestion)
+			}
+		})
+	}
+}

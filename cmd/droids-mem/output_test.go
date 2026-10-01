@@ -5,8 +5,6 @@ import (
 	"math"
 	"strings"
 	"testing"
-
-	"github.com/samuelmolero26/droids-mem/internal/store"
 )
 
 // Every command's entire contract is "JSON on stdout, JSON on stderr". A
@@ -88,21 +86,5 @@ func TestErrorEnvelope_KeepsMarshalableInput(t *testing.T) {
 	b := errorEnvelope(e)
 	if !strings.Contains(string(b), `"--nope"`) {
 		t.Errorf("marshalable input was dropped: %s", b)
-	}
-}
-
-// The store's own Code/Suggestion win; unset ones fall back.
-func TestValidationErrorFields(t *testing.T) {
-	for _, tc := range []struct {
-		ve                       store.ValidationError
-		wantCode, wantSuggestion string
-	}{
-		{store.ValidationError{Code: "invalid_threshold", Suggestion: "pass --id"}, "invalid_threshold", "pass --id"},
-		{store.ValidationError{}, "validation_failed", "fallback"},
-	} {
-		code, suggestion := validationErrorFields(&tc.ve, "fallback")
-		if code != tc.wantCode || suggestion != tc.wantSuggestion {
-			t.Errorf("%+v: got (%q, %q), want (%q, %q)", tc.ve, code, suggestion, tc.wantCode, tc.wantSuggestion)
-		}
 	}
 }

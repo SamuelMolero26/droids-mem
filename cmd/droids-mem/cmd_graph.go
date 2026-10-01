@@ -269,9 +269,9 @@ marked stale, and the build error is printed as index_error.`,
 	return cmd
 }
 
-// openBrowser asks the OS to open u and reports whether the opener failed.
-// An opener still running after 3s is taken as success: some xdg-open
-// setups run the browser in the foreground, and waiting on it would hang.
+// openBrowser asks the OS to open u and reports whether the opener could be
+// started. It never waits on the opener (some xdg-open setups run the browser
+// in the foreground), so a late failure is not detected.
 func openBrowser(u string) error {
 	opener := "xdg-open"
 	if runtime.GOOS == "darwin" {
@@ -281,14 +281,8 @@ func openBrowser(u string) error {
 	if err := c.Start(); err != nil {
 		return err
 	}
-	done := make(chan error, 1)
-	go func() { done <- c.Wait() }()
-	select {
-	case err := <-done:
-		return err
-	case <-time.After(3 * time.Second):
-		return nil
-	}
+	go c.Wait() //nolint:errcheck // reap the child; its exit status is deliberately ignored
+	return nil
 }
 
 // writeGraphErr emits the error envelope and exits (3 for misses, 1 otherwise).

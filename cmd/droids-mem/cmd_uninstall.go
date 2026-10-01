@@ -339,7 +339,7 @@ func uninstallHost(host string, project bool) error {
 		return nil
 	}
 	if err != nil {
-		writeError("uninstall_failed", err.Error(), isRetryable(err))
+		writeError("uninstall_failed", err.Error(), false)
 		exitWith(ExitError)
 	}
 	if project {
@@ -355,7 +355,7 @@ func uninstallHost(host string, project bool) error {
 func uninstallCodex() (map[string]any, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, stepErr(false, "resolve home dir: %w", err)
+		return nil, fmt.Errorf("resolve home dir: %w", err)
 	}
 	path := filepath.Join(home, ".codex", "config.toml")
 	res := map[string]any{"host": "codex", "config": path, "status": "already_absent"}
@@ -364,7 +364,7 @@ func uninstallCodex() (map[string]any, error) {
 		if os.IsNotExist(err) {
 			return res, nil
 		}
-		return nil, stepErr(true, "read %s: %w", path, err)
+		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	next, removed := stripTOMLTable(string(b), codexMCPMarker)
 	if !removed {
@@ -372,7 +372,7 @@ func uninstallCodex() (map[string]any, error) {
 	}
 	// #nosec G703 -- path is a fixed config location, not user input
 	if err := os.WriteFile(path, []byte(next), 0o600); err != nil {
-		return nil, stepErr(true, "write %s: %w", path, err)
+		return nil, fmt.Errorf("write %s: %w", path, err)
 	}
 	res["status"] = "uninstalled"
 	return res, nil
@@ -409,7 +409,7 @@ func stripTOMLTable(content, marker string) (string, bool) {
 func uninstallOpencode() (map[string]any, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, stepErr(false, "resolve home dir: %w", err)
+		return nil, fmt.Errorf("resolve home dir: %w", err)
 	}
 	path := filepath.Join(home, ".config", "opencode", "opencode.json")
 	res := map[string]any{"host": "opencode", "config": path, "status": "already_absent"}
@@ -418,11 +418,11 @@ func uninstallOpencode() (map[string]any, error) {
 		if os.IsNotExist(err) {
 			return res, nil
 		}
-		return nil, stepErr(true, "read %s: %w", path, err)
+		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	config := map[string]any{}
 	if err := json.Unmarshal(b, &config); err != nil {
-		return nil, stepErr(false, "parse %s: %w", path, err)
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	mcp, _ := config["mcp"].(map[string]any)
 	if _, ok := mcp["droids-mem"]; !ok {
@@ -436,11 +436,11 @@ func uninstallOpencode() (map[string]any, error) {
 	}
 	out, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
-		return nil, stepErr(false, "marshal config: %w", err)
+		return nil, fmt.Errorf("marshal config: %w", err)
 	}
 	// #nosec G703 -- path is a fixed config location, not user input
 	if err := os.WriteFile(path, append(out, '\n'), 0o600); err != nil {
-		return nil, stepErr(true, "write %s: %w", path, err)
+		return nil, fmt.Errorf("write %s: %w", path, err)
 	}
 	res["status"] = "uninstalled"
 	return res, nil

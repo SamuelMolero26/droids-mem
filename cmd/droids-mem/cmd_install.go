@@ -163,24 +163,6 @@ func codexMCPBlock(self string) string {
 // codexMCPMarker detects a prior install (idempotency).
 const codexMCPMarker = "[mcp_servers.droids-mem]"
 
-// stepError marks whether a failed host step is worth retrying.
-type stepError struct {
-	err       error
-	retryable bool
-}
-
-func (e *stepError) Error() string { return e.err.Error() }
-func (e *stepError) Unwrap() error { return e.err }
-
-func stepErr(retryable bool, format string, a ...any) error {
-	return &stepError{fmt.Errorf(format, a...), retryable}
-}
-
-func isRetryable(err error) bool {
-	se, ok := errors.AsType[*stepError](err)
-	return ok && se.retryable
-}
-
 // installHost registers droids-mem as a stdio MCP server in a non-Claude
 // host's config (ADR-0019). Per-host difference is data — a config snippet +
 // a target path — not logic; the stdio instructions string carries the
@@ -207,7 +189,7 @@ func installHost(host, self string, printOnly, project bool) error {
 		return nil
 	}
 	if err != nil {
-		writeError("install_failed", err.Error(), isRetryable(err))
+		writeError("install_failed", err.Error(), false)
 		exitWith(ExitError)
 	}
 	// Only after the host config is written, so a failed install leaves no
@@ -227,20 +209,20 @@ func installHost(host, self string, printOnly, project bool) error {
 func installCodex(self string) (map[string]any, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, stepErr(false, "resolve home dir: %w", err)
+		return nil, fmt.Errorf("resolve home dir: %w", err)
 	}
 	path := filepath.Join(home, ".codex", "config.toml")
 	res := map[string]any{"host": "codex", "config": path}
 	existing, err := os.ReadFile(path) // #nosec G304 -- fixed config location, not user input
 	if err != nil && !os.IsNotExist(err) {
-		return nil, stepErr(true, "read %s: %w", path, err)
+		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	if strings.Contains(string(existing), codexMCPMarker) {
 		res["status"] = "already_installed"
 		return res, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return nil, stepErr(true, "create dir: %w", err)
+		return nil, fmt.Errorf("create dir: %w", err)
 	}
 	out := codexMCPBlock(self)
 	if n := len(existing); n > 0 {
@@ -253,7 +235,7 @@ func installCodex(self string) (map[string]any, error) {
 
 	// #nosec G703 -- path is a fixed config location, not user input
 	if err := os.WriteFile(path, []byte(out), 0o600); err != nil {
-		return nil, stepErr(true, "write %s: %w", path, err)
+		return nil, fmt.Errorf("write %s: %w", path, err)
 	}
 	res["status"] = "installed"
 	return res, nil
@@ -273,23 +255,23 @@ func opencodeEntry(self string) map[string]any {
 func installOpencode(self string) (map[string]any, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, stepErr(false, "resolve home dir: %w", err)
+		return nil, fmt.Errorf("resolve home dir: %w", err)
 	}
 	path := filepath.Join(home, ".config", "opencode", "opencode.json")
 	res := map[string]any{"host": "opencode", "config": path}
 	config := map[string]any{}
 	if b, err := os.ReadFile(path); err == nil { // #nosec G304 -- fixed config location, not user input
 		if err := json.Unmarshal(b, &config); err != nil {
-			return nil, stepErr(false, "parse %s: %w", path, err)
+			return nil, fmt.Errorf("parse %s: %w", path, err)
 		}
 	} else if !os.IsNotExist(err) {
-		return nil, stepErr(true, "read %s: %w", path, err)
+		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	mcp, ok := config["mcp"].(map[string]any)
 	if !ok {
 		if _, present := config["mcp"]; present {
 			// Don't clobber a non-object "mcp" — that's the user's data.
-			return nil, stepErr(false, `existing "mcp" key in %s is not an object; refusing to overwrite`, path)
+			return nil, fmt.Errorf(`existing "mcp" key in %s is not an object; refusing to overwrite`, path)
 		}
 		mcp = map[string]any{}
 	}
@@ -300,14 +282,14 @@ func installOpencode(self string) (map[string]any, error) {
 	mcp["droids-mem"] = opencodeEntry(self)
 	config["mcp"] = mcp
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return nil, stepErr(true, "create dir: %w", err)
+		return nil, fmt.Errorf("create dir: %w", err)
 	}
 	out, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
-		return nil, stepErr(false, "marshal config: %w", err)
+		return nil, fmt.Errorf("marshal config: %w", err)
 	}
 	if err := os.WriteFile(path, append(out, '\n'), 0o600); err != nil {
-		return nil, stepErr(true, "write %s: %w", path, err)
+		return nil, fmt.Errorf("write %s: %w", path, err)
 	}
 	res["status"] = "installed"
 	return res, nil

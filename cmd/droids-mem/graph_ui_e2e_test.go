@@ -7,10 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The viewer URL carries a 12-hour key, so `graph ui` prints it only when the
-// user needs it: the browser could not be opened, or --no-open was passed.
+// user needs it: the opener could not be started, or --no-open was passed.
 // A fake open/xdg-open first on PATH stands in for the OS opener.
 func TestE2E_GraphUIPrintsURLOnlyWhenNotOpened(t *testing.T) {
 	env := newDaemonEnv(t)
@@ -35,7 +36,9 @@ func TestE2E_GraphUIPrintsURLOnlyWhenNotOpened(t *testing.T) {
 		wantOpened bool
 	}{
 		{"opened", "0", "0", nil, false, true},
-		{"open failed", "1", "0", nil, true, true},
+		// Only a failure to launch the opener counts; its later exit status
+		// is not waited on.
+		{"opener exits nonzero", "1", "0", nil, false, true},
 		{"no-open", "0", "0", []string{"--no-open"}, true, false},
 		// xdg-open can run the browser in the foreground: an opener still
 		// running is taken as opened, and graph ui must not wait for it.
@@ -68,8 +71,21 @@ func TestE2E_GraphUIPrintsURLOnlyWhenNotOpened(t *testing.T) {
 			if u, has := got["url"]; has != tc.wantURL || (has && !strings.Contains(u, "#k=")) {
 				t.Fatalf("url = %q (present %v), want present %v", u, has, tc.wantURL)
 			}
-			if _, err := os.Stat(mark); (err == nil) != tc.wantOpened {
-				t.Fatalf("opener ran = %v, want %v", err == nil, tc.wantOpened)
+			// graph ui does not wait for the opener, so it may touch the mark
+			// after graph ui has exited.
+			ran := false
+			for range 50 {
+				if _, err := os.Stat(mark); err == nil {
+					ran = true
+					break
+				}
+				if !tc.wantOpened {
+					break
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+			if ran != tc.wantOpened {
+				t.Fatalf("opener ran = %v, want %v", ran, tc.wantOpened)
 			}
 		})
 	}

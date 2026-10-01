@@ -1,6 +1,7 @@
 package main_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -375,8 +376,17 @@ func TestE2E_InstallCodexFailureLeavesNoAgentsMd(t *testing.T) {
 
 	cmd := exec.Command(binaryPath, "install", "--host", "codex", "--project")
 	cmd.Env = append(os.Environ(), "HOME="+home)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	if err := cmd.Run(); err == nil {
 		t.Fatal("install succeeded, want failure")
+	}
+	var env struct {
+		Retryable bool `json:"retryable"`
+	}
+	mustParseJSON(t, stderr.Bytes(), &env)
+	if env.Retryable {
+		t.Errorf("host step failure flagged retryable (stderr: %s)", stderr.String())
 	}
 	if _, err := os.Stat("AGENTS.md"); !os.IsNotExist(err) {
 		t.Errorf("AGENTS.md written by a failed install: %v", err)

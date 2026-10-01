@@ -89,19 +89,14 @@ func withSuggestion(s string) func(*errResponse) {
 // failValidation writes ve as a usage error and exits. Retryable has no
 // fallback: every store ValidationError sets it.
 func failValidation(ve *store.ValidationError, fallbackSuggestion string, extra ...func(*errResponse)) {
-	code, suggestion := validationErrorFields(ve, fallbackSuggestion)
-	opts := append([]func(*errResponse){withField(ve.Field), withSuggestion(suggestion)}, extra...)
-	writeError(code, ve.Message, ve.Retryable, opts...)
-	exitWith(ExitUsage)
-}
-
-func validationErrorFields(ve *store.ValidationError, fallbackSuggestion string) (code, suggestion string) {
-	code, suggestion = ve.Code, ve.Suggestion
+	code, suggestion := ve.Code, ve.Suggestion
 	if code == "" {
 		code = "validation_failed"
 	}
 	if suggestion == "" {
 		suggestion = fallbackSuggestion
 	}
-	return code, suggestion
+	opts := append([]func(*errResponse){withField(ve.Field), withSuggestion(suggestion)}, extra...)
+	writeError(code, ve.Message, ve.Retryable, opts...)
+	exitWith(ExitUsage)
 }
