@@ -1,6 +1,7 @@
 package main_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -229,5 +230,289 @@ func TestE2E_InstallOpencodeIdempotent(t *testing.T) {
 	mustParseJSON(t, runInstall(t, home, "install", "--host", "opencode"), &r2)
 	if r2.Status != "already_installed" {
 		t.Errorf("re-install status = %q, want already_installed", r2.Status)
+	}
+}
+
+// ---------- stdio transport (Claude Code registration) ----------
+
+// fakeClaude puts a stub `claude` first on PATH that appends its argv to a log
+// and exits 0, except for `mcp get` which exits 1 so the caller treats the
+// server as not-yet-registered. Returns the log path and the PATH-prefixed env.
+func fakeClaude(t *testing.T, home string) (logPath string, env []string) {
+	t.Helper()
+	binDir := t.TempDir()
+	logPath = filepath.Join(binDir, "argv.log")
+
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> " + logPath + "\n" +
+		"case \"$1 $2\" in 'mcp get') exit 1 ;; esac\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(script), 0o700); err != nil { // #nosec G306 -- test stub must be executable
+		t.Fatal(err)
+	}
+
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "HOME=") && !strings.HasPrefix(kv, "PATH=") {
+			env = append(env, kv)
+		}
+	}
+	env = append(env, "HOME="+home, "PATH="+binDir+":"+os.Getenv("PATH"))
+	return logPath, env
+}
+
+func runWithEnv(t *testing.T, env []string, args ...string) []byte {
+	t.Helper()
+	cmd := exec.Command(binaryPath, args...)
+	cmd.Env = env
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("run %v: %v", args, err)
+	}
+	return out
+}
+
+func TestE2E_InstallStdio(t *testing.T) {
+	// The Claude Code registration must use the stdio transport: the host spawns
+	// the server as a child and owns its lifecycle, so there is no port to find, no
+	// daemon to keep alive, and no bearer token to leak. A registration that still
+	// names http:// would drag the whole daemon back in.
+	t.Run("registers_stdio_not_http", func(t *testing.T) {
+		home := t.TempDir()
+		logPath, env := fakeClaude(t, home)
+
+		out := runWithEnv(t, env, "install", "--all")
+
+		var resp struct {
+			MCPRegistration string `json:"mcp_registration"`
+		}
+		if err := json.Unmarshal(out, &resp); err != nil {
+			t.Fatalf("parse install output: %v\nraw: %s", err, out)
+		}
+		if resp.MCPRegistration != "ok" {
+			t.Fatalf("mcp_registration = %q, want ok", resp.MCPRegistration)
+		}
+
+		b, err := os.ReadFile(logPath) // #nosec G304 -- test-local temp path
+		if err != nil {
+			t.Fatalf("read claude argv log: %v", err)
+		}
+		log := string(b)
+
+		var addLine string
+		for line := range strings.SplitSeq(log, "\n") {
+			if strings.HasPrefix(line, "mcp add") {
+				addLine = line
+			}
+		}
+		if addLine == "" {
+			t.Fatalf("no `claude mcp add` invocation recorded:\n%s", log)
+		}
+
+		for _, want := range []string{"--scope user", "serve --stdio"} {
+			if !strings.Contains(addLine, want) {
+				t.Errorf("registration missing %q:\n%s", want, addLine)
+			}
+		}
+		for _, forbidden := range []string{"--transport http", "http://", "Authorization", "Bearer"} {
+			if strings.Contains(addLine, forbidden) {
+				t.Errorf("registration still carries HTTP-transport artefact %q:\n%s", forbidden, addLine)
+			}
+		}
+	})
+
+	// A host that spawns the server per session needs no background daemon, so the
+	// bootstrap must not start one — that is the whole point of the migration.
+	t.Run("all_does_not_start_a_daemon", func(t *testing.T) {
+		home := t.TempDir()
+		_, env := fakeClaude(t, home)
+
+		out := runWithEnv(t, env, "install", "--all")
+
+		var resp map[string]any
+		if err := json.Unmarshal(out, &resp); err != nil {
+			t.Fatalf("parse install output: %v\nraw: %s", err, out)
+		}
+		if _, present := resp["server"]; present {
+			t.Errorf("install --all still reports a `server` bootstrap step: %v", resp["server"])
+		}
+	})
+}
+
+// --host codex --project writes the graph block into ./AGENTS.md (created
+// when missing); without --project no AGENTS.md is touched.
+func TestE2E_InstallCodexProjectWritesAgentsMd(t *testing.T) {
+	home := t.TempDir()
+	t.Chdir(t.TempDir())
+
+	runInstall(t, home, "install", "--host", "codex")
+	if _, err := os.Stat("AGENTS.md"); !os.IsNotExist(err) {
+		t.Fatalf("AGENTS.md written without --project: %v", err)
+	}
+
+	runInstall(t, home, "install", "--host", "codex", "--project")
+	b, err := os.ReadFile("AGENTS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(b), "## droids-mem code graph"); n != 1 {
+		t.Errorf("graph marker appears %d times, want 1:\n%s", n, b)
+	}
+
+	runInstall(t, home, "install", "--host", "codex", "--project")
+	b2, _ := os.ReadFile("AGENTS.md")
+	if string(b2) != string(b) {
+		t.Errorf("re-run modified AGENTS.md")
+	}
+}
+
+// A host install that fails must not leave the graph block behind.
+func TestE2E_InstallCodexFailureLeavesNoAgentsMd(t *testing.T) {
+	home := t.TempDir()
+	t.Chdir(t.TempDir())
+	// ~/.codex as a regular file makes the config write fail.
+	if err := os.WriteFile(filepath.Join(home, ".codex"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(binaryPath, "install", "--host", "codex", "--project")
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err == nil {
+		t.Fatal("install succeeded, want failure")
+	}
+	var env struct {
+		Retryable bool `json:"retryable"`
+	}
+	mustParseJSON(t, stderr.Bytes(), &env)
+	if env.Retryable {
+		t.Errorf("host step failure flagged retryable (stderr: %s)", stderr.String())
+	}
+	if _, err := os.Stat("AGENTS.md"); !os.IsNotExist(err) {
+		t.Errorf("AGENTS.md written by a failed install: %v", err)
+	}
+}
+
+func TestE2E_UninstallCodexProjectRemovesGraphBlock(t *testing.T) {
+	home := t.TempDir()
+	t.Chdir(t.TempDir())
+	pre := "# team rules\n"
+	if err := os.WriteFile("AGENTS.md", []byte(pre), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	runInstall(t, home, "install", "--host", "codex", "--project")
+	runInstall(t, home, "uninstall", "--host", "codex", "--project")
+
+	b, err := os.ReadFile("AGENTS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != pre {
+		t.Errorf("AGENTS.md after uninstall = %q, want %q", b, pre)
+	}
+}
+
+// Without a registered MCP server the graph tools do not exist, so the block
+// telling the agent to use them must not be written.
+func TestE2E_InstallAllSkipsGraphBlockWithoutMCP(t *testing.T) {
+	home := t.TempDir()
+	cmd := exec.Command(binaryPath, "install", "--all")
+	cmd.Env = append(os.Environ(), "HOME="+home, "PATH="+t.TempDir()) // no claude CLI
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r struct {
+		GraphBlock string `json:"graph_block"`
+	}
+	mustParseJSON(t, out, &r)
+	if !strings.HasPrefix(r.GraphBlock, "skipped") {
+		t.Errorf("graph_block = %q, want skipped", r.GraphBlock)
+	}
+	b, _ := os.ReadFile(filepath.Join(home, ".claude", "CLAUDE.md"))
+	if strings.Contains(string(b), "## droids-mem code graph") {
+		t.Errorf("graph block written without MCP registration")
+	}
+}
+
+// --all fans out to every detected host, skips absent ones without creating
+// their config dirs, and uninstall --all reverses it.
+func TestE2E_InstallAllCoversCodexAndOpencode(t *testing.T) {
+	home := t.TempDir()
+	_, env := fakeClaude(t, home)
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// opencode deliberately absent.
+
+	type hostRes struct {
+		Status string `json:"status"`
+	}
+	var r struct {
+		Codex    hostRes `json:"codex"`
+		Opencode string  `json:"opencode"`
+	}
+	mustParseJSON(t, runWithEnv(t, env, "install", "--all"), &r)
+	if r.Codex.Status != "installed" {
+		t.Errorf("codex = %+v, want installed", r.Codex)
+	}
+	if !strings.HasPrefix(r.Opencode, "skipped") {
+		t.Errorf("opencode = %q, want skipped", r.Opencode)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".config", "opencode")); !os.IsNotExist(err) {
+		t.Errorf("absent host's config dir was created: %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(home, ".codex", "config.toml")); !strings.Contains(string(b), "[mcp_servers.droids-mem]") {
+		t.Errorf("codex config missing registration:\n%s", b)
+	}
+
+	var u struct {
+		Codex hostRes `json:"codex"`
+	}
+	mustParseJSON(t, runWithEnv(t, env, "uninstall", "--all"), &u)
+	if u.Codex.Status != "uninstalled" {
+		t.Errorf("uninstall codex = %+v, want uninstalled", u.Codex)
+	}
+	if b, _ := os.ReadFile(filepath.Join(home, ".codex", "config.toml")); strings.Contains(string(b), "droids-mem") {
+		t.Errorf("codex registration survived uninstall --all:\n%s", b)
+	}
+}
+
+// --all --project reports graph_index and agents_md once at the top level,
+// never per host (each host used to start its own index).
+func TestE2E_InstallAllProjectReportsIndexOnce(t *testing.T) {
+	home := t.TempDir()
+	_, env := fakeClaude(t, home)
+	for _, d := range []string{".codex", filepath.Join(".config", "opencode")} {
+		if err := os.MkdirAll(filepath.Join(home, d), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(t.TempDir()) // no .git: the index step reports skipped instead of spawning
+
+	var r map[string]any
+	mustParseJSON(t, runWithEnv(t, env, "install", "--all", "--project"), &r)
+
+	if _, ok := r["graph_index"].(string); !ok {
+		t.Errorf("top-level graph_index missing: %v", r["graph_index"])
+	}
+	if s, _ := r["agents_md"].(string); !strings.HasPrefix(s, "appended") {
+		t.Errorf("agents_md = %v, want appended", r["agents_md"])
+	}
+	for _, h := range []string{"codex", "opencode"} {
+		m, _ := r[h].(map[string]any)
+		if m == nil || m["status"] != "installed" {
+			t.Fatalf("%s = %v, want installed map", h, r[h])
+		}
+		for _, k := range []string{"graph_index", "agents_md"} {
+			if _, dup := m[k]; dup {
+				t.Errorf("%s reports %s itself; must be top-level only", h, k)
+			}
+		}
+	}
+	b, _ := os.ReadFile("AGENTS.md")
+	if n := strings.Count(string(b), "## droids-mem code graph"); n != 1 {
+		t.Errorf("AGENTS.md graph block count = %d, want 1", n)
 	}
 }

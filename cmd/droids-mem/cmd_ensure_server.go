@@ -209,13 +209,16 @@ const (
 // should be running the build the caller actually has, and a downgrade leaves
 // code the caller did not build just as surely as an upgrade does.
 //
+// A matching version is not enough for local builds: every one reports "dev",
+// so a dev caller always replaces. That costs one restart per call, dev only.
+//
 // A daemon that proves no PID is never signalled. It predates PID binding, so
 // acting on it would mean signalling a PID read from a file rather than one
 // proven over the wire — the exact defect that binding closed. It is reported
 // instead, which is a bounded, one-time cost: from the release that carries
 // this onward, every daemon can prove a PID.
 func decideStale(running serverIdentity, want string) staleAction {
-	if running.Version == want {
+	if running.Version == want && want != "dev" {
 		return keepServer
 	}
 	if running.Pid == 0 {

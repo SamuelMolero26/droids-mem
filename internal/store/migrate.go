@@ -112,37 +112,24 @@ func Migrate(ctx context.Context, s *Store, opts MigrateOptions) (*MigrateSummar
 		return nil, &SchemaVersionError{Current: v, Required: db.CurrentSchemaVersion}
 	}
 
-	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return nil, fmt.Errorf("begin immediate: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			// Background, not ctx: cancellation is the main reason this fires,
-			// and the rollback still has to run on a dead ctx (same pattern as
-			// save.go / prune.go).
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+	err = withTx(ctx, conn, "IMMEDIATE", "migrate", func() error {
+		if opts.Rescrub {
+			if err := rewriteAllRows(ctx, conn, summary); err != nil {
+				return fmt.Errorf("rescrub rows: %w", err)
+			}
 		}
-	}()
-
-	if opts.Rescrub {
-		if err := rewriteAllRows(ctx, conn, summary); err != nil {
-			return nil, fmt.Errorf("rescrub rows: %w", err)
+		if _, err := conn.ExecContext(ctx, `
+			INSERT INTO meta(key, value) VALUES('scrub_baseline_complete', '1')
+			ON CONFLICT(key) DO UPDATE SET value = '1'
+		`); err != nil {
+			return fmt.Errorf("set scrub baseline sentinel: %w", err)
 		}
+		summary.BaselineSet = true
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-
-	if _, err := conn.ExecContext(ctx, `
-		INSERT INTO meta(key, value) VALUES('scrub_baseline_complete', '1')
-		ON CONFLICT(key) DO UPDATE SET value = '1'
-	`); err != nil {
-		return nil, fmt.Errorf("set scrub baseline sentinel: %w", err)
-	}
-	summary.BaselineSet = true
-
-	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return nil, fmt.Errorf("commit migrate: %w", err)
-	}
-	committed = true
 	return summary, nil
 }
 

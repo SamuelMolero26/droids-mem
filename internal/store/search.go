@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"slices"
 	"sort"
@@ -56,21 +55,19 @@ type SearchResult struct {
 	Learned        string  `json:"learned"`
 	TaskType       string  `json:"task_type"`
 	CreatedAt      int64   `json:"created_at"`
+	AuthoredAt     int64   `json:"authored_at"`
 	Score          float64 `json:"score"`         // BM25 rank — more negative = better match
 	OverlapScore   float64 `json:"overlap_score"` // TokenOverlap(query, title+learned) — 0..1, higher = more literal token overlap
 	ExpandCount    int     `json:"expand_count"`
 	LastExpandedAt int64   `json:"last_expanded_at,omitempty"`
-	// ReviewAfter/Pinned/NeedsReview mirror Memory (inspect.go) — same
-	// nullable-no-COALESCE scan and Go-computed derivation (D4). Audit-only:
-	// never filters or reorders search results (D2), only adds the fields.
-	ReviewAfter *int64 `json:"review_after,omitempty"`
-	Pinned      bool   `json:"pinned"`
-	NeedsReview bool   `json:"needs_review"`
 }
 
 type SearchResponse struct {
 	Results []SearchResult `json:"results"`
 	Total   int            `json:"total"`
+	// Message labels a definitive empty state and is set only when Total == 0.
+	// Total stays the machine-readable gate; Message is display-only.
+	Message string `json:"message,omitempty"`
 }
 
 func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse, error) {
@@ -89,12 +86,13 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 		limit = maxSearchLimit
 	}
 
-	ftsQuery := phraseFTSQuery(req.Query)
-	if ftsQuery == "" {
-		// Query had no searchable tokens (e.g. all punctuation). Nothing can
-		// match; return empty rather than run MATCH on an empty expression.
-		return &SearchResponse{Results: []SearchResult{}, Total: 0}, nil
+	// Punctuation-only input becomes a MATCH of phrases that tokenize to
+	// nothing (phraseFTSQuery only returns "" for blank input, which the
+	// TrimSpace check above already rejects), so gate on real text first.
+	if !hasSearchableText(req.Query) {
+		return &SearchResponse{Results: []SearchResult{}, Total: 0, Message: msgNoSearchableText}, nil
 	}
+	ftsQuery := phraseFTSQuery(req.Query)
 
 	// build WHERE clause — only hardcoded strings in the format string, user values in args
 	conditions := []string{"memories_fts MATCH ?"}
@@ -124,6 +122,10 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 	if err := s.db.QueryRowContext(ctx, countStmt, args...).Scan(&total); err != nil {
 		return nil, fmt.Errorf("search count: %w", err)
 	}
+	if total == 0 {
+		// Genuine no-match: nothing to rank, so skip the SELECT round-trip.
+		return &SearchResponse{Results: []SearchResult{}, Total: 0, Message: msgNoMatch}, nil
+	}
 
 	// Fetch more results than requested, then re-rank by a composite of BM25 +
 	// TokenOverlap. FTS5 OR-of-phrases returns results where ANY token matched —
@@ -144,9 +146,9 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 	pageArgs := append(slices.Clip(args), internalLimit)
 	// #nosec G201 -- same as above: hardcoded conditions, parameterized values.
 	stmt := fmt.Sprintf(`
-		SELECT m.id, m.kind, m.title, m.learned, m.task_type, m.created_at,
+		SELECT m.id, m.kind, m.title, m.learned, m.task_type, m.created_at, m.authored_at,
 		       bm25(memories_fts, 3, 1, 2, 1) AS rank,
-		       m.expand_count, COALESCE(m.last_expanded_at, 0), m.review_after, m.pinned
+		       m.expand_count, COALESCE(m.last_expanded_at, 0)
 		FROM memories_fts fts
 		JOIN memories m ON m.rowid = fts.rowid
 		WHERE %s
@@ -163,15 +165,10 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 	results := []SearchResult{}
 	for rows.Next() {
 		var r SearchResult
-		var reviewAfter sql.NullInt64
-		if err := rows.Scan(&r.ID, &r.Kind, &r.Title, &r.Learned, &r.TaskType, &r.CreatedAt, &r.Score,
-			&r.ExpandCount, &r.LastExpandedAt, &reviewAfter, &r.Pinned); err != nil {
+		if err := rows.Scan(&r.ID, &r.Kind, &r.Title, &r.Learned, &r.TaskType, &r.CreatedAt, &r.AuthoredAt, &r.Score,
+			&r.ExpandCount, &r.LastExpandedAt); err != nil {
 			return nil, fmt.Errorf("scan result: %w", err)
 		}
-		if reviewAfter.Valid {
-			r.ReviewAfter = &reviewAfter.Int64
-		}
-		r.NeedsReview = needsReview(r.ReviewAfter)
 		r.OverlapScore = TokenOverlap(req.Query, r.Title+" "+r.Learned)
 		results = append(results, r)
 	}

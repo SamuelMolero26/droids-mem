@@ -17,6 +17,7 @@ func newContextCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "context",
 		Short: "Load start-of-run context bundle for a task type",
+		Args:  cobra.NoArgs,
 		Long: `Returns a two-tier bundle:
   - always tier: latest session_summary + ALL user_rules (full body)
   - browse tier: top error_resolution + task_pattern (title + snippet)
@@ -37,18 +38,16 @@ deep-read any browse-tier item.`,
 			})
 			if err != nil {
 				if ve, ok := errors.AsType[*store.ValidationError](err); ok {
-					suggestion := ve.Suggestion
-					if suggestion == "" {
-						suggestion = "provide --" + ve.Field
-					}
-					writeError("validation_failed", ve.Message, false,
-						withField(ve.Field),
-						withSuggestion(suggestion),
-					)
-					exitWith(ExitUsage)
+					failValidation(ve, "provide --"+ve.Field)
 				}
 				writeError("context_failed", err.Error(), true)
 				exitWith(ExitError)
+			}
+			if len(resp.Browse) > 0 {
+				// Contextual disclosure (AXI §9): stub IDs are expandable via
+				// get. Omitted when Browse is empty — nothing to expand, so
+				// the hint would be noise (omit-when-self-contained).
+				resp.Help = []string{"Run 'droids-mem get --id <id>' to read a browse-tier memory in full"}
 			}
 			writeJSON(resp)
 			return nil

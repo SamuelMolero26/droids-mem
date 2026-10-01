@@ -117,9 +117,11 @@ func searchToolDef() mcp.Tool {
 	return mcp.NewTool("mem_search",
 		mcp.WithDescription(`Full-text search across stored memories ranked by BM25 with TokenOverlap re-ranking. Call this proactively at the start of a task and whenever the topic shifts — do not wait to be asked; prior fixes, decisions, and conventions live here.
 
-Each result includes an overlap_score (0-1): the fraction of query tokens that appear literally in the title+learned. Higher overlap means the memory is about the same concrete topic. Results with low overlap may still be relevant (synonyms, rewording) — use your judgment, or expand them with mem_get to read the full body.
+Each result carries a learned_preview (first 500 chars of the lesson, with a total-length marker when truncated) instead of the full body — ordering already implies relevance. Call mem_get with a result id to read the full body. Each result also carries authored_at (unix seconds, when the lesson was originally written; imported lessons predate created_at) — an old lesson about fast-moving code may be stale, so verify it against current code.
 
-Pass all_projects=true to search across ALL task_types, not just the current project. Use this when investigating a problem that may span repos, or when you don't yet know which project owns the relevant memory. For code-structure questions in Go, Python, TypeScript or JavaScript repos, prefer graph_symbol/graph_package over text search.`),
+Pass all_projects=true to search across ALL task_types, not just the current project. Use this when investigating a problem that may span repos, or when you don't yet know which project owns the relevant memory. For code-structure questions in Go, Python, TypeScript or JavaScript repos, prefer graph_symbol/graph_package over text search.
+
+When total is 0 the response carries a display-only message naming the empty state (no searchable text vs no match); treat total == 0 as the machine gate and message as hint text only.`),
 		mcp.WithString("query", mcp.Required(),
 			mcp.Description("Free-text search phrase.")),
 		mcp.WithString("task_type",
@@ -149,7 +151,7 @@ func searchHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, s
 		if err != nil {
 			return toolErr(err), nil
 		}
-		return toolJSON(resp)
+		return toolJSON(store.ToCompactSearchResponse(resp, "Call mem_get with a result id to read the full body"))
 	}
 }
 
@@ -198,6 +200,11 @@ func contextHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, 
 		if sid == "" {
 			sid = "sess_" + ulid.Make().String()
 		}
+		if len(resp.Browse) > 0 {
+			// Contextual disclosure (AXI §9): stub IDs are expandable via
+			// mem_get. Omitted when Browse is empty (omit-when-self-contained).
+			resp.Help = []string{"Call mem_get with a browse-tier id to read the full body"}
+		}
 		return toolJSON(contextEnvelope{SessionID: sid, Context: resp})
 	}
 }
@@ -210,7 +217,7 @@ type getArgs struct {
 
 func getToolDef() mcp.Tool {
 	return mcp.NewTool("mem_get",
-		mcp.WithDescription("Fetch the full body of a single memory by id (typically a browse-tier id returned by mem_context or mem_search). Use it on your own to expand a promising browse-tier title before relying on it. For code-structure questions in Go, Python, TypeScript or JavaScript repos, prefer graph_symbol/graph_package over text search."),
+		mcp.WithDescription("Fetch the full body of a single memory by id (typically a browse-tier id returned by mem_context or a result id returned by mem_search). Use it on your own to expand a promising stub before relying on it. This is the sole full-detail escape hatch — list responses carry only previews. For code-structure questions in Go, Python, TypeScript or JavaScript repos, prefer graph_symbol/graph_package over text search."),
 		mcp.WithString("id", mcp.Required(),
 			mcp.Description("Memory id, e.g. 'mem_01J...'.")),
 	)
@@ -236,10 +243,13 @@ type corpusArgs struct {
 }
 
 // RecentSessionStub is a lightweight summary of one session_summary memory
-// for the mem_corpus response.
+// for the mem_corpus response. Origin names how the row was authored
+// ("manual" for explicit saves, "auto" for the session-end path) so the
+// agent can tell its own recaps apart from automatic ones.
 type RecentSessionStub struct {
 	Title     string `json:"title"`
 	CreatedAt int64  `json:"created_at"`
+	Origin    string `json:"origin,omitempty"`
 }
 
 type corpusResponse struct {
@@ -251,7 +261,7 @@ type corpusResponse struct {
 
 func corpusToolDef() mcp.Tool {
 	return mcp.NewTool("mem_corpus",
-		mcp.WithDescription("Return a census of the memory corpus: task_type list with counts, kind breakdown, total memory count, and recent session_summary titles. Call this at the start of a task to discover orphaned task_types or to assess corpus health."),
+		mcp.WithDescription("Return a census of the memory corpus: task_type list with counts, kind breakdown, total memory count, and recent session_summary titles (manual + auto, newest first, each with its origin). Call this at the start of a task to discover orphaned task_types or to assess corpus health."),
 		mcp.WithNumber("limit",
 			mcp.Description("Max recent_sessions to return (default 5, max 20)."),
 			mcp.DefaultNumber(5), mcp.Min(1), mcp.Max(20),
@@ -280,14 +290,14 @@ func corpusHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, c
 			return toolErr(err), nil
 		}
 
-		sessions, err := st.RecentSessions(ctx, store.RecentSessionsRequest{Limit: limit})
+		sessions, err := st.RecentSummaries(ctx, store.RecentSessionsRequest{Limit: limit})
 		if err != nil {
 			return toolErr(err), nil
 		}
 
 		stubs := make([]RecentSessionStub, 0, len(sessions.Sessions))
 		for _, s := range sessions.Sessions {
-			stubs = append(stubs, RecentSessionStub{Title: s.Title, CreatedAt: s.CreatedAt})
+			stubs = append(stubs, RecentSessionStub{Title: s.Title, CreatedAt: s.CreatedAt, Origin: s.Origin})
 		}
 
 		resp := corpusResponse{

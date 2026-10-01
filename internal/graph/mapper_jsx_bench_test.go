@@ -60,7 +60,7 @@ func BenchmarkCollectMapperCalls_JSX(b *testing.B) {
 	files := benchMapperFiles(b, benchMapperRepoTSX(b, 200))
 	b.ReportAllocs()
 	for b.Loop() {
-		collectMapperCalls(files)
+		scanCalls(files)
 	}
 }
 
@@ -71,13 +71,13 @@ func BenchmarkCollectMapperCalls_JSX(b *testing.B) {
 func BenchmarkMapperLadderResolve_JSX(b *testing.B) {
 	repo := benchMapperRepoTSX(b, 200)
 	files := benchMapperFiles(b, repo)
-	syms, _ := mapperSymbols(files)
+	syms, _ := scanSymbols(files)
 	for i := range syms {
 		syms[i].row.id = int64(i + 1)
 	}
-	fileCalls, _ := collectMapperCalls(files)
+	fileCalls, _ := scanCalls(files)
 	callsites := attributeMapperCalls(syms, fileCalls)
-	_, bindings, _ := mapperImports(files)
+	_, bindings, _ := scanImports(files)
 	idx := buildMapperLadderIndex(syms, resolveBindings(files, bindings, nil))
 	if len(callsites) == 0 {
 		b.Fatal("no callsites attributed")

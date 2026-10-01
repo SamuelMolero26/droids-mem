@@ -81,11 +81,7 @@ const (
 	// syntacticHint/carriedHint.
 	clientDirectiveHint = "client component (\"use client\" directive)"
 	serverDirectiveHint = "server component (\"use server\" directive)"
-	// precisionResolved/precisionSyntactic name SymbolResponse.Precision's two
-	// values (design D7). The rest of the mapper tier (edgeSet, mapper_calls.go)
-	// uses the same two values as bare string literals; named here because
-	// query.go's derivation and weakestPrecision below compare against them
-	// repeatedly.
+	// SymbolResponse.Precision's two values.
 	precisionResolved  = "resolved"
 	precisionSyntactic = "syntactic"
 )
@@ -103,6 +99,11 @@ type SymbolRequest struct {
 	Direction string // up | down | both (default both)
 	Depth     int    // 1..maxDepth, default 1
 	To        string // optional path target
+	NoSource  bool   // omit the symbol's source body
+	NoTests   bool   // drop _test.go neighbors from rows (counts still reported)
+	// NoBuild answers from the graph already on disk and never builds or
+	// rebuilds; an unindexed repo is ErrNotFound. Read-only viewers set it.
+	NoBuild bool
 }
 
 // SymbolInfo is the full always-tier body of the queried symbol.
@@ -115,11 +116,13 @@ type SymbolInfo struct {
 	Signature string `json:"signature"`
 	Doc       string `json:"doc,omitempty"`
 	Source    string `json:"source,omitempty"`
+	Exported  bool   `json:"exported,omitempty"`
 }
 
 // Neighbor is a browse-tier stub: one line of signature, expand by qname.
 type Neighbor struct {
 	QName     string `json:"qname"`
+	Kind      string `json:"kind,omitempty"`
 	Signature string `json:"signature"`
 	File      string `json:"file"`
 	Line      int    `json:"line"`
@@ -253,23 +256,6 @@ func symbolPrecision(file string) string {
 	return precisionResolved
 }
 
-// weakestPrecision returns the weakest precision present in precisions
-// ("syntactic" beats "resolved" — spec "Mixed transitive_callers Count with
-// Precision Label"). Never called with genuinely mixed input in production:
-// tier disjointness means a real symbol's callers are always single-tier, so
-// Symbol() uses the cheap symbolPrecision(file) shortcut instead. This
-// function pins the general "weakest wins" semantic that shortcut relies on,
-// and is the documented fallback (D7's guard note) if the disjointness
-// invariant is ever disproved: replace the shortcut call site with a real
-// per-edge `SELECT precision FROM edges WHERE ...` fed through this same
-// function. An empty/all-resolved input returns "resolved".
-func weakestPrecision(precisions []string) string {
-	if slices.Contains(precisions, precisionSyntactic) {
-		return precisionSyntactic
-	}
-	return precisionResolved
-}
-
 // Symbol resolves and answers a symbol-anchored query against repo's graph.
 func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolResponse, error) {
 	if strings.TrimSpace(req.Repo) == "" {
@@ -278,12 +264,18 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	if strings.TrimSpace(req.Symbol) == "" {
 		return nil, fmt.Errorf("symbol is required: %w", ErrInvalidArgument)
 	}
-	conn, release, fresh, err := m.ensureFresh(ctx, req.Repo)
+	open := m.ensureFresh
+	if req.NoBuild { // read-only viewers never trigger a build
+		open = m.openNoBuild
+	}
+	conn, release, fresh, err := open(ctx, req.Repo)
 	if err != nil {
 		return nil, err
 	}
 	defer release() // hold the handle for every statement below, not just the first
-	m.bump(req.Repo, "symbol")
+	if !req.NoBuild {
+		m.bump(req.Repo, "symbol")
+	}
 	resp := &SymbolResponse{Repo: req.Repo, Freshness: fresh, Hint: expandHint}
 	if fresh.Stale {
 		resp.Hint = staleGraphHint + "; " + expandHint
@@ -315,10 +307,11 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 
 	var info SymbolInfo
 	var id int64
-	err = conn.QueryRowContext(ctx, `SELECT id, qname, kind, package, file, line, signature, doc, source
-		FROM symbols WHERE qname = ?`, rows[0].QName).Scan(
+	err = conn.QueryRowContext(ctx, `SELECT id, qname, kind, package, file, line, signature, doc,
+		CASE WHEN ? THEN '' ELSE source END, exported
+		FROM symbols WHERE qname = ?`, req.NoSource, rows[0].QName).Scan(
 		&id, &info.QName, &info.Kind, &info.Package, &info.File, &info.Line,
-		&info.Signature, &info.Doc, &info.Source)
+		&info.Signature, &info.Doc, &info.Source, &info.Exported)
 	if err != nil {
 		return nil, err
 	}
@@ -412,6 +405,9 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	if dir == "" {
 		dir = "both"
 	}
+	if !slices.Contains([]string{"up", "down", "both"}, dir) {
+		return nil, fmt.Errorf("invalid direction %q: must be up|down|both: %w", req.Direction, ErrInvalidArgument)
+	}
 
 	if req.To != "" {
 		targets, err := findSymbol(ctx, conn, req.To)
@@ -435,7 +431,7 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	var upTrunc, downTrunc bool
 	var callersTotal int // true depth=1 caller total, from callerSplit
 	if dir == "up" || dir == "both" {
-		resp.Callers, upTrunc, err = bfsNeighbors(ctx, conn, id, "up", depth, info.Package)
+		resp.Callers, upTrunc, err = bfsNeighbors(ctx, conn, id, "up", depth, info.Package, req.NoTests)
 		if err != nil {
 			return nil, err
 		}
@@ -443,9 +439,16 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 		if err != nil {
 			return nil, err
 		}
+		// A majority of interface-dispatch callers means CHA fan-out dominates
+		// the list: name the action, not just the count.
+		if resp.CallersViaInterface*2 > callersTotal {
+			resp.Hint = addHint(resp.Hint, fmt.Sprintf(
+				"%d of %d callers are interface-dispatch candidates (CHA over-approximation, may not fire) — verify with grep before trusting",
+				resp.CallersViaInterface, callersTotal))
+		}
 	}
 	if dir == "down" || dir == "both" {
-		resp.Callees, downTrunc, err = bfsNeighbors(ctx, conn, id, "down", depth, info.Package)
+		resp.Callees, downTrunc, err = bfsNeighbors(ctx, conn, id, "down", depth, info.Package, req.NoTests)
 		if err != nil {
 			return nil, err
 		}
@@ -456,6 +459,9 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	// so callerSplit counted exactly the same distinct callers.
 	if upTrunc && depth == 1 {
 		resp.CallersTotal = callersTotal
+		if req.NoTests {
+			resp.CallersTotal -= resp.CallersInTests // rows exclude tests; keep the total comparable
+		}
 	}
 	if downTrunc && depth == 1 {
 		if resp.CalleesTotal, err = calleeCount(ctx, conn, id); err != nil {
@@ -488,7 +494,7 @@ func calleeCount(ctx context.Context, conn *sql.DB, id int64) (int, error) {
 func callerSplit(ctx context.Context, conn *sql.DB, id int64) (total, inTests, viaInterface int, err error) {
 	err = conn.QueryRowContext(ctx, `SELECT
 			COUNT(DISTINCT e.caller),
-			COUNT(DISTINCT CASE WHEN s.file LIKE '%\_test.go' ESCAPE '\' THEN e.caller END),
+			COUNT(DISTINCT CASE WHEN `+testFileOf("s")+` THEN e.caller END),
 			COUNT(DISTINCT CASE WHEN e.dispatch = 'interface' THEN e.caller END)
 		FROM edges e JOIN symbols s ON s.id = e.caller
 		WHERE e.callee = ?`, id).Scan(&total, &inTests, &viaInterface)
@@ -518,12 +524,12 @@ func findSymbol(ctx context.Context, conn *sql.DB, name string) ([]Neighbor, err
 		{"qname LIKE ? ESCAPE '\\'", "%:" + escapedSuffix},
 	}
 	for _, q := range queries {
-		rows, err := conn.QueryContext(ctx, `SELECT qname, signature, file, line FROM symbols
+		rows, err := conn.QueryContext(ctx, `SELECT qname, kind, signature, file, line FROM symbols
 			WHERE `+q.where+` ORDER BY qname LIMIT ?`, q.arg, maxMatches+1) // #nosec G202 -- where clauses are compile-time constants above
 		if err != nil {
 			return nil, err
 		}
-		out, err := scanNeighbors(rows, 0)
+		out, err := scanNeighbors(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -545,13 +551,13 @@ func searchSymbols(ctx context.Context, conn *sql.DB, task string) ([]Neighbor, 
 	if q == "" {
 		return nil, nil
 	}
-	rows, err := conn.QueryContext(ctx, `SELECT s.qname, s.signature, s.file, s.line
+	rows, err := conn.QueryContext(ctx, `SELECT s.qname, s.kind, s.signature, s.file, s.line
 		FROM symbols_fts f JOIN symbols s ON s.id = f.rowid
 		WHERE symbols_fts MATCH ? ORDER BY bm25(symbols_fts) LIMIT ?`, q, maxSeeds)
 	if err != nil {
 		return nil, err
 	}
-	return scanNeighbors(rows, 0)
+	return scanNeighbors(rows)
 }
 
 // ftsQuery turns a task phrase into a safe FTS5 OR-of-terms, dropping 1-char
@@ -603,13 +609,13 @@ func implementers(ctx context.Context, conn *sql.DB, id int64) (rows []Neighbor,
 	if err = conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM implements WHERE iface = ?`, id).Scan(&total); err != nil {
 		return nil, 0, false, err
 	}
-	r, err := conn.QueryContext(ctx, `SELECT s.qname, s.signature, s.file, s.line
+	r, err := conn.QueryContext(ctx, `SELECT s.qname, s.kind, s.signature, s.file, s.line
 		FROM implements i JOIN symbols s ON s.id = i.impl
 		WHERE i.iface = ? ORDER BY s.qname LIMIT ?`, id, maxNeighbors+1)
 	if err != nil {
 		return nil, 0, false, err
 	}
-	rows, err = scanNeighbors(r, 0)
+	rows, err = scanNeighbors(r)
 	if err != nil {
 		return nil, 0, false, err
 	}
@@ -625,13 +631,13 @@ func implementers(ctx context.Context, conn *sql.DB, id int64) (rows []Neighbor,
 // maxNeighbors with a truncation flag; no total (a type satisfies few
 // interfaces, never near the cap, so the shown list is its own count).
 func satisfies(ctx context.Context, conn *sql.DB, id int64) (rows []Neighbor, truncated bool, err error) {
-	r, err := conn.QueryContext(ctx, `SELECT s.qname, s.signature, s.file, s.line
+	r, err := conn.QueryContext(ctx, `SELECT s.qname, s.kind, s.signature, s.file, s.line
 		FROM implements i JOIN symbols s ON s.id = i.iface
 		WHERE i.impl = ? ORDER BY s.qname LIMIT ?`, id, maxNeighbors+1)
 	if err != nil {
 		return nil, false, err
 	}
-	rows, err = scanNeighbors(r, 0)
+	rows, err = scanNeighbors(r)
 	if err != nil {
 		return nil, false, err
 	}
@@ -642,15 +648,14 @@ func satisfies(ctx context.Context, conn *sql.DB, id int64) (rows []Neighbor, tr
 	return rows, truncated, nil
 }
 
-func scanNeighbors(rows *sql.Rows, depth int) ([]Neighbor, error) {
+func scanNeighbors(rows *sql.Rows) ([]Neighbor, error) {
 	defer rows.Close()
 	var out []Neighbor
 	for rows.Next() {
 		var n Neighbor
-		if err := rows.Scan(&n.QName, &n.Signature, &n.File, &n.Line); err != nil {
+		if err := rows.Scan(&n.QName, &n.Kind, &n.Signature, &n.File, &n.Line); err != nil {
 			return nil, err
 		}
-		n.Depth = depth
 		out = append(out, n)
 	}
 	return out, rows.Err()
@@ -660,7 +665,7 @@ func scanNeighbors(rows *sql.Rows, depth int) ([]Neighbor, error) {
 // signature stubs, capped at maxNeighbors (truncated=true past the cap).
 // startPkg biases the within-level ordering so same-package neighbors survive
 // the cap first (issue #49) — a partial slice is less arbitrary that way.
-func bfsNeighbors(ctx context.Context, conn *sql.DB, start int64, dir string, depth int, startPkg string) ([]Neighbor, bool, error) {
+func bfsNeighbors(ctx context.Context, conn *sql.DB, start int64, dir string, depth int, startPkg string, noTests bool) ([]Neighbor, bool, error) {
 	from, to := "callee", "caller" // up: who calls me
 	if dir == "down" {
 		from, to = "caller", "callee"
@@ -669,7 +674,7 @@ func bfsNeighbors(ctx context.Context, conn *sql.DB, start int64, dir string, de
 	frontier := []int64{start}
 	var out []Neighbor
 	for d := 1; d <= depth && len(frontier) > 0; d++ {
-		next, truncated, err := neighborLevel(ctx, conn, from, to, frontier, seen, &out, d, startPkg)
+		next, truncated, err := neighborLevel(ctx, conn, from, to, frontier, seen, &out, d, startPkg, noTests)
 		if err != nil {
 			return nil, false, err
 		}
@@ -684,7 +689,7 @@ func bfsNeighbors(ctx context.Context, conn *sql.DB, start int64, dir string, de
 // neighborLevel expands one BFS level, appending stubs to out. truncated is
 // true once out hits maxNeighbors.
 func neighborLevel(ctx context.Context, conn *sql.DB, from, to string, frontier []int64, seen map[int64]bool,
-	out *[]Neighbor, depth int, startPkg string) (next []int64, truncated bool, err error) {
+	out *[]Neighbor, depth int, startPkg string, noTests bool) (next []int64, truncated bool, err error) {
 
 	// ORDER BY is_test first: a same-package _test.go caller must NOT outrank a
 	// cross-package production caller, or the cap can show zero production
@@ -694,11 +699,13 @@ func neighborLevel(ctx context.Context, conn *sql.DB, from, to string, frontier 
 	// escaped LIKE avoids misclassifying a literal underscore (e.g.
 	// "helpertest.go") as a wildcard match. The startPkg arg trails the
 	// frontier IN placeholders — positional order must match (issue #49).
-	rows, err := conn.QueryContext(ctx, fmt.Sprintf(`SELECT DISTINCT s.id, s.qname, s.signature, s.file, s.line
+	// noTests filters at the row source so the cap is spent on production
+	// neighbors only; its arg sits between the IN list and startPkg.
+	rows, err := conn.QueryContext(ctx, fmt.Sprintf(`SELECT DISTINCT s.id, s.qname, s.kind, s.signature, s.file, s.line
 		FROM edges e JOIN symbols s ON s.id = e.%s
-		WHERE e.%s IN (%s)
-		ORDER BY (s.file LIKE '%%\_test.go' ESCAPE '\'), (s.package != ?), s.qname`, to, from, placeholders(len(frontier))),
-		append(idArgs(frontier), startPkg)...)
+		WHERE e.%s IN (%s) AND (NOT ? OR NOT %s)
+		ORDER BY (%[4]s), (s.package != ?), s.qname`, to, from, placeholders(len(frontier)), testFileOf("s")),
+		append(idArgs(frontier), noTests, startPkg)...)
 	if err != nil {
 		return nil, false, err
 	}
@@ -706,7 +713,7 @@ func neighborLevel(ctx context.Context, conn *sql.DB, from, to string, frontier 
 	for rows.Next() {
 		var id int64
 		var n Neighbor
-		if err := rows.Scan(&id, &n.QName, &n.Signature, &n.File, &n.Line); err != nil {
+		if err := rows.Scan(&id, &n.QName, &n.Kind, &n.Signature, &n.File, &n.Line); err != nil {
 			return nil, false, err
 		}
 		if seen[id] {
@@ -785,8 +792,8 @@ func callPath(ctx context.Context, conn *sql.DB, start int64, targetQName string
 	out := make([]Neighbor, 0, len(ids))
 	for i, id := range ids {
 		var n Neighbor
-		if err := conn.QueryRowContext(ctx, `SELECT qname, signature, file, line FROM symbols
-			WHERE id = ?`, id).Scan(&n.QName, &n.Signature, &n.File, &n.Line); err != nil {
+		if err := conn.QueryRowContext(ctx, `SELECT qname, kind, signature, file, line FROM symbols
+			WHERE id = ?`, id).Scan(&n.QName, &n.Kind, &n.Signature, &n.File, &n.Line); err != nil {
 			return nil, err
 		}
 		n.Depth = i
@@ -863,6 +870,9 @@ type PackageResponse struct {
 // escape is required: '_' is a LIKE single-character wildcard, so an unescaped
 // '%_test.go' would also match "mytest.go".
 const isTestFile = `file LIKE '%\_test.go' ESCAPE '\'`
+
+// testFileOf is isTestFile qualified by a table alias.
+func testFileOf(alias string) string { return alias + "." + isTestFile }
 
 // pkgCount holds the scalars a package surface reports alongside its rows.
 // mapper is decided from every row in the package, not the listed ones: a

@@ -978,5 +978,3 @@ type IndexResponse struct {
 	Edges     int       `json:"edges"`
 	Freshness Freshness `json:"freshness"`
 }
-
-func nowUTC() string { return time.Now().UTC().Format(time.RFC3339) }

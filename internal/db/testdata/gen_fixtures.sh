@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # gen_fixtures.sh — regenerates the golden per-version schema fixtures
-# (schema_v0.sql … schema_v8.sql) in this directory.
+# (schema_v0.sql … schema_v9.sql) in this directory.
 #
 # Each fixture is the sqlite_master dump of a database replayed through the
 # first N ladder rungs, plus a trailing `PRAGMA user_version = N;` stamp so a
@@ -10,7 +10,9 @@
 # tokenizer stays trigram because the porter flip lands only at rung 7→8.
 # schema_v8.sql is the post-flip shape (porter FTS, no authored_at) — the
 # version real installs actually sit at, and therefore the starting point of
-# the only upgrade path most users will ever run, rung 8→9.
+# the only upgrade path most users will ever run, rung 8→9. schema_v9.sql is
+# the state after authored_at (rung 8→9) and the start of rung 9→10, which
+# drops the unused pinned column.
 # (The 4-column recency indexes with id DESC land at rung 6→7, ADR-0033, so
 # schema_v7.sql carries trigram FTS + the 4-column indexes.)
 #
@@ -214,6 +216,16 @@ SELECT rowid, title, what, learned, tags FROM memories;
 SQL
 }
 
+apply_rung89() {
+    sqlite3 "$db" <<'SQL'
+ALTER TABLE memories ADD COLUMN authored_at INTEGER NOT NULL DEFAULT 0;
+UPDATE memories SET authored_at = created_at;
+
+ALTER TABLE archived_memories ADD COLUMN authored_at INTEGER NOT NULL DEFAULT 0;
+UPDATE archived_memories SET authored_at = created_at;
+SQL
+}
+
 # dump_fixture writes the current sqlite_master as re-executable SQL plus the
 # user_version stamp. ORDER BY reproduces a loadable file: user objects first,
 # then indexes, then triggers. Excluded: the FTS5 shadow tables
@@ -246,3 +258,5 @@ apply_rung67
 dump_fixture schema_v7.sql 7
 apply_rung78
 dump_fixture schema_v8.sql 8
+apply_rung89
+dump_fixture schema_v9.sql 9

@@ -244,8 +244,12 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 	// appended BEFORE positional ID assignment (C.2) — symbol IDs are
 	// positional, so landing them after that loop would collide with id 0.
 	symbols, byPos := goSymbols(pkgs, module, fset, readFile, repo)
+	seenRow := map[*symRow]bool{} // merged Python spans share a row (mergeSameQName)
 	for _, ms := range mapperSyms {
-		symbols = append(symbols, ms.row)
+		if !seenRow[ms.row] {
+			seenRow[ms.row] = true
+			symbols = append(symbols, ms.row)
+		}
 	}
 	for i, s := range symbols {
 		s.id = int64(i + 1)
@@ -358,7 +362,7 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 		slices.Sort(carriedUnits)
 	}
 
-	return writeGraphDBWithNavigation(
+	return writeGraphDB(
 		ctx,
 		dbPath,
 		repo,
@@ -380,7 +384,7 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 // goSymbols extracts symbol rows from the type-checked Go packages,
 // populating byPos (declaration-position → row, used later to match SSA
 // functions back to rows) as a side effect. This is the ONLY place that ever
-// writes to byPos: mapperSymbols has no byPos parameter and structurally
+// writes to byPos: the mapper tier has no byPos parameter and structurally
 // cannot reach it, which is what keeps the mapper tier out of Go's
 // SSA-matching map by construction (tier disjointness, C.7). Safe when pkgs
 // is nil (zero iterations), matching the Go-free/suppressed-Go-tier paths.
@@ -502,7 +506,7 @@ func appendDeclSymbols(out []*symRow, byPos map[string]*symRow, fset *token.File
 			pkg:       pkg,
 			file:      file,
 			line:      line,
-			exported:  ast.IsExported(lastDot(name)),
+			exported:  ast.IsExported(name[strings.LastIndexByte(name, '.')+1:]),
 			signature: truncate(sig, maxSigBytes),
 			doc:       truncate(strings.TrimSpace(doc), maxDocBytes),
 			source:    truncate(source, maxSourceBytes),
@@ -795,27 +799,7 @@ func implementsEdges(pkgs []*packages.Package, byPos map[string]*symRow) map[[2]
 // carrying its own explicit precision (the imports.precision column has no
 // DDL default, unlike edges/implements). fileDirectives maps repo-relative
 // file → "client" | "server" (P3); persisted to file_directives table.
-func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string, emptyReason string, fanoutCapped, testsSkipped int, imports []importRow, fileDirectives map[string]string) error {
-	return writeGraphDBWithNavigation(
-		ctx,
-		dbPath,
-		repo,
-		module,
-		stampVal,
-		symbols,
-		edges,
-		impls,
-		carriedUnits,
-		emptyReason,
-		fanoutCapped,
-		testsSkipped,
-		imports,
-		fileDirectives,
-		nextNavigationGraph{},
-	)
-}
-
-func writeGraphDBWithNavigation(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string, emptyReason string, fanoutCapped, testsSkipped int, imports []importRow, fileDirectives map[string]string, navigation nextNavigationGraph) error {
+func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string, emptyReason string, fanoutCapped, testsSkipped int, imports []importRow, fileDirectives map[string]string, navigation nextNavigationGraph) error {
 	if err := ctx.Err(); err != nil {
 		return err // cancelled before work started
 	}
@@ -909,7 +893,7 @@ func writeGraphDBWithNavigation(ctx context.Context, dbPath, repo, module, stamp
 			return fmt.Errorf("populate symbols_fts: %w", err)
 		}
 		for k, v := range map[string]string{
-			"stamp": stampVal, "repo": repo, "module": module, "indexed_at": nowUTC(),
+			"stamp": stampVal, "repo": repo, "module": module, "indexed_at": time.Now().UTC().Format(time.RFC3339),
 			"carried_units": strings.Join(carriedUnits, "\n"),
 			"empty_reason":  emptyReason,
 			"fanout_capped": strconv.Itoa(fanoutCapped),
@@ -1018,11 +1002,4 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…[truncated]"
-}
-
-func lastDot(name string) string {
-	if i := strings.LastIndexByte(name, '.'); i >= 0 {
-		return name[i+1:]
-	}
-	return name
 }

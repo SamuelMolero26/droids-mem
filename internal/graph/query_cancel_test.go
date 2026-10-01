@@ -61,7 +61,7 @@ func TestGraphQueries_RespectContextCancellation(t *testing.T) {
 		{"typeHasMethods", func() error { _, err := typeHasMethods(ctx, conn, qname); return err }},
 		{"implementers", func() error { _, _, _, err := implementers(ctx, conn, id); return err }},
 		{"satisfies", func() error { _, _, err := satisfies(ctx, conn, id); return err }},
-		{"bfsNeighbors", func() error { _, _, err := bfsNeighbors(ctx, conn, id, "up", 3, pkg); return err }},
+		{"bfsNeighbors", func() error { _, _, err := bfsNeighbors(ctx, conn, id, "up", 3, pkg, false); return err }},
 		{"callPath", func() error { _, err := callPath(ctx, conn, id, qname); return err }},
 	}
 

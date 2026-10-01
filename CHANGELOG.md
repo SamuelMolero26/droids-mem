@@ -5,7 +5,136 @@ All notable changes to droids-mem are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.3.0] — 2026-09-30
+
+Headline: a browser viewer for the code graph, leaner `mem_search` and
+`graph_symbol` responses, MCP instructions that fit what hosts actually show,
+and one-command setup for Codex and OpenCode. This section lists what changed
+since `1.3.0-beta.1`; upgrading from `1.2.1`, read that section too.
+
+**Breaking:** default `search`/`mem_search` rows are compact (see Changed), and
+the `pinned`, `review_after` and `needs_review` fields are gone from all JSON
+output (see Removed). The database migrates to schema v10 on first open.
+
+### Added
+- **`droids-mem graph ui`: a browser viewer for the code graph.** Served by the
+  existing daemon on loopback behind a time-limited key, it shows the same graph
+  agents read through `graph_symbol`/`graph_package`: a package map with
+  drill-down to symbols, a three-pane Symbol page (called by, source, calls),
+  a Flow view, search and entry points.
+- **`install --all` also registers detected Codex and OpenCode hosts** and
+  skips absent ones; `uninstall --all` reverses it. One failing host no longer
+  aborts the rest.
+- **Install writes code-graph guidance for the agent.** `install --all` appends
+  a code-graph block to `CLAUDE.md`, and `install --host codex|opencode
+  --project` to `./AGENTS.md`, creating the file when missing and only after the
+  host config succeeded. A `--project` install at a git root also starts one
+  detached `graph index`, so the agent's first query is not a cold build.
+- **`mem_search` and `mem_context` rows now carry `authored_at`** (unix
+  seconds), replacing the removed `needs_review` staleness signal. It is when
+  the lesson was originally written (imported lessons predate `created_at`); the
+  MCP instructions tell agents to verify old lessons about fast-moving code
+  against current code.
+- **`graph_symbol` `no_source` and `no_tests` options** (CLI: `--no-source`,
+  `--no-tests`). `no_source` omits the queried symbol's own body; `no_tests`
+  drops `_test.go` neighbors from the rows so the 50-row cap is spent on
+  production code (`callers_in_tests` still reports how many exist, and
+  `callers_total` stays comparable). Across 60 symbols of this repo, `direction=up`
+  + `no_source` + `no_tests` cut response bytes by 69% versus the default; both
+  options are opt-in and the default response is unchanged.
+- **`graph_symbol` hint when most callers are interface-dispatch candidates.**
+  When more than half of the callers arrive only via interface dispatch, the hint
+  now says they are CHA over-approximations to verify with grep, instead of
+  leaving the agent to infer it from `callers_via_interface`.
+- **Depth selector on the graph viewer's Symbol page.** Pick depth 1–5, as in
+  Flow; the page still opens at depth 1, where true caller and callee totals
+  exist. Deeper views tag each row with its hop (`d2`) and count the rows shown ("50 shown")
+  rather than presenting the capped list as a total.
+
+### Changed
+- **Default `search` and `mem_search` rows are compact.** Each row carries
+  `id`, `kind`, `title`, `task_type`, `authored_at` and a `learned_preview` of
+  up to 500 characters (suffixed `... (N chars total)` only when truncated);
+  `score`, `overlap_score`, the other timestamps and the full `learned` body are
+  no longer in list output. `get --id` / `mem_get` is the way to the full body.
+- **An empty search says why and what to try.** A scoped search with no match
+  suggests widening the scope (`--all-projects` on the CLI, `all_projects=true`
+  over MCP); a global one suggests different keywords. A punctuation-only query
+  returns a definitive empty result without touching the database. Both exit 0,
+  and `total == 0` remains the machine check.
+- **MCP server instructions cut from 4,252 to 1,757 chars (about 1,080 to 480
+  tokens), and one text for every transport.** Claude Code shows the model only
+  the first 2,048 chars of an MCP server's instructions, so on every Claude Code
+  surface the graph guidance, the end-of-run `session_summary` rule, the
+  blast-radius check and the no-secrets rule never reached the model. A quiz
+  against the served text scored 3/8 on Claude Code before and 8/8 after
+  (OpenCode 8/8 both). The numbered core loop (search, graph before edits, save,
+  end-of-run summary) now fits in the first 512 chars, which Codex relies on
+  standing alone. The instructions carry only when and why to call each tool;
+  parameter and output detail (`learned_preview`, `all_projects`, `session_id`
+  reuse, graph freshness/carried semantics) stays in the tool descriptions, and
+  the narrate-what-you-learned line applies to droids-mem calls only. The
+  HTTP/stdio fork on the summary sentence is gone: hooked hosts are told staging
+  counts, and dedupe absorbs a redundant save. `TestInstructions_Budget` holds
+  both limits.
+- **`mem_corpus` `recent_sessions` includes manually saved summaries**, tagged
+  with their origin, not only hook-staged ones.
+- **Dependencies:** `mark3labs/mcp-go` 1.1.0, `modernc.org/sqlite` 1.59.0.
+
+### Fixed
+- **`save` validation errors report the real `retryable` value.** `save`
+  answered `retryable: false` for every validation error, although a missing
+  `--title`, `--what`, `--learned` or `--task-type` and a rejected tag are all
+  fixable by the caller and retryable. `search`, `get` and `list` now pass the
+  store's own `code` and `suggestion` through as well instead of a generic one.
+- **`save --force --dry-run` previews the overwrite.** The dry run dropped
+  `--force` and predicted a duplicate skip for a save that would have
+  overwritten.
+- **`graph_symbol` rejects an invalid `direction`** with a validation error
+  instead of returning an empty success.
+- **`save`, `search`, `context` and `get` reject stray positional arguments**
+  with a usage error instead of silently ignoring them.
+- **Graph viewer map no longer breaks on packages named `constructor`,
+  `toString` or `__proto__`.** Package names come from the indexed repo and
+  resolved to `Object.prototype` members through the map view's `{}` dicts,
+  so rendering threw. The dicts are null-prototype now.
+- **`graph ui` no longer prints the viewer URL once the browser opens.** The
+  URL carries a 12-hour key, and printing it always put a replayable credential
+  in logs and agent transcripts. `url` is now printed only when the browser
+  could not be opened, or with `--no-open`. The opener's argv still carries the URL.
+- **`ensure-server` now replaces the daemon when called from a local build.**
+  Every build from source reports version `dev`, so a rebuilt binary kept
+  talking to the previous build's daemon and `graph ui` served stale API and
+  viewer code. A `dev` caller now always restarts the daemon (one restart per
+  call, local builds only); release builds still compare versions. The `ui`
+  field is gone from `/identity`.
+- **Graph viewer symbol flow walks up to depth 5**, the same bound as
+  `graph_symbol`; it was capped at 3. The build-error banner passed through the
+  viewer URL is gone: a failed build opens the last good graph marked stale,
+  and `graph ui` prints the error as `index_error`.
+- **Mapper tier now indexes TypeScript type aliases and Python module-level
+  bindings.** `type X = ...` in `.ts`/`.tsx` and every top-level assignment in
+  `.py` were missing from `graph_symbol` and `graph_package`, so querying
+  `ButtonProps` or `DEFAULT_WEIGHTS` returned `not_found` and a package's
+  exported surface understated itself. Python has no constant syntax for the
+  grammar to match, so every module-level binding is indexed rather than only
+  `UPPER_CASE` names — gating on casing would hide public API such as `os.sep`.
+  Dunder metadata like `__all__` stays out of package listings through the
+  existing leading-underscore export rule. Closes #134.
+- **A Python name defined twice in one scope is now one symbol, not several
+  rows that `graph_symbol` could never resolve.** A `@property` getter and
+  setter, `@overload` stubs, or a rebound module name shared one qname, so the
+  lookup answered "ambiguous" and re-querying the exact qname returned the same
+  ambiguity. The definitions now share one row whose source shows every body;
+  calls from any of them still attribute to it. TypeScript is untouched: there a
+  repeated qname means two different functions whose container was lost.
+  Cached graphs rebuild once (indexer generation 10).
+
+### Removed
+- **The unused `pinned` and `review_after` columns and the `needs_review`
+  flag** (schema v10). Nothing ever wrote them, so `pinned` was always false
+  and `needs_review` never fired. They no longer appear in `mem_search`,
+  `mem_context`, or `list` JSON; use `authored_at`/`created_at` for age.
 
 ## [1.3.0-beta.1] — 2026-09-14
 
@@ -443,7 +572,8 @@ normally.
 - `workspace.yml` / inline scrub config → v1.1. v1.0 pattern set + order are
   hardcoded.
 
-[Unreleased]: https://github.com/SamuelMolero26/droids-mem/compare/v1.3.0-beta.1...HEAD
+[Unreleased]: https://github.com/SamuelMolero26/droids-mem/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/SamuelMolero26/droids-mem/compare/v1.3.0-beta.1...v1.3.0
 [1.3.0-beta.1]: https://github.com/SamuelMolero26/droids-mem/compare/v1.2.1...v1.3.0-beta.1
 [1.2.1]: https://github.com/SamuelMolero26/droids-mem/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/SamuelMolero26/droids-mem/compare/v1.1.1...v1.2.0

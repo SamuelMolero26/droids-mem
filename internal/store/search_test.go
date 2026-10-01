@@ -2,92 +2,11 @@ package store_test
 
 import (
 	"context"
+	"strings"
 	"testing"
-	"time"
 
 	"github.com/samuelmolero26/droids-mem/internal/store"
 )
-
-// TestSearch_SurfacesNeedsReviewAndPinned is the [GUARD] for Phase 2: the
-// SearchResult projection must carry needs_review/pinned too (D2 — search
-// consumers still want the trust signal), computed the same audit-only way
-// as Context (D4): it never changes BM25 rank order, only adds the fields.
-func TestSearch_SurfacesNeedsReviewAndPinned(t *testing.T) {
-	s, conn := newTestStoreWithConn(t)
-	taskType := "lifecycle_search"
-
-	saveAndGetID := func(req store.SaveRequest) string {
-		resp, err := s.Save(context.Background(), req)
-		if err != nil {
-			t.Fatalf("seed save: %v", err)
-		}
-		return resp.ID
-	}
-
-	needsReviewID := saveAndGetID(store.SaveRequest{
-		TaskType: taskType, Kind: "error_resolution",
-		Title: "Phone mapping bug", What: "field mismatch", Learned: "map phone field", Tags: "phone",
-	})
-	pinnedID := saveAndGetID(store.SaveRequest{
-		TaskType: taskType, Kind: "task_pattern",
-		Title: "Pinned pattern", What: "csv normalization", Learned: "normalize csv dates", Tags: "csv",
-	})
-	normalID := saveAndGetID(store.SaveRequest{
-		TaskType: taskType, Kind: "user_rule",
-		Title: "Plain rule", What: "no marks here", Learned: "nothing special", Tags: "plain",
-	})
-
-	past := time.Now().Add(-time.Hour).Unix()
-	if _, err := conn.Exec(`UPDATE memories SET review_after = ? WHERE id = ?`, past, needsReviewID); err != nil {
-		t.Fatalf("seed review_after: %v", err)
-	}
-	if _, err := conn.Exec(`UPDATE memories SET pinned = 1 WHERE id = ?`, pinnedID); err != nil {
-		t.Fatalf("seed pinned: %v", err)
-	}
-
-	resp, err := s.Search(context.Background(), store.SearchRequest{Query: "phone csv plain", TaskType: taskType})
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
-
-	byID := make(map[string]store.SearchResult, len(resp.Results))
-	for _, r := range resp.Results {
-		byID[r.ID] = r
-	}
-
-	got, ok := byID[needsReviewID]
-	if !ok {
-		t.Fatal("expected needs-review row in search results")
-	}
-	if !got.NeedsReview {
-		t.Error("NeedsReview = false, want true")
-	}
-	if got.Pinned {
-		t.Error("Pinned = true, want false")
-	}
-
-	got, ok = byID[pinnedID]
-	if !ok {
-		t.Fatal("expected pinned row in search results")
-	}
-	if !got.Pinned {
-		t.Error("Pinned = false, want true")
-	}
-	if got.NeedsReview {
-		t.Error("NeedsReview = true, want false")
-	}
-
-	got, ok = byID[normalID]
-	if !ok {
-		t.Fatal("expected normal row in search results")
-	}
-	if got.NeedsReview {
-		t.Error("normal row NeedsReview = true, want false")
-	}
-	if got.Pinned {
-		t.Error("normal row Pinned = true, want false")
-	}
-}
 
 func seedMemories(t *testing.T, s *store.Store) {
 	t.Helper()
@@ -296,6 +215,9 @@ func TestSearch_TotalMatchesResultCount(t *testing.T) {
 	if resp.Total != len(resp.Results) {
 		t.Errorf("total %d != len(results) %d", resp.Total, len(resp.Results))
 	}
+	if resp.Message != "" {
+		t.Errorf("populated response must omit message, got %q", resp.Message)
+	}
 }
 
 // TestSearch_FTS5SpecialChars guards the regression where FTS5 syntax chars in a
@@ -331,8 +253,9 @@ func TestSearch_FTS5SpecialChars(t *testing.T) {
 	}
 }
 
-// TestSearch_OnlyPunctuation returns empty (no tokens) rather than crashing on an
-// empty MATCH expression.
+// TestSearch_OnlyPunctuation returns a definitive empty (no tokens) rather than
+// crashing on an empty MATCH expression. The gate returns zero SQL, total 0,
+// and the no_searchable_text message so agents stop re-querying to verify.
 func TestSearch_OnlyPunctuation(t *testing.T) {
 	s := newTestStore(t)
 	seedMemories(t, s)
@@ -346,5 +269,59 @@ func TestSearch_OnlyPunctuation(t *testing.T) {
 	}
 	if len(resp.Results) != 0 {
 		t.Errorf("expected 0 results, got %d", len(resp.Results))
+	}
+	if resp.Total != 0 {
+		t.Errorf("expected total 0, got %d", resp.Total)
+	}
+	const wantMessage = "query contains no searchable text (no letters or digits); nothing can match"
+	if resp.Message != wantMessage {
+		t.Errorf("message = %q, want %q", resp.Message, wantMessage)
+	}
+}
+
+// TestSearch_NoMatchMessage labels a genuine no-match with a transport-neutral
+// hint: it must never name --all-projects (wrong for MCP, and wrong when the
+// search was already global or only filtered by kind).
+func TestSearch_NoMatchMessage(t *testing.T) {
+	s := newTestStore(t)
+	seedMemories(t, s)
+
+	resp, err := s.Search(context.Background(), store.SearchRequest{Query: "xyznonexistentterm", TaskType: "crm_upload"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if resp.Results == nil || len(resp.Results) != 0 || resp.Total != 0 {
+		t.Errorf("want empty non-nil results and total 0, got %+v", resp)
+	}
+	const want = "no memories matched; try different keywords or a broader scope"
+	if resp.Message != want {
+		t.Errorf("message = %q, want %q", resp.Message, want)
+	}
+}
+
+// TestSearch_KeepsFullLearned is the session-relevance regression lock:
+// Store.Search must keep returning full rows (the hook/session pull injects
+// full Learned into the prompt). Only the CLI/MCP boundary projects to
+// compact — a long learned must arrive here uncut.
+func TestSearch_KeepsFullLearned(t *testing.T) {
+	s := newTestStore(t)
+	// Note: save trims trailing whitespace, so build the fixture without any.
+	full := strings.TrimSpace(strings.Repeat("critical detail ", 100)) // ~1599 runes
+	if _, err := s.Save(context.Background(), store.SaveRequest{
+		TaskType: "relevance_full", Kind: "task_pattern",
+		Title: "Full learned regression", What: "hook injects this", Learned: full, Tags: "regression",
+	}); err != nil {
+		t.Fatalf("seed save: %v", err)
+	}
+
+	resp, err := s.Search(context.Background(), store.SearchRequest{Query: "regression hook injects", TaskType: "relevance_full"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(resp.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(resp.Results))
+	}
+	if resp.Results[0].Learned != full {
+		t.Errorf("Learned cut to %d runes, want full %d", len([]rune(resp.Results[0].Learned)), len([]rune(full)))
 	}
 }

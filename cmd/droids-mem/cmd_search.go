@@ -19,6 +19,7 @@ func newSearchCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "search",
 		Short: "Search memories using full-text search",
+		Args:  cobra.NoArgs,
 		Example: `  droids-mem search --query "hubspot phone mapping"
   droids-mem search --query "phone" --task-type crm_upload --kind error_resolution
   droids-mem search --query "auth failure" --limit 10
@@ -37,16 +38,12 @@ func newSearchCmd(a *app) *cobra.Command {
 			})
 			if err != nil {
 				if ve, ok := errors.AsType[*store.ValidationError](err); ok {
-					writeError("validation_failed", ve.Message, false,
-						withField(ve.Field),
-						withSuggestion("provide --"+ve.Field),
-					)
-					exitWith(ExitUsage)
+					failValidation(ve, "provide --"+ve.Field)
 				}
 				writeError("search_failed", err.Error(), true)
 				exitWith(ExitError)
 			}
-			writeJSON(resp)
+			writeJSON(store.ToCompactSearchResponse(resp, "Run 'droids-mem get --id <id>' to read a memory in full"))
 			return nil
 		},
 	}

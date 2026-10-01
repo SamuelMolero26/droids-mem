@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	"github.com/samuelmolero26/droids-mem/internal/store"
 )
 
 const (
@@ -82,4 +84,19 @@ func withInput(input any) func(*errResponse) {
 
 func withSuggestion(s string) func(*errResponse) {
 	return func(e *errResponse) { e.Suggestion = s }
+}
+
+// failValidation writes ve as a usage error and exits. Retryable has no
+// fallback: every store ValidationError sets it.
+func failValidation(ve *store.ValidationError, fallbackSuggestion string, extra ...func(*errResponse)) {
+	code, suggestion := ve.Code, ve.Suggestion
+	if code == "" {
+		code = "validation_failed"
+	}
+	if suggestion == "" {
+		suggestion = fallbackSuggestion
+	}
+	opts := append([]func(*errResponse){withField(ve.Field), withSuggestion(suggestion)}, extra...)
+	writeError(code, ve.Message, ve.Retryable, opts...)
+	exitWith(ExitUsage)
 }

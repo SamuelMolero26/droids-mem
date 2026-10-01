@@ -50,14 +50,9 @@ type ContextMemory struct {
 	What           string `json:"what,omitempty"`
 	Snippet        string `json:"snippet,omitempty"`
 	CreatedAt      int64  `json:"created_at"`
+	AuthoredAt     int64  `json:"authored_at"`
 	ExpandCount    int    `json:"expand_count"`
 	LastExpandedAt int64  `json:"last_expanded_at,omitempty"`
-	// ReviewAfter/Pinned/NeedsReview mirror Memory (inspect.go) — same
-	// nullable-no-COALESCE scan and Go-computed derivation (D4). Surfaced on
-	// both mem_context and mem_search per D2.
-	ReviewAfter *int64 `json:"review_after,omitempty"`
-	Pinned      bool   `json:"pinned"`
-	NeedsReview bool   `json:"needs_review"`
 }
 
 type ContextResponse struct {
@@ -68,6 +63,11 @@ type ContextResponse struct {
 	// exceeds len(UserRules), the overflow appears in Browse as title stubs.
 	UserRulesTotal int             `json:"user_rules_total"`
 	Browse         []ContextMemory `json:"browse"`
+	// Help carries contextual-disclosure hints (AXI §9) pointing at the
+	// full-detail escape hatch for stub IDs. Never set by Store.Context
+	// itself — the CLI/MCP boundary sets it when Browse is non-empty, with
+	// transport-appropriate syntax, so this stays neutral here.
+	Help []string `json:"help,omitempty"`
 }
 
 func (s *Store) Context(ctx context.Context, req ContextRequest) (*ContextResponse, error) {
@@ -132,89 +132,73 @@ func (s *Store) Context(ctx context.Context, req ContextRequest) (*ContextRespon
 		return nil, fmt.Errorf("acquire conn: %w", err)
 	}
 	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, "BEGIN DEFERRED"); err != nil {
-		return nil, fmt.Errorf("begin deferred: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			// Background ctx so cleanup still runs after request cancellation.
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+	err = withTx(ctx, conn, "DEFERRED", "context", func() error {
+		last, err := fetchLastSessionConn(ctx, conn, taskType)
+		if err != nil {
+			return err
 		}
-	}()
+		if last != nil {
+			resp.LastSession = last
+		}
 
-	last, err := fetchLastSessionConn(ctx, conn, taskType)
+		// deep expands every overflow user_rule to full body (fullCap < 0 → no
+		// stubs); orient/refresh keep the always-tier cap and surface the rest as
+		// stubs (which refresh then discards).
+		fullCap := maxAlwaysTierUserRules
+		if mode == ModeDeep {
+			fullCap = -1
+		}
+		rules, ruleStubs, rulesTotal, err := fetchUserRulesConn(ctx, conn, taskType, fullCap)
+		if err != nil {
+			return err
+		}
+		resp.UserRules = rules
+		resp.UserRulesTotal = rulesTotal
+
+		switch mode {
+		case ModeRefresh:
+			// Always tier only — no browse, no rule stubs. Cheap re-anchor.
+		case ModeDeep:
+			// Full bodies, tighter limits; rules are already all full above, so no
+			// stubs lead the browse tier.
+			browse, err := fetchBrowseTierConn(ctx, conn, ftsQuery, taskType, true, deepErrorLimit, deepTaskLimit)
+			if err != nil {
+				return err
+			}
+			resp.Browse = browse
+		default: // ModeOrient
+			browse, err := fetchBrowseTierConn(ctx, conn, ftsQuery, taskType, false, browseErrorLimit, browseTaskLimit)
+			if err != nil {
+				return err
+			}
+			// Rule stubs lead the browse tier: rules are critical state, so their
+			// titles must be seen before the BM25-ranked errors/patterns (ADR-0011).
+			resp.Browse = append(ruleStubs, browse...)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	if last != nil {
-		resp.LastSession = last
-	}
-
-	// deep expands every overflow user_rule to full body (fullCap < 0 → no
-	// stubs); orient/refresh keep the always-tier cap and surface the rest as
-	// stubs (which refresh then discards).
-	fullCap := maxAlwaysTierUserRules
-	if mode == ModeDeep {
-		fullCap = -1
-	}
-	rules, ruleStubs, rulesTotal, err := fetchUserRulesConn(ctx, conn, taskType, fullCap)
-	if err != nil {
-		return nil, err
-	}
-	resp.UserRules = rules
-	resp.UserRulesTotal = rulesTotal
-
-	switch mode {
-	case ModeRefresh:
-		// Always tier only — no browse, no rule stubs. Cheap re-anchor.
-	case ModeDeep:
-		// Full bodies, tighter limits; rules are already all full above, so no
-		// stubs lead the browse tier.
-		browse, err := fetchBrowseTierConn(ctx, conn, ftsQuery, taskType, true, deepErrorLimit, deepTaskLimit)
-		if err != nil {
-			return nil, err
-		}
-		resp.Browse = browse
-	default: // ModeOrient
-		browse, err := fetchBrowseTierConn(ctx, conn, ftsQuery, taskType, false, browseErrorLimit, browseTaskLimit)
-		if err != nil {
-			return nil, err
-		}
-		// Rule stubs lead the browse tier: rules are critical state, so their
-		// titles must be seen before the BM25-ranked errors/patterns (ADR-0011).
-		resp.Browse = append(ruleStubs, browse...)
-	}
-
-	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return nil, fmt.Errorf("commit context: %w", err)
-	}
-	committed = true
-
 	return resp, nil
 }
 
 func fetchLastSessionConn(ctx context.Context, conn *sql.Conn, taskType string) (*ContextMemory, error) {
 	var m ContextMemory
-	var reviewAfter sql.NullInt64
 	err := conn.QueryRowContext(ctx, `
-		SELECT id, kind, title, learned, created_at,
-		       expand_count, COALESCE(last_expanded_at, 0), review_after, pinned
+		SELECT id, kind, title, learned, created_at, authored_at,
+		       expand_count, COALESCE(last_expanded_at, 0)
 		FROM memories
 		WHERE task_type = ? AND kind = 'session_summary'
 		ORDER BY created_at DESC, id DESC
 		LIMIT 1
-	`, taskType).Scan(&m.ID, &m.Kind, &m.Title, &m.Learned, &m.CreatedAt, &m.ExpandCount, &m.LastExpandedAt, &reviewAfter, &m.Pinned)
+	`, taskType).Scan(&m.ID, &m.Kind, &m.Title, &m.Learned, &m.CreatedAt, &m.AuthoredAt, &m.ExpandCount, &m.LastExpandedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("fetch last session: %w", err)
 	}
-	if reviewAfter.Valid {
-		m.ReviewAfter = &reviewAfter.Int64
-	}
-	m.NeedsReview = needsReview(m.ReviewAfter)
 	m.Tier = "always"
 	return &m, nil
 }
@@ -231,8 +215,8 @@ const maxAlwaysTierUserRules = 5
 // as a full-body always-tier item and stubs is empty (deep mode, ADR-0012).
 func fetchUserRulesConn(ctx context.Context, conn *sql.Conn, taskType string, fullCap int) (rules, stubs []ContextMemory, total int, err error) {
 	rows, err := conn.QueryContext(ctx, `
-		SELECT id, kind, title, learned, created_at,
-		       expand_count, COALESCE(last_expanded_at, 0), review_after, pinned
+		SELECT id, kind, title, learned, created_at, authored_at,
+		       expand_count, COALESCE(last_expanded_at, 0)
 		FROM memories
 		WHERE task_type = ? AND kind = 'user_rule'
 		ORDER BY created_at DESC, id DESC
@@ -246,14 +230,9 @@ func fetchUserRulesConn(ctx context.Context, conn *sql.Conn, taskType string, fu
 	for rows.Next() {
 		var m ContextMemory
 		var learned string
-		var reviewAfter sql.NullInt64
-		if err := rows.Scan(&m.ID, &m.Kind, &m.Title, &learned, &m.CreatedAt, &m.ExpandCount, &m.LastExpandedAt, &reviewAfter, &m.Pinned); err != nil {
+		if err := rows.Scan(&m.ID, &m.Kind, &m.Title, &learned, &m.CreatedAt, &m.AuthoredAt, &m.ExpandCount, &m.LastExpandedAt); err != nil {
 			return nil, nil, 0, fmt.Errorf("scan user rule: %w", err)
 		}
-		if reviewAfter.Valid {
-			m.ReviewAfter = &reviewAfter.Int64
-		}
-		m.NeedsReview = needsReview(m.ReviewAfter)
 		total++
 		if fullCap < 0 || len(rules) < fullCap {
 			m.Tier = "always"
@@ -279,21 +258,8 @@ func fetchBrowseTierConn(ctx context.Context, conn *sql.Conn, ftsQuery, taskType
 	if err != nil {
 		return nil, err
 	}
-	seen := make(map[string]bool, len(errs)+len(patterns))
-	out := make([]ContextMemory, 0, len(errs)+len(patterns))
-	for _, m := range errs {
-		if !seen[m.ID] {
-			seen[m.ID] = true
-			out = append(out, m)
-		}
-	}
-	for _, m := range patterns {
-		if !seen[m.ID] {
-			seen[m.ID] = true
-			out = append(out, m)
-		}
-	}
-	return out, nil
+	// The two kinds are disjoint, so no row can appear in both lists.
+	return append(errs, patterns...), nil
 }
 
 func fetchBrowseKindConn(ctx context.Context, conn *sql.Conn, ftsQuery, taskType, kind string, limit int, full bool) ([]ContextMemory, error) {
@@ -305,8 +271,8 @@ func fetchBrowseKindConn(ctx context.Context, conn *sql.Conn, ftsQuery, taskType
 	if full {
 		learnedCol = `m.learned`
 	}
-	browseCols := `m.id, m.kind, m.title, m.what, ` + learnedCol + `, m.created_at,
-		       m.expand_count, COALESCE(m.last_expanded_at, 0), m.review_after, m.pinned`
+	browseCols := `m.id, m.kind, m.title, m.what, ` + learnedCol + `, m.created_at, m.authored_at,
+		       m.expand_count, COALESCE(m.last_expanded_at, 0)`
 
 	var (
 		rows *sql.Rows
@@ -346,14 +312,9 @@ func fetchBrowseKindConn(ctx context.Context, conn *sql.Conn, ftsQuery, taskType
 	for rows.Next() {
 		var m ContextMemory
 		var what, learned string
-		var reviewAfter sql.NullInt64
-		if err := rows.Scan(&m.ID, &m.Kind, &m.Title, &what, &learned, &m.CreatedAt, &m.ExpandCount, &m.LastExpandedAt, &reviewAfter, &m.Pinned); err != nil {
+		if err := rows.Scan(&m.ID, &m.Kind, &m.Title, &what, &learned, &m.CreatedAt, &m.AuthoredAt, &m.ExpandCount, &m.LastExpandedAt); err != nil {
 			return nil, fmt.Errorf("scan browse (%s): %w", kind, err)
 		}
-		if reviewAfter.Valid {
-			m.ReviewAfter = &reviewAfter.Int64
-		}
-		m.NeedsReview = needsReview(m.ReviewAfter)
 		m.Tier = "browse"
 		if full {
 			m.What = what

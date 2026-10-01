@@ -5,12 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/samuelmolero26/droids-mem/internal/graph"
+	"github.com/samuelmolero26/droids-mem/internal/mcpserver"
 	"github.com/samuelmolero26/droids-mem/internal/state"
 )
 
@@ -117,6 +120,7 @@ automatically when the repo changes.`,
 
 	var direction, to, symbolFlag string
 	var depth int
+	var noSource, noTests bool
 	symbolCmd := &cobra.Command{
 		Use:   "symbol <name>",
 		Short: "Show a symbol's source + callers/callees as signature stubs",
@@ -142,6 +146,8 @@ automatically when the repo changes.`,
 				Direction: direction,
 				Depth:     depth,
 				To:        to,
+				NoSource:  noSource,
+				NoTests:   noTests,
 			})
 			if err != nil {
 				writeGraphErr(err)
@@ -154,6 +160,8 @@ automatically when the repo changes.`,
 	symbolCmd.Flags().StringVar(&direction, "direction", "both", "edges to follow: up | down | both")
 	symbolCmd.Flags().IntVar(&depth, "depth", 1, "transitive hops (max 5); up + depth>1 = blast radius")
 	symbolCmd.Flags().StringVar(&to, "to", "", "target symbol: return the call path instead of neighbors")
+	symbolCmd.Flags().BoolVar(&noSource, "no-source", false, "omit the symbol's own source body (signature + callers/callees only)")
+	symbolCmd.Flags().BoolVar(&noTests, "no-tests", false, "drop _test.go neighbors from the rows (callers_in_tests still counts them)")
 	symbolCmd.Flags().StringVar(&symbolFlag, "symbol", "", "symbol name (alias for the positional arg; matches MCP graph_symbol)")
 
 	var packageFlag string
@@ -188,8 +196,93 @@ automatically when the repo changes.`,
 	}
 	packageCmd.Flags().StringVar(&packageFlag, "package", "", "package path (alias for the positional arg; matches MCP graph_package)")
 
-	cmd.AddCommand(indexCmd, symbolCmd, packageCmd)
+	var noOpen bool
+	uiCmd := &cobra.Command{
+		Use:   "ui",
+		Short: "Open the graph viewer for this repo in the browser",
+		Long: `ui builds (or refreshes) the repo's graph, makes sure the local daemon is
+running, and opens the viewer in the default browser. The URL carries a signed
+key valid for 12 hours, so it is printed (as JSON "url") only when the browser
+could not be opened or --no-open is passed.
+
+If the build fails but an earlier graph exists, the viewer opens on that graph
+marked stale, and the build error is printed as index_error.`,
+		Args:        cobra.NoArgs,
+		Annotations: bypass,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			root, err := graph.RepoRoot(resolveRepo())
+			if err != nil {
+				writeGraphErr(err)
+				return nil
+			}
+			gm, err := graphManager()
+			if err != nil {
+				return err
+			}
+			defer gm.Close()
+			var indexErr string
+			if _, err := gm.Index(cmd.Context(), root); err != nil {
+				// Keep going on the last good graph; with none, there is nothing to show.
+				if _, perr := gm.PackageOverview(cmd.Context(), root); perr != nil {
+					writeError("graph_index_failed", err.Error(), false)
+					exitWith(ExitError)
+				}
+				indexErr = err.Error()
+			}
+
+			addr := envOr("DROIDS_MEM_MCP_ADDR", mcpserver.DefaultAddr)
+			if !mcpserver.IsLoopbackAddr(addr) {
+				writeError("ui_unavailable", fmt.Sprintf("the viewer is served only on a loopback address; DROIDS_MEM_MCP_ADDR=%s is not", addr), false)
+				exitWith(ExitError)
+			}
+			self, err := os.Executable()
+			if err != nil {
+				return err
+			}
+			if out, err := exec.CommandContext(cmd.Context(), self, "ensure-server").CombinedOutput(); err != nil { // #nosec G204 -- our own executable, fixed argument
+				writeError("ui_server_failed", fmt.Sprintf("ensure-server: %v: %s", err, out), true)
+				exitWith(ExitError)
+			}
+			tok, err := state.LoadOrCreateToken()
+			if err != nil {
+				return fmt.Errorf("load token: %w", err)
+			}
+			// The key rides in the URL fragment, which browsers never send to a server.
+			u := baseURL(addr) + "/ui/#k=" + mcpserver.UIKey(tok, root, time.Now().Add(mcpserver.UIKeyTTL))
+			out := map[string]string{"status": "ok", "repo": root}
+			// The URL is a replayable credential: keep it out of stdout (logs,
+			// agent transcripts) unless the user has to open it by hand.
+			if noOpen || openBrowser(u) != nil {
+				out["url"] = u
+			}
+			if indexErr != "" {
+				out["index_error"] = indexErr
+			}
+			writeJSON(out)
+			return nil
+		},
+	}
+
+	uiCmd.Flags().BoolVar(&noOpen, "no-open", false, "do not open a browser; print the URL instead")
+
+	cmd.AddCommand(indexCmd, symbolCmd, packageCmd, uiCmd)
 	return cmd
+}
+
+// openBrowser asks the OS to open u and reports whether the opener could be
+// started. It never waits on the opener (some xdg-open setups run the browser
+// in the foreground), so a late failure is not detected.
+func openBrowser(u string) error {
+	opener := "xdg-open"
+	if runtime.GOOS == "darwin" {
+		opener = "open"
+	}
+	c := exec.Command(opener, u) // #nosec G204 -- fixed opener, URL is a single argv element, no shell
+	if err := c.Start(); err != nil {
+		return err
+	}
+	go c.Wait() //nolint:errcheck // reap the child; its exit status is deliberately ignored
+	return nil
 }
 
 // writeGraphErr emits the error envelope and exits (3 for misses, 1 otherwise).

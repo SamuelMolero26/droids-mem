@@ -6,7 +6,6 @@
 package graph
 
 import (
-	"os"
 	"strings"
 
 	gts "github.com/odvcencio/gotreesitter"
@@ -45,7 +44,7 @@ type mapperEngine struct {
 	calls *gts.FactProgram
 	// imports is the compiled module-specifier query for the JS family only
 	// (mapper_imports.go's tsImportsQuery). Python needs no query — gts's own
-	// ExtractImports covers it — so this stays nil there, and mapperImports
+	// ExtractImports covers it — so this stays nil there, and importsFromMapperTree
 	// dispatches on language rather than on this field being set.
 	imports *gts.Query
 	// bindings is the companion local-name query (tsBindingsQuery), JS family
@@ -55,12 +54,20 @@ type mapperEngine struct {
 	bindings *gts.Query
 }
 
-// mapperTagsQuery augments the inferred tags query for the JS family so
-// top-level `export const`/`export let` (lexical_declaration) and
-// `export var` (variable_declaration) are visible as symbols. The scoped
-// `export_statement` wrapper keeps inner `const` declarations from being
-// captured — spike proved `export const metadata` 0→1 while
-// `function foo(){ const inner=1 }` stays only `foo`.
+// mapperTagsQuery augments the inferred tags query where upstream misses a
+// declaration form.
+//
+// JS family: top-level `export const`/`export let` (lexical_declaration) and
+// `export var` (variable_declaration). The scoped `export_statement` wrapper
+// keeps inner `const` declarations from being captured — spike proved
+// `export const metadata` 0→1 while `function foo(){ const inner=1 }` stays
+// only `foo`.
+//
+// Python: every module-level assignment, since the grammar has no constant
+// form to match — `(module ...)` is what excludes function locals. Not gated
+// on UPPER_CASE: that would hide os.sep and ~1000 other exported lowercase
+// stdlib names, while the dunder metadata it aims at is already unexported by
+// mapperExported's leading-underscore rule.
 //
 // B6 note (future-fragile guard): the added patterns are specifically for
 // lexical_declaration / variable_declaration inside export_statement. Guarding
@@ -76,11 +83,24 @@ func mapperTagsQuery(entry *grammars.LangEntry) string {
 		base += "\n(export_statement declaration: (lexical_declaration (variable_declarator name: (identifier) @name) @definition.constant))"
 		base += "\n(export_statement declaration: (variable_declaration (variable_declarator name: (identifier) @name) @definition.variable))"
 	}
+	// typescript/tsx only, never javascript: its grammar has no
+	// type_alias_declaration, and a pattern naming an unknown node type fails
+	// to compile, which nils the outliner and skips every file in that
+	// language.
+	isTS := entry.Name == "typescript" || entry.Name == "tsx"
+	if isTS && !strings.Contains(base, "type_alias_declaration") {
+		base += "\n(type_alias_declaration name: (type_identifier) @name) @definition.type"
+	}
+	// "(assignment" not "assignment": the latter also matches Python's
+	// augmented_assignment, which would silently disable this rung.
+	if entry.Name == "python" && !strings.Contains(base, "(assignment") {
+		base += "\n(module (assignment left: (identifier) @name) @definition.constant)"
+	}
 	return base
 }
 
 // mapperEngines caches one mapperEngine per language NAME for the lifetime
-// of a single mapperSymbols call — per-run, not package-level. Manager
+// of a single scanMapperFiles call — per-run, not package-level. Manager
 // builds different repos concurrently, and a shared package-level cache
 // would need locking for no gain (design.md decision 3).
 type mapperEngines map[string]*mapperEngine
@@ -88,7 +108,7 @@ type mapperEngines map[string]*mapperEngine
 // get returns (creating and caching, if necessary) the mapperEngine for
 // entry. A failure to load the language or compile its outliner is not an
 // error here — it is surfaced by lang/outliner staying nil, and the caller
-// (mapperSymbols) turns that into a per-file skip.
+// (scanMapperFile) turns that into a per-file skip.
 func (e mapperEngines) get(entry *grammars.LangEntry) *mapperEngine {
 	if entry == nil {
 		return &mapperEngine{}
@@ -119,84 +139,28 @@ func (e mapperEngines) get(entry *grammars.LangEntry) *mapperEngine {
 	return eng
 }
 
-// mapperSym is the build-time carrier mapperSymbols returns: the persisted
+// mapperSym is the build-time carrier scanMapperFiles returns: the persisted
 // *symRow plus PR-D's call-attribution inputs (the outline symbol's byte
 // range and its lexical container chain), which never persist to graph.db
 // themselves (design.md decision 8 — keeps symRow clean, keeps the two tiers
 // decoupled). Introduced in PR-C so PR-D's FactCalls attribution adds no
-// signature churn to mapperSymbols.
+// signature churn to scanMapperFiles.
 type mapperSym struct {
 	row        *symRow
 	start, end uint32 // gts byte range, build-time only, NEVER persisted
 	container  string // enclosing class chain, for PR-D's ladder rungs 1/2
 }
 
-// mapperSymbols parses and outlines every file in files, converting each
-// accepted gts.OutlineSymbol into a production *symRow wrapped in a
-// mapperSym carrier. Per-file failures (unreadable file, unloadable
-// language, unparseable source, declined outline) are skip-and-continue: one
-// bad file never loses the rest of the run, and every skip is counted in the
-// returned mapperStats (design.md decision 4).
-func mapperSymbols(files []mapperFile) ([]mapperSym, mapperStats) {
-	var stats mapperStats
-	engines := mapperEngines{}
-	var out []mapperSym
-
-	for _, f := range files {
-		// #nosec G304 -- discovery admits only regular files under repo, size-capped
-		// at maxMapperFileBytes; symlinks are dropped there so this read cannot
-		// resolve outside the indexed repo.
-		src, err := os.ReadFile(f.abs)
-		if err != nil {
-			stats.readErr++
-			continue // unreadable file is skip-and-continue, not fatal
-		}
-
-		eng := engines.get(f.entry)
-		if eng.lang == nil {
-			stats.parseErr++ // no working language: the grammar failed to load, so no tree can ever be produced
-			continue
-		}
-
-		out = append(out, outlineMapperFile(eng, f, src, &stats)...)
-	}
-	return out, stats
-}
-
-// outlineMapperFile is one file's parse-and-outline, extracted from
-// mapperSymbols' loop so the tree has a SCOPE rather than a loop iteration.
-// That is what makes `defer tree.Release()` correct here: it runs on every
-// exit path, including the two mid-way declines, where a release placed at
-// the bottom of the loop body would be skipped. A `defer` written directly
-// inside the loop would instead queue every release until the whole pass
-// returned, which returns no arena in time to be reused and so defeats the
-// point entirely.
-//
-// Releasing is safe because nothing this returns is arena-backed:
-// gts.OutlineSymbol is values throughout (Kind/Name/NodeType strings, Range/
-// NameRange as byte offsets and points, Children recursively the same), its
-// strings come from QueryCapture.Text which is a `string(source[a:b])` copy,
-// and every symRow field is derived from src — the caller's own buffer —
-// never from the tree. No *gts.Node escapes.
-func outlineMapperFile(eng *mapperEngine, f mapperFile, src []byte, stats *mapperStats) []mapperSym {
-	tree, err := eng.parsers.Parse(src) // pooled: see mapperEngine.parsers
-	if err != nil {
-		stats.parseErr++
-		return nil // unparsable file is skip-and-continue, not fatal
-	}
-	defer tree.Release()
-	return outlineMapperTree(eng, f, src, tree, stats)
-}
-
 // outlineMapperTree is the outline extraction itself, over a tree the CALLER
-// owns and releases. scanMapperFiles (mapper_scan.go) drives it directly so a
-// single parse feeds all four mapper passes; outlineMapperFile above stays the
-// one-pass entry that parses its own tree, and is what the per-pass tests and
-// benchmarks still exercise.
+// owns and releases (scanMapperFile, mapper_scan.go, parses once and feeds all
+// four mapper passes).
 //
-// The release-safety argument in outlineMapperFile's comment is what lets the
-// tree outlive this call in the scan driver too: nothing returned here is
-// arena-backed.
+// Releasing the tree afterwards is safe because nothing this returns is
+// arena-backed: gts.OutlineSymbol is values throughout (Kind/Name/NodeType
+// strings, Range/NameRange as byte offsets and points, Children recursively
+// the same), its strings come from QueryCapture.Text which is a
+// `string(source[a:b])` copy, and every symRow field is derived from src — the
+// caller's own buffer — never from the tree. No *gts.Node escapes.
 func outlineMapperTree(eng *mapperEngine, f mapperFile, src []byte, tree *gts.Tree, stats *mapperStats) []mapperSym {
 	if eng.outliner == nil {
 		stats.outlineDecline++
@@ -212,7 +176,33 @@ func outlineMapperTree(eng *mapperEngine, f mapperFile, src []byte, tree *gts.Tr
 	for _, s := range syms {
 		out = append(out, buildMapperSymbols(s, "", f, src, tree, eng.lang, true, false)...)
 	}
+	if f.entry.Name == "python" {
+		return mergeSameQName(out)
+	}
 	return out
+}
+
+// mergeSameQName points every repeat of a qname within one Python file
+// (property getter/setter, @overload stubs, a rebound module name) at the
+// first occurrence's row: two rows sharing a qname dead-end graph_symbol,
+// whose finest key is the qname. Each span keeps its own byte range, so a
+// call inside a later body still attributes to the shared row.
+//
+// Python only: a repeated name in one scope is one binding there, while in
+// TS a repeat means a lost container (methods of distinct unexported object
+// literals), i.e. different functions.
+func mergeSameQName(syms []mapperSym) []mapperSym {
+	first := map[string]*symRow{}
+	for i := range syms {
+		r, ok := first[syms[i].row.qname]
+		if !ok {
+			first[syms[i].row.qname] = syms[i].row
+			continue
+		}
+		r.source = truncate(r.source+"\n\n"+syms[i].row.source, maxSourceBytes)
+		syms[i].row = r
+	}
+	return syms
 }
 
 // buildMapperSymbols converts one gts.OutlineSymbol and its Children,

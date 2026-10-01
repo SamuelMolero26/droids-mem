@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -125,12 +126,77 @@ func TestSearchHandler_ReturnsTotal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handler err: %v", err)
 	}
-	var resp store.SearchResponse
+	var resp store.SearchCompactResponse
 	if err := json.Unmarshal([]byte(okText(t, res)), &resp); err != nil {
 		t.Fatalf("payload not JSON: %v", err)
 	}
 	if resp.Total != 1 {
 		t.Fatalf("want total 1, got %d", resp.Total)
+	}
+}
+
+// Browse-tier stubs disclose mem_get; an empty browse stays self-contained.
+func TestContextHandler_BrowseDisclosesGet(t *testing.T) {
+	st := newTestStore(t)
+	if _, err := st.Save(context.Background(), store.SaveRequest{
+		TaskType: "helpctx", Kind: "error_resolution",
+		Title: "Browse stub", What: "visible snippet here", Learned: "the lesson", Tags: "stub",
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	res, err := contextHandler(st)(context.Background(), mcp.CallToolRequest{}, contextArgs{TaskType: "helpctx"})
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	var env contextEnvelope
+	if err := json.Unmarshal([]byte(okText(t, res)), &env); err != nil {
+		t.Fatalf("payload not JSON: %v", err)
+	}
+	if len(env.Context.Browse) == 0 {
+		t.Fatal("want browse-tier stub, got none")
+	}
+	if len(env.Context.Help) != 1 || !strings.Contains(env.Context.Help[0], "mem_get") {
+		t.Errorf("browse help = %v, want mem_get disclosure", env.Context.Help)
+	}
+
+	empty, err := contextHandler(st)(context.Background(), mcp.CallToolRequest{}, contextArgs{TaskType: "helpctx-empty"})
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	var emptyEnv contextEnvelope
+	if err := json.Unmarshal([]byte(okText(t, empty)), &emptyEnv); err != nil {
+		t.Fatalf("payload not JSON: %v", err)
+	}
+	if len(emptyEnv.Context.Help) != 0 {
+		t.Errorf("empty browse help = %v, want none", emptyEnv.Context.Help)
+	}
+}
+
+// Successful get is self-contained: full body, no help noise (AXI §9
+// omit-when-self-contained).
+func TestGetHandler_HappyPathHasNoHelp(t *testing.T) {
+	st := newTestStore(t)
+	saved, err := st.Save(context.Background(), store.SaveRequest{
+		TaskType: "getnohelp", Kind: "task_pattern",
+		Title: "Full body", What: "context", Learned: "the full lesson", Tags: "full",
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	res, err := getHandler(st)(context.Background(), mcp.CallToolRequest{}, getArgs{ID: saved.ID})
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(okText(t, res)), &decoded); err != nil {
+		t.Fatalf("payload not JSON: %v", err)
+	}
+	if decoded["learned"] != "the full lesson" {
+		t.Errorf("get lost full learned: %v", decoded)
+	}
+	if _, ok := decoded["help"]; ok {
+		t.Errorf("detail view carries help noise: %v", decoded)
 	}
 }
 
@@ -175,5 +241,70 @@ func TestCorpusHandler_Census(t *testing.T) {
 	}
 	if resp.Total != 1 || len(resp.TaskTypes) != 1 {
 		t.Fatalf("want 1 memory in 1 task_type, got total=%d types=%d", resp.Total, len(resp.TaskTypes))
+	}
+}
+
+// Corpus recent_sessions is the agent-facing recency timeline: manual
+// summaries (the only kind MCP mem_save produces) must appear alongside
+// autos, newest first, each labeled with its origin. A non-summary memory
+// must never appear even when it is the newest row.
+func TestCorpusHandler_IncludesManualSummariesNewerThanAutos(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	auto, err := st.Save(ctx, store.SaveRequest{
+		TaskType: "claude_session", Kind: "session_summary",
+		Title: "Auto nightly session recap", What: "flushed session context",
+		Learned: "checkpoint pipeline state for the next run alpha",
+		Origin:  "auto",
+	})
+	if err != nil {
+		t.Fatalf("seed auto: %v", err)
+	}
+	manual, err := st.Save(ctx, store.SaveRequest{
+		TaskType: "crm_upload", Kind: "session_summary",
+		Title: "Manual upload retry recap", What: "investigated the gateway timeout",
+		Learned: "cap CRM batch uploads at 200 rows to dodge the gateway timeout beta",
+	})
+	if err != nil {
+		t.Fatalf("seed manual: %v", err)
+	}
+	noise, err := st.Save(ctx, store.SaveRequest{
+		TaskType: "crm_upload", Kind: "task_pattern",
+		Title: "Newest row but not a summary", What: "a reusable fix",
+		Learned: "pattern lesson unrelated to session recaps gamma",
+	})
+	if err != nil {
+		t.Fatalf("seed noise: %v", err)
+	}
+
+	// Pin created_at: Save stamps time.Now(), so same-second rows would tie.
+	// noise is newest overall and must still be excluded by the kind filter.
+	for id, ts := range map[string]int64{auto.ID: 100, manual.ID: 300, noise.ID: 400} {
+		if _, err := st.DB().Exec(`UPDATE memories SET created_at = ?, updated_at = ? WHERE id = ?`, ts, ts, id); err != nil {
+			t.Fatalf("pin %s: %v", id, err)
+		}
+	}
+
+	res, err := corpusHandler(st)(ctx, mcp.CallToolRequest{}, corpusArgs{})
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	var resp corpusResponse
+	if err := json.Unmarshal([]byte(okText(t, res)), &resp); err != nil {
+		t.Fatalf("payload not JSON: %v", err)
+	}
+	if len(resp.RecentSessions) != 2 {
+		t.Fatalf("want 2 session summaries, got %d: %+v", len(resp.RecentSessions), resp.RecentSessions)
+	}
+	first, second := resp.RecentSessions[0], resp.RecentSessions[1]
+	if first.Title != "Manual upload retry recap" || first.Origin != "manual" {
+		t.Errorf("recent[0] = %+v, want the newer manual summary with origin=manual", first)
+	}
+	if second.Title != "Auto nightly session recap" || second.Origin != "auto" {
+		t.Errorf("recent[1] = %+v, want the older auto summary with origin=auto", second)
+	}
+	if first.CreatedAt <= second.CreatedAt {
+		t.Errorf("recent_sessions not newest-first: %d then %d", first.CreatedAt, second.CreatedAt)
 	}
 }

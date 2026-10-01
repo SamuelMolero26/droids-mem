@@ -31,6 +31,8 @@ type graphSymbolArgs struct {
 	Symbol    string `json:"symbol"`
 	Direction string `json:"direction,omitempty"`
 	Depth     int    `json:"depth,omitempty"`
+	NoSource  bool   `json:"no_source,omitempty"`
+	NoTests   bool   `json:"no_tests,omitempty"`
 	To        string `json:"to,omitempty"`
 }
 
@@ -58,6 +60,10 @@ DEGRADED ANSWERS: freshness.stale is true only on a genuine build failure (I/O, 
 		),
 		mcp.WithString("to",
 			mcp.Description("Optional target symbol: returns the shortest call path from 'symbol' to 'to' instead of neighbors.")),
+		mcp.WithBoolean("no_source",
+			mcp.Description("Omit the symbol's own source body (signature + callers/callees only). Roughly halves the response for large functions; use with direction=up for 'who calls this'.")),
+		mcp.WithBoolean("no_tests",
+			mcp.Description("Drop _test.go callers/callees from the rows (callers_in_tests still reports how many exist). Use for 'which production code breaks'; tests are usually most of a hub's rows.")),
 	)
 }
 
@@ -70,6 +76,8 @@ func graphSymbolHandler(gm *graph.Manager) func(context.Context, mcp.CallToolReq
 			Direction: a.Direction,
 			Depth:     a.Depth,
 			To:        a.To,
+			NoSource:  a.NoSource,
+			NoTests:   a.NoTests,
 		})
 		if err != nil {
 			return graphToolErr(err), nil

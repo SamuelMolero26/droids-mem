@@ -1,6 +1,5 @@
-// Precision-on-the-wire tests (PR-F, design D7): SymbolResponse.Precision,
-// the weakest-wins derivation it stands in for, and syntacticHint's position
-// in the existing hint chain (design D5/D7's ordered chain: base/early-return
+// Precision-on-the-wire tests: SymbolResponse.Precision and syntacticHint's
+// position in the existing hint chain (ordered chain: base/early-return
 // assign, blastHint assign, carriedHint append, rebuildingHint append,
 // syntacticHint append, truncatedHint append later).
 package graph
@@ -85,32 +84,6 @@ func TestSyntacticHint_AppendsAfterBlastHintWithoutClobbering(t *testing.T) {
 	}
 	if syntIdx < implIdx {
 		t.Errorf("syntacticHint must come after the blastHint assignment in resp.Hint, got %q", resp.Hint)
-	}
-}
-
-// TestMixedTransitiveCallers_WeakestPrecisionWins pins F.3/F.4: 3 resolved +
-// 2 syntactic precisions (a hypothetical mixed transitive_callers answer —
-// unreachable in production given tier disjointness, D.7) must resolve to
-// "syntactic", the weaker claim.
-func TestMixedTransitiveCallers_WeakestPrecisionWins(t *testing.T) {
-	mixed := []string{"resolved", "resolved", "resolved", "syntactic", "syntactic"}
-	if len(mixed) != 5 {
-		t.Fatalf("test setup: want 5 precisions (count==5 per spec scenario), got %d", len(mixed))
-	}
-	if got := weakestPrecision(mixed); got != precisionSyntactic {
-		t.Errorf("weakestPrecision(%v) = %q, want %q", mixed, got, precisionSyntactic)
-	}
-}
-
-// TestMixedTransitiveCallers_AllResolved pins the companion scenario: an
-// all-resolved precision set stays "resolved".
-func TestMixedTransitiveCallers_AllResolved(t *testing.T) {
-	allResolved := []string{"resolved", "resolved", "resolved"}
-	if got := weakestPrecision(allResolved); got != precisionResolved {
-		t.Errorf("weakestPrecision(%v) = %q, want %q", allResolved, got, precisionResolved)
-	}
-	if got := weakestPrecision(nil); got != precisionResolved {
-		t.Errorf("weakestPrecision(nil) = %q, want %q (vacuous case defaults to resolved)", got, precisionResolved)
 	}
 }
 

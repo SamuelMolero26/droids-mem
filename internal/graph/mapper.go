@@ -3,9 +3,12 @@
 // decision — that lives entirely on the conversion side (design.md decision
 // 2), so the discovery/conversion split is a FILE boundary, not a diff cut.
 //
-// Nothing calls mapperFiles yet outside its own test and engine.go's pin
-// removal (Phase 3) — this slice produces no symbol rows, writes nothing to
-// graph.db, and shares no lookup structure with the Go semantic tier.
+// The engine is github.com/odvcencio/gotreesitter, a pure-Go tree-sitter
+// runtime (no CGO). Its subset tags are opt-in (//go:build !grammar_subset ||
+// grammar_subset_X): an untagged build embeds every grammar, a build carrying
+// the four grammar_subset_* tags embeds only the shipped four. tsx and
+// javascript are separate languages from typescript, each a distinct
+// *gotreesitter.Language.
 package graph
 
 import (
