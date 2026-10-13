@@ -56,7 +56,7 @@ func saveToolDef() mcp.Tool {
 		mcp.WithString("tags",
 			mcp.Description("Space-delimited tokens. Max 500 bytes. Tags are stored unscrubbed — never embed secrets in them.")),
 		mcp.WithString("scope",
-			mcp.Description("Memory scope. 'shared' (default) or 'personal'. Reserved for future workspace routing."),
+			mcp.Description("Memory scope. 'personal' (default) or 'shared'. Reserved for future workspace routing."),
 			mcp.Enum("personal", "shared"),
 		),
 		mcp.WithString("session_id",

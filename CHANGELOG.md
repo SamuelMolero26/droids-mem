@@ -5,6 +5,15 @@ All notable changes to droids-mem are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **`scope` default is documented as `personal`.** The `mem_save` MCP schema,
+  the `save --scope` CLI help, the machine-readable `schema save` output, and
+  the invalid-scope suggestion all claimed `shared` was the default,
+  contradicting the store, which stamps `personal` (ADR-0028). Docs now match
+  behavior; no runtime change.
+
 ## [1.3.0] — 2026-09-30
 
 Headline: a browser viewer for the code graph, leaner `mem_search` and

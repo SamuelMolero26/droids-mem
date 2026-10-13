@@ -308,3 +308,33 @@ func TestCorpusHandler_IncludesManualSummariesNewerThanAutos(t *testing.T) {
 		t.Errorf("recent_sessions not newest-first: %d then %d", first.CreatedAt, second.CreatedAt)
 	}
 }
+
+// TestSaveTool_ScopeDefaultDocumentsPersonal guards issue #210: the mem_save
+// input schema documented `scope` as 'shared' (default) while the store stamps
+// 'personal' (ADR-0028). The documented default must match the real one.
+func TestSaveTool_ScopeDefaultDocumentsPersonal(t *testing.T) {
+	raw, err := json.Marshal(saveToolDef())
+	if err != nil {
+		t.Fatalf("marshal saveToolDef: %v", err)
+	}
+	var doc struct {
+		InputSchema struct {
+			Properties map[string]struct {
+				Description string `json:"description"`
+			} `json:"properties"`
+		} `json:"inputSchema"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal saveToolDef: %v", err)
+	}
+	scope, ok := doc.InputSchema.Properties["scope"]
+	if !ok {
+		t.Fatal("save tool schema has no scope property")
+	}
+	if !strings.Contains(scope.Description, "'personal' (default)") {
+		t.Errorf("scope description must document 'personal' (default), got: %q", scope.Description)
+	}
+	if strings.Contains(scope.Description, "'shared' (default)") {
+		t.Errorf("scope description must not claim 'shared' (default), got: %q", scope.Description)
+	}
+}
