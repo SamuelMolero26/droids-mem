@@ -311,7 +311,7 @@ func TestCorpusHandler_IncludesManualSummariesNewerThanAutos(t *testing.T) {
 
 // TestSaveTool_ScopeDefaultDocumentsPersonal guards issue #210: the mem_save
 // input schema documented `scope` as 'shared' (default) while the store stamps
-// 'personal' (ADR-0028). The documented default must match the real one.
+// 'personal'. The documented default must match the real one.
 func TestSaveTool_ScopeDefaultDocumentsPersonal(t *testing.T) {
 	raw, err := json.Marshal(saveToolDef())
 	if err != nil {

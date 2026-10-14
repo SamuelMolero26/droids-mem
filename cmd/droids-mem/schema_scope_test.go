@@ -6,7 +6,7 @@ import (
 )
 
 // TestSchema_SaveScopeDefaultsToPersonal guards issue #210: the machine-readable
-// `schema save` output must report the real default ('personal', ADR-0028).
+// `schema save` output must report the real default ('personal').
 func TestSchema_SaveScopeDefaultsToPersonal(t *testing.T) {
 	saveDef, ok := schemaDefinitions["save"].(map[string]any)
 	if !ok {

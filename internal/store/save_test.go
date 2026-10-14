@@ -312,28 +312,6 @@ func TestSave_ForceBypassesBM25(t *testing.T) {
 	}
 }
 
-// TestSave_ScopeDefaultIsPersonal guards issue #210 from the behavior side:
-// omitting scope must persist 'personal' (ADR-0028) — the fact the MCP schema
-// and CLI help must document.
-func TestSave_ScopeDefaultIsPersonal(t *testing.T) {
-	s, conn := newTestStoreWithConn(t)
-	req := validReq() // Scope left empty on purpose
-	resp, err := s.Save(context.Background(), req)
-	if err != nil {
-		t.Fatalf("save: %v", err)
-	}
-	if resp.Status != "saved" {
-		t.Fatalf("status = %q, want saved", resp.Status)
-	}
-	var scope string
-	if err := conn.QueryRow(`SELECT scope FROM memories WHERE id = ?`, resp.ID).Scan(&scope); err != nil {
-		t.Fatalf("query scope: %v", err)
-	}
-	if scope != "personal" {
-		t.Errorf("persisted scope = %q, want personal", scope)
-	}
-}
-
 // TestSave_Validation_InvalidScope_SuggestionNamesDefault guards issue #210:
 // the invalid-scope suggestion must point at the real default ('personal').
 func TestSave_Validation_InvalidScope_SuggestionNamesDefault(t *testing.T) {

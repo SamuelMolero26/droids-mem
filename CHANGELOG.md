@@ -11,7 +11,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`scope` default is documented as `personal`.** The `mem_save` MCP schema,
   the `save --scope` CLI help, the machine-readable `schema save` output, and
   the invalid-scope suggestion all claimed `shared` was the default,
-  contradicting the store, which stamps `personal` (ADR-0028). Docs now match
+  contradicting the store, which stamps `personal`. Docs now match
   behavior; no runtime change.
 
 ## [1.3.0] — 2026-09-30
