@@ -8,18 +8,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
-- **MCP tools reject unknown arguments instead of ignoring them.** A
-  misspelled key was dropped before the handler ran, so `mem_save` with
-  `dryRun` (instead of `dry_run`) saved the memory, and `mem_search` with
-  `taskType` returned unscoped results. Every tool now validates its arguments
-  against its input schema on both transports, and an unknown key, a missing
-  required field or an out-of-range value is a tool error naming the field.
-  Calls that relied on extra keys being ignored now fail; use the advertised
-  field names.
-- **Integer arguments accept any integral encoding.** `mem_search.limit`,
-  `mem_corpus.limit`, `graph_symbol.depth` and `graph_build_wait.timeout`
-  rejected `5.0` and `5e0` with a raw bind error. They now accept them and
-  reject fractional values such as `2.5`.
+- **MCP tools validate arguments against their input schema.** Unknown keys
+  (e.g. `dryRun` for `dry_run`, which used to save for real), missing required
+  fields and out-of-range values are tool errors naming the field.
+- **Integer arguments accept `5.0` and `5e0`** and reject fractional values.
 
 ## [1.3.0] — 2026-09-30
 

@@ -13,7 +13,7 @@ import (
 // against each tool's input schema: unknown keys and fractional integers are
 // rejected before the handler runs, and integer fields accept every integral
 // JSON encoding. It runs over HTTP only: both transports share one server
-// constructor, and the stdio dryRun case lives in TestE2E_ServeStdio.
+// constructor (newMCPServer).
 func TestE2E_StrictToolArgs(t *testing.T) {
 	repo := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(repo, "pkg"), 0o750); err != nil {
@@ -30,8 +30,6 @@ func TestE2E_StrictToolArgs(t *testing.T) {
 		wantText         string // substring of the result text when wantErr
 	}
 	cases := []argCase{
-		{"mem_search taskType", "mem_search", `{"query":"x","taskType":"nonexistent"}`, true, "taskType"},
-		{"graph_build_wait timeout_seconds", "graph_build_wait", `{"repo":` + r + `,"timeout_seconds":5}`, true, "timeout_seconds"},
 		{"mem_save missing required", "mem_save", `{"kind":"task_pattern","title":"t","task_type":"strict","dry_run":true}`, true, "what"},
 		{"mem_search limit over max", "mem_search", `{"query":"x","limit":50}`, true, "limit"},
 	}

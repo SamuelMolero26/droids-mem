@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -107,11 +106,11 @@ func saveHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, sav
 // ---------- mem_search ----------
 
 type searchArgs struct {
-	Query       string   `json:"query"`
-	TaskType    string   `json:"task_type,omitempty"`
-	Kind        string   `json:"kind,omitempty"`
-	Limit       wholeInt `json:"limit,omitempty"`
-	AllProjects bool     `json:"all_projects,omitempty"`
+	Query       string  `json:"query"`
+	TaskType    string  `json:"task_type,omitempty"`
+	Kind        string  `json:"kind,omitempty"`
+	Limit       float64 `json:"limit,omitempty"`
+	AllProjects bool    `json:"all_projects,omitempty"`
 }
 
 func searchToolDef() mcp.Tool {
@@ -240,7 +239,7 @@ func getHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, getA
 // ---------- mem_corpus ----------
 
 type corpusArgs struct {
-	Limit wholeInt `json:"limit,omitempty"`
+	Limit float64 `json:"limit,omitempty"`
 }
 
 // RecentSessionStub is a lightweight summary of one session_summary memory
@@ -386,20 +385,4 @@ func toolErr(err error) *mcp.CallToolResult {
 		return mcp.NewToolResultError(err.Error())
 	}
 	return mcp.NewToolResultError(string(b))
-}
-
-// wholeInt binds integral encodings (5, 5.0, 5e0): the schema accepts 5.0 as
-// an integer, but encoding/json refuses it into int.
-type wholeInt int
-
-func (w *wholeInt) UnmarshalJSON(b []byte) error {
-	var f float64
-	if err := json.Unmarshal(b, &f); err != nil {
-		return err
-	}
-	if f != math.Trunc(f) {
-		return fmt.Errorf("%s is not a whole number", b)
-	}
-	*w = wholeInt(f)
-	return nil
 }

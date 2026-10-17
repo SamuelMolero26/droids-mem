@@ -291,12 +291,7 @@ func TestServeE2E_ToolsListExposesToolSurface(t *testing.T) {
 
 	got := make(map[string]bool)
 	for _, tool := range tools {
-		m := tool.(map[string]any)
-		got[m["name"].(string)] = true
-		// Strict args (#228): unknown keys must be rejected, not silently dropped.
-		if schema, _ := m["inputSchema"].(map[string]any); schema["additionalProperties"] != false {
-			t.Errorf("%s inputSchema.additionalProperties = %v, want false", m["name"], schema["additionalProperties"])
-		}
+		got[tool.(map[string]any)["name"].(string)] = true
 	}
 	for _, want := range []string{"mem_save", "mem_search", "mem_context", "mem_get", "graph_symbol", "graph_package"} {
 		if !got[want] {

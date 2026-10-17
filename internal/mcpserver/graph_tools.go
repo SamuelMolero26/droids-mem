@@ -27,13 +27,13 @@ func registerGraphTools(s *server.MCPServer, gm *graph.Manager) {
 // ---------- graph_symbol ----------
 
 type graphSymbolArgs struct {
-	Repo      string   `json:"repo"`
-	Symbol    string   `json:"symbol"`
-	Direction string   `json:"direction,omitempty"`
-	Depth     wholeInt `json:"depth,omitempty"`
-	NoSource  bool     `json:"no_source,omitempty"`
-	NoTests   bool     `json:"no_tests,omitempty"`
-	To        string   `json:"to,omitempty"`
+	Repo      string  `json:"repo"`
+	Symbol    string  `json:"symbol"`
+	Direction string  `json:"direction,omitempty"`
+	Depth     float64 `json:"depth,omitempty"`
+	NoSource  bool    `json:"no_source,omitempty"`
+	NoTests   bool    `json:"no_tests,omitempty"`
+	To        string  `json:"to,omitempty"`
 }
 
 func graphSymbolToolDef() mcp.Tool {
@@ -127,8 +127,8 @@ const (
 )
 
 type graphBuildWaitArgs struct {
-	Repo    string   `json:"repo"`
-	Timeout wholeInt `json:"timeout,omitempty"` // seconds, default 10
+	Repo    string  `json:"repo"`
+	Timeout float64 `json:"timeout,omitempty"` // seconds, default 10
 }
 
 func graphBuildWaitToolDef() mcp.Tool {
