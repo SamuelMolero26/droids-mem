@@ -5,6 +5,22 @@ All notable changes to droids-mem are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **MCP tools reject unknown arguments instead of ignoring them.** A
+  misspelled key was dropped before the handler ran, so `mem_save` with
+  `dryRun` (instead of `dry_run`) saved the memory, and `mem_search` with
+  `taskType` returned unscoped results. Every tool now validates its arguments
+  against its input schema on both transports, and an unknown key, a missing
+  required field or an out-of-range value is a tool error naming the field.
+  Calls that relied on extra keys being ignored now fail; use the advertised
+  field names.
+- **Integer arguments accept any integral encoding.** `mem_search.limit`,
+  `mem_corpus.limit`, `graph_symbol.depth` and `graph_build_wait.timeout`
+  rejected `5.0` and `5e0` with a raw bind error. They now accept them and
+  reject fractional values such as `2.5`.
+
 ## [1.3.0] — 2026-09-30
 
 Headline: a browser viewer for the code graph, leaner `mem_search` and
