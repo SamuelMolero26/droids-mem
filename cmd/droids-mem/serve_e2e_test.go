@@ -199,25 +199,35 @@ func (s *server) initSession(t *testing.T) string {
 	return sid
 }
 
-// callTool wraps tools/call and returns the inner JSON text the tool produced.
-func (s *server) callTool(t *testing.T, sid, name string, args map[string]any) map[string]any {
+// callToolRaw sends tools/call with args as raw JSON, so encodings like 5.0
+// and 5e0 reach the server verbatim (json.Marshal of float64 5.0 emits 5).
+// It returns the result's isError flag and first text block.
+func (s *server) callToolRaw(t *testing.T, sid, name, args string) (bool, string) {
 	t.Helper()
 	_, resp, _ := s.jsonRPC(t, sid, s.token, map[string]any{
 		"jsonrpc": "2.0",
 		"id":      time.Now().UnixNano(),
 		"method":  "tools/call",
-		"params":  map[string]any{"name": name, "arguments": args},
+		"params":  map[string]any{"name": name, "arguments": json.RawMessage(args)},
 	})
 	result, ok := resp["result"].(map[string]any)
 	if !ok {
 		t.Fatalf("tools/call %s: missing result; resp=%v", name, resp)
 	}
-	content, ok := result["content"].([]any)
-	if !ok || len(content) == 0 {
-		t.Fatalf("tools/call %s: empty content; resp=%v", name, resp)
+	isErr, _ := result["isError"].(bool)
+	var text string
+	if content, _ := result["content"].([]any); len(content) > 0 {
+		first, _ := content[0].(map[string]any)
+		text, _ = first["text"].(string)
 	}
-	first, _ := content[0].(map[string]any)
-	text, _ := first["text"].(string)
+	return isErr, text
+}
+
+// callTool wraps tools/call and returns the inner JSON text the tool produced.
+func (s *server) callTool(t *testing.T, sid, name string, args map[string]any) map[string]any {
+	t.Helper()
+	raw, _ := json.Marshal(args)
+	_, text := s.callToolRaw(t, sid, name, string(raw))
 	var parsed map[string]any
 	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
 		t.Fatalf("tools/call %s: inner json: %v\nraw: %s", name, err, text)
@@ -281,7 +291,12 @@ func TestServeE2E_ToolsListExposesToolSurface(t *testing.T) {
 
 	got := make(map[string]bool)
 	for _, tool := range tools {
-		got[tool.(map[string]any)["name"].(string)] = true
+		m := tool.(map[string]any)
+		got[m["name"].(string)] = true
+		// Strict args (#228): unknown keys must be rejected, not silently dropped.
+		if schema, _ := m["inputSchema"].(map[string]any); schema["additionalProperties"] != false {
+			t.Errorf("%s inputSchema.additionalProperties = %v, want false", m["name"], schema["additionalProperties"])
+		}
 	}
 	for _, want := range []string{"mem_save", "mem_search", "mem_context", "mem_get", "graph_symbol", "graph_package"} {
 		if !got[want] {

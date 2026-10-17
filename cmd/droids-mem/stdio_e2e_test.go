@@ -15,7 +15,8 @@ import (
 
 // TestE2E_ServeStdio drives `serve --stdio` over its stdin/stdout pipe:
 // initialize must return the instructions with the end-of-run summary rule,
-// tools/list the full 6-tool surface, and closing stdin must end
+// tools/list the full 6-tool surface, a misspelled dryRun must be rejected
+// with zero writes (strict args), and closing stdin must end
 // the process cleanly (host-managed lifecycle).
 func TestE2E_ServeStdio(t *testing.T) {
 	workDir := t.TempDir()
@@ -87,6 +88,18 @@ func TestE2E_ServeStdio(t *testing.T) {
 		if !names[want] {
 			t.Errorf("tools/list missing %s (got %v)", want, names)
 		}
+	}
+
+	// Strict args (#228): a misspelled dryRun is rejected, not silently dropped
+	// into a real write.
+	send(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"mem_save","arguments":{"kind":"task_pattern","title":"t","what":"w","learned":"l","task_type":"strict","dryRun":true}}}`)
+	saveResult, _ := recv()["result"].(map[string]any)
+	if saveResult["isError"] != true || !strings.Contains(fmt.Sprint(saveResult["content"]), "dryRun") {
+		t.Errorf("mem_save with dryRun: want a tool error naming dryRun, got %v", saveResult)
+	}
+	send(`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"mem_corpus","arguments":{}}}`)
+	if corpus := fmt.Sprint(recv()["result"]); !strings.Contains(corpus, `"total":0`) {
+		t.Errorf("mem_corpus after rejected save: want total 0, got %s", corpus)
 	}
 
 	// Host-managed lifecycle: stdin EOF ends the process.
