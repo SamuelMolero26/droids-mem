@@ -13,7 +13,7 @@ require (
 	golang.org/x/mod v0.42.0
 	golang.org/x/tools v0.51.0
 	gopkg.in/yaml.v3 v3.0.1
-	modernc.org/sqlite v1.60.0
+	modernc.org/sqlite v1.60.1
 )
 
 require (
