@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 
 	"github.com/samuelmolero26/droids-mem/internal/db"
@@ -308,5 +309,24 @@ func TestSave_ForceBypassesBM25(t *testing.T) {
 	}
 	if resp.Status == "skipped" {
 		t.Error("force=true should bypass BM25 check, but got skipped")
+	}
+}
+
+// TestSave_Validation_InvalidScope_SuggestionNamesDefault guards issue #210:
+// the invalid-scope suggestion must point at the real default ('personal').
+func TestSave_Validation_InvalidScope_SuggestionNamesDefault(t *testing.T) {
+	s := newTestStore(t)
+	req := validReq()
+	req.Scope = "global"
+	_, err := s.Save(context.Background(), req)
+	ve := mustValidationError(t, err)
+	if ve.Field != "scope" {
+		t.Fatalf("field = %q, want scope", ve.Field)
+	}
+	if !strings.Contains(ve.Suggestion, "('personal')") {
+		t.Errorf("suggestion must name the real default 'personal', got: %q", ve.Suggestion)
+	}
+	if strings.Contains(ve.Suggestion, "('shared')") {
+		t.Errorf("suggestion still names 'shared' as the default: %q", ve.Suggestion)
 	}
 }
