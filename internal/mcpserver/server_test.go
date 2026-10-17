@@ -219,3 +219,25 @@ func TestIdentityPidProof(t *testing.T) {
 		t.Fatal("pid proof is obtainable as the plain proof of nonce+\":\"+pid")
 	}
 }
+
+// TestInstructions_Budget pins the measured host cuts: Claude Code shows the
+// model only the first 2048 chars of instructions, and Codex relies on the
+// first 512 standing alone, so the core loop must fit there.
+func TestInstructions_Budget(t *testing.T) {
+	const claudeCodeCut, codexCore = 2048, 512
+	s := serverInstructions
+	if len(s) > claudeCodeCut {
+		t.Errorf("instructions are %d chars, over the %d Claude Code cut", len(s), claudeCodeCut)
+	}
+	core := s[:min(len(s), codexCore)]
+	for _, want := range []string{"mem_context", "query", "task_type = the git repo name", "mem_search", "graph_package", "graph_symbol direction=up depth=3", "transitive_callers", "mem_save", "session_summary"} {
+		if !strings.Contains(core, want) {
+			t.Errorf("core loop (first %d chars) missing %q", codexCore, want)
+		}
+	}
+	for _, want := range []string{"mem_corpus", "mem_get", "all_projects", "error_resolution", "task_pattern", "user_rule", "freshness.stale", "Never put secrets", "tags included"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("instructions missing %q", want)
+		}
+	}
+}

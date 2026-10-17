@@ -67,12 +67,12 @@ const (
 // surface. One text for every transport: the summary rule tells a hooked host
 // that staging counts, and dedupe absorbs a redundant save.
 const serverInstructions = `droids-mem is your persistent memory and code graph. Use it on your own, without being asked:
-1. At task start and on topic shifts: mem_search a short description of the task.
-2. Code in Go/Python/TS/JS: graph_package to orient, graph_symbol for source + callers/callees, before grep or reading files. Before editing a function: graph_symbol direction=up depth=3; cite transitive_callers.
+1. Task start: mem_context, task_type = the git repo name, query = a short task description. Topic shift: mem_search.
+2. Go/Python/TS/JS code: graph_package to orient, graph_symbol for source + callers/callees, before grep or reading files. Before editing a function: graph_symbol direction=up depth=3; cite transitive_callers.
 3. Learned something reusable: mem_save it.
 4. End of a run: save ONE session_summary.
 
-SEARCH: results are ranked previews; mem_get an id for the full body before relying on it. all_projects=true searches every repo. For continuity also call mem_context with task_type = the git repo name, reused verbatim every session.
+SEARCH: reuse the same task_type string every session; without a query mem_context lists only recent lessons and misses older ones. Mid-run, mem_search with that task_type; all_projects=true searches every repo. Results are ranked previews; mem_get an id for the full body before relying on it. Call mem_corpus only when you do not know which task_type this project's memories use.
 
 SAVE: kind error_resolution (problem + fix), task_pattern (repeatable approach) or user_rule (a user correction or preference). Only reusable lessons; re-saving is harmless (deduped). Reuse the session_id from the first mem_context or mem_save on every later call in the run.
 

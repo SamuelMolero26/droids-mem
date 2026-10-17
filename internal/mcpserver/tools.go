@@ -115,7 +115,7 @@ type searchArgs struct {
 
 func searchToolDef() mcp.Tool {
 	return mcp.NewTool("mem_search",
-		mcp.WithDescription(`Full-text search across stored memories ranked by BM25 with TokenOverlap re-ranking. Call this proactively at the start of a task and whenever the topic shifts — do not wait to be asked; prior fixes, decisions, and conventions live here.
+		mcp.WithDescription(`Full-text search across stored memories ranked by BM25 with TokenOverlap re-ranking. Use it mid-run, on your own: when the topic shifts or you hit a gap the start-of-task mem_context bundle did not cover (prior fixes, decisions, conventions). Pass task_type to stay in the current project. At task start call mem_context with a query instead.
 
 Each result carries a learned_preview (first 500 chars of the lesson, with a total-length marker when truncated) instead of the full body — ordering already implies relevance. Call mem_get with a result id to read the full body. Each result also carries authored_at (unix seconds, when the lesson was originally written; imported lessons predate created_at) — an old lesson about fast-moving code may be stale, so verify it against current code.
 
@@ -174,11 +174,11 @@ type contextEnvelope struct {
 
 func contextToolDef() mcp.Tool {
 	return mcp.NewTool("mem_context",
-		mcp.WithDescription("Load the two-tier orientation bundle for a task_type at the start of a Run. Call this on your own at the start of work when the project has a stable task_type (derive it from the repo or directory name and reuse the exact same string every session). Returns always-tier memories (full body) + browse-tier titles/snippets, plus a session_id to thread through subsequent mem_save calls. For code-structure questions in Go, Python, TypeScript or JavaScript repos, prefer graph_symbol/graph_package over text search."),
+		mcp.WithDescription("Load the two-tier orientation bundle for a task_type. Call this first, on your own, at the start of every task: task_type = the git repo name (reuse the exact same string every session), query = a short description of the task. Returns always-tier memories (full body) + browse-tier titles/snippets, plus a session_id to thread through subsequent mem_save calls. For code-structure questions in Go, Python, TypeScript or JavaScript repos, prefer graph_symbol/graph_package over text search."),
 		mcp.WithString("task_type", mcp.Required(),
 			mcp.Description("Workflow tag scoping the bundle.")),
 		mcp.WithString("query",
-			mcp.Description("Optional focus query for browse-tier ranking. Absent or punctuation-only ranks the tier by recency instead. Invalid with mode=refresh.")),
+			mcp.Description("Short description of the task; pass it at task start. It ranks the browse tier by relevance. Absent or punctuation-only ranks the tier by recency, which misses older lessons. Invalid with mode=refresh.")),
 		mcp.WithString("mode",
 			mcp.Description("Retrieval depth: orient (default — always tier + browse snippets), deep (always tier with all rules full + browse full bodies), refresh (always tier only, cheap mid-run re-anchor).")),
 		mcp.WithString("session_id",
@@ -261,7 +261,7 @@ type corpusResponse struct {
 
 func corpusToolDef() mcp.Tool {
 	return mcp.NewTool("mem_corpus",
-		mcp.WithDescription("Return a census of the memory corpus: task_type list with counts, kind breakdown, total memory count, and recent session_summary titles (manual + auto, newest first, each with its origin). Call this at the start of a task to discover orphaned task_types or to assess corpus health."),
+		mcp.WithDescription("Return a census of the memory corpus: task_type list with counts, kind breakdown, total memory count, and recent session_summary titles (manual + auto, newest first, each with its origin). Call this only when you do not know which task_type this project's memories use, or to assess corpus health."),
 		mcp.WithInteger("limit",
 			mcp.Description("Max recent_sessions to return (default 5, max 20)."),
 			mcp.DefaultNumber(5), mcp.Min(1), mcp.Max(20),
