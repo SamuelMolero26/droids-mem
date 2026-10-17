@@ -710,7 +710,7 @@ func validate(req *SaveRequest) (*scrub.ScrubReport, error) {
 			Field:      "scope",
 			Message:    "must be 'personal' or 'shared'",
 			Retryable:  true,
-			Suggestion: "omit scope to use the default ('shared')",
+			Suggestion: "omit scope to use the default ('personal')",
 		}
 	}
 

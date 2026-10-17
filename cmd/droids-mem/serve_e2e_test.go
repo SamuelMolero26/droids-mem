@@ -395,6 +395,46 @@ func TestServeE2E_DuplicateSaveSkipped(t *testing.T) {
 	}
 }
 
+// TestServeE2E_OmittedScopeIsPersonal guards issue #210: the mem_save schema
+// must advertise the default the store actually applies, and an omitted scope
+// must persist as 'personal' over the wire — agents trust the description.
+func TestServeE2E_OmittedScopeIsPersonal(t *testing.T) {
+	s := startServer(t)
+	defer s.stop()
+	sid := s.initSession(t)
+
+	_, resp, _ := s.jsonRPC(t, sid, s.token, map[string]any{
+		"jsonrpc": "2.0", "id": 2, "method": "tools/list",
+	})
+	var desc string
+	for _, tool := range resp["result"].(map[string]any)["tools"].([]any) {
+		tm := tool.(map[string]any)
+		if tm["name"] != "mem_save" {
+			continue
+		}
+		props := tm["inputSchema"].(map[string]any)["properties"].(map[string]any)
+		desc, _ = props["scope"].(map[string]any)["description"].(string)
+	}
+	if !strings.Contains(desc, "'personal' (default)") {
+		t.Fatalf("mem_save scope description must name 'personal' as default; got %q", desc)
+	}
+
+	saveResp := s.callTool(t, sid, "mem_save", map[string]any{
+		"kind":      "task_pattern",
+		"title":     "omitted scope probe",
+		"what":      "saved without a scope argument",
+		"learned":   "omitted scope must persist as personal",
+		"task_type": "scope_default",
+	})
+	if saveResp["status"] != "saved" {
+		t.Fatalf("save status=%v, want saved; resp=%v", saveResp["status"], saveResp)
+	}
+	got := s.callTool(t, sid, "mem_get", map[string]any{"id": saveResp["id"]})
+	if got["scope"] != "personal" {
+		t.Fatalf("omitted scope persisted as %v, want personal", got["scope"])
+	}
+}
+
 func TestServeE2E_GracefulShutdownExitsZero(t *testing.T) {
 	s := startServer(t)
 	if err := s.cmd.Process.Signal(syscall.SIGTERM); err != nil {
