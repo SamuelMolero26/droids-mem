@@ -235,7 +235,7 @@ func TestInstructions_Budget(t *testing.T) {
 			t.Errorf("core loop (first %d chars) missing %q", codexCore, want)
 		}
 	}
-	for _, want := range []string{"mem_corpus", "mem_get", "all_projects", "error_resolution", "task_pattern", "user_rule", "freshness.stale", "Never put secrets", "tags included"} {
+	for _, want := range []string{"mem_corpus", "mem_get", "all_projects", "error_resolution", "task_pattern", "user_rule", "Never put secrets", "tags included"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("instructions missing %q", want)
 		}

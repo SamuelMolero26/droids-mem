@@ -74,7 +74,7 @@ const serverInstructions = `droids-mem is your memory and code graph. Use it unp
 
 MEMORY: reuse the same task_type every session; mem_context without a query shows only recent lessons. Results are previews: mem_get an id for the full body. all_projects=true searches every repo; mem_corpus lists task_types when unsure. Kinds: error_resolution (problem + fix), task_pattern (repeatable approach), user_rule (user correction or preference). Re-saving is deduped. Reuse the first call's session_id.
 
-GRAPH: pass the project root as repo; re-query a stub's qname to expand it; 'to' returns a call path. freshness.stale: true = whole index is old; carried or stale_units = that package has old edges. Python/TS/JS edges are heuristic; verify critical findings in source.
+GRAPH: pass the project root as repo; re-query a stub's qname to expand it; 'to' returns a call path. Python/TS/JS edges are heuristic; verify critical findings in source.
 
 After each call, state its finding in one line, e.g. "Store.Save has 15 transitive callers".
 
