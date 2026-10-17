@@ -88,3 +88,13 @@ Without a query the browse tier falls back to recency: the newest rows fill both
 | `mem_context` always tier | 100% |
 
 The always tier returns the task_type's newest 5 rules regardless of the query. Search returns a rule only when the query happens to share its terms, so rules reach the agent through `mem_context`'s always tier.
+
+**Session-start protocol: before vs after** — the calls an agent makes at task start when following each version of the server instructions, on the same store and queries. Topical: the target came back from any call. Rule: a `user_rule` of the query's task_type did. Bytes: JSON size of the store responses per session start (compact search rows, context bundle), excluding the MCP envelope.
+
+| protocol | calls | topical | rule | mean bytes |
+|---|---|---|---|---|
+| old, core loop only: `mem_search` unscoped, default limit | 1 | 91% | 6% | 1458 |
+| old, full text: + `mem_context` without query | 2 | 91% | 100% | 7171 |
+| new: `mem_context` with query | 1 | 100% | 100% | 5500 |
+
+An agent that reads only the old core loop gets the cheapest response but almost never sees a standing rule, and an unscoped top 5 lets other projects' memories crowd out the target. The old full text recovers the rules only with a second call whose recency-ranked bundle adds no topical hits. One `mem_context` call with a query returns both the target and the rules, in fewer bytes than the old two-call protocol.

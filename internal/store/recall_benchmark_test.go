@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -249,6 +250,50 @@ type loadResult struct {
 	scoped5, scoped20         float64 // mem_search scoped to the query's task_type
 	ctxQuery, ctxNoQuery      float64 // mem_context browse tier
 	ruleSearch, ruleContext   float64 // a user_rule reached the agent
+	protocols                 []protocolResult
+}
+
+// protocolResult is one session-start protocol (the calls an agent following a
+// given instructions text makes) measured over all benchQueries. topical: the
+// target came back from any call; rule: a user_rule of the query's task_type
+// did; bytes: JSON size of the store responses, summed per session start.
+type protocolResult struct {
+	name          string
+	calls         int
+	topical, rule int
+	bytes         int
+}
+
+func (p *protocolResult) add(topical, rule bool, responses ...any) {
+	if topical {
+		p.topical++
+	}
+	if rule {
+		p.rule++
+	}
+	for _, r := range responses {
+		b, _ := json.Marshal(r) // plain structs: Marshal cannot fail
+		p.bytes += len(b)
+	}
+}
+
+// protocolSearchHits reports whether resp returned q's target, and a user_rule of q's
+// task_type.
+func protocolSearchHits(resp *store.SearchResponse, q benchQuery) (topical, rule bool) {
+	for _, r := range resp.Results {
+		topical = topical || r.Title == q.expect
+		rule = rule || (r.Kind == "user_rule" && r.TaskType == q.taskType)
+	}
+	return topical, rule
+}
+
+// protocolContextHits reports whether the browse tier returned q's target, and whether
+// the always tier carried a rule (it is already scoped to q's task_type).
+func protocolContextHits(resp *store.ContextResponse, q benchQuery) (topical, rule bool) {
+	for _, m := range resp.Browse {
+		topical = topical || m.Title == q.expect
+	}
+	return topical, len(resp.UserRules) > 0
 }
 
 // runLoadScenario seeds benchCorpus + distractors + rules into a fresh store and
@@ -279,6 +324,11 @@ func runLoadScenario(t *testing.T, fixtures []store.Fixture) loadResult {
 	}
 
 	var hit5, hit20, ruleSearch, ruleContext int
+	// The three session-start protocols the instructions text has prescribed:
+	// the old 512-char core alone, the old full text, and the current text.
+	oldCore := protocolResult{name: "old, core loop only: `mem_search` unscoped, default limit", calls: 1}
+	oldFull := protocolResult{name: "old, full text: + `mem_context` without query", calls: 2}
+	current := protocolResult{name: "new: `mem_context` with query", calls: 1}
 	for _, q := range benchQueries {
 		// 20 is mem_search's max page: the same slot budget as the 10+10 browse tier.
 		resp, err := s.Search(ctx, store.SearchRequest{Query: q.query, TaskType: q.taskType, Limit: 20})
@@ -308,6 +358,22 @@ func runLoadScenario(t *testing.T, fixtures []store.Fixture) loadResult {
 		if len(bundle.UserRules) > 0 {
 			ruleContext++
 		}
+
+		unscoped, err := s.Search(ctx, store.SearchRequest{Query: q.query})
+		if err != nil {
+			t.Fatalf("unscoped search: %v", err)
+		}
+		noQuery, err := s.Context(ctx, store.ContextRequest{TaskType: q.taskType, Mode: store.ModeOrient})
+		if err != nil {
+			t.Fatalf("context without query: %v", err)
+		}
+		compact := store.ToCompactSearchResponse(unscoped, "")
+		sTop, sRule := protocolSearchHits(unscoped, q)
+		nTop, nRule := protocolContextHits(noQuery, q)
+		cTop, cRule := protocolContextHits(bundle, q)
+		oldCore.add(sTop, sRule, compact)
+		oldFull.add(sTop || nTop, sRule || nRule, compact, noQuery)
+		current.add(cTop, cRule, bundle)
 	}
 
 	n := float64(len(benchQueries))
@@ -321,6 +387,7 @@ func runLoadScenario(t *testing.T, fixtures []store.Fixture) loadResult {
 		ctxNoQuery:  rep.MemContext.BrowseHitRateNoQuery,
 		ruleSearch:  float64(ruleSearch) / n,
 		ruleContext: float64(ruleContext) / n,
+		protocols:   []protocolResult{oldCore, oldFull, current},
 	}
 }
 
@@ -400,6 +467,10 @@ func TestRecallBenchmark(t *testing.T) {
 	assertFloor(t, "load: mem_context with query", load.ctxQuery, 0.95)
 	assertFloor(t, "load: scoped mem_search recall@20", load.scoped20, 0.95)
 	assertFloor(t, "load: rule recall via mem_context", load.ruleContext, 1.0)
+	n := float64(len(benchQueries))
+	current := load.protocols[len(load.protocols)-1]
+	assertFloor(t, "load: new protocol topical recall", float64(current.topical)/n, 0.95)
+	assertFloor(t, "load: new protocol rule recall", float64(current.rule)/n, 1.0)
 }
 
 func assertFloor(t *testing.T, name string, got, floor float64) {
@@ -541,6 +612,22 @@ func renderLoad(l loadResult, queries int) string {
 	fmt.Fprintf(&b, "The always tier returns the task_type's newest 5 rules regardless of the query. "+
 		"Search returns a rule only when the query happens to share its terms, so rules reach the "+
 		"agent through `mem_context`'s always tier.\n")
+
+	fmt.Fprintf(&b, "\n**Session-start protocol: before vs after** — the calls an agent makes at task "+
+		"start when following each version of the server instructions, on the same store and "+
+		"queries. Topical: the target came back from any call. Rule: a `user_rule` of the query's "+
+		"task_type did. Bytes: JSON size of the store responses per session start (compact search "+
+		"rows, context bundle), excluding the MCP envelope.\n\n")
+	fmt.Fprintf(&b, "| protocol | calls | topical | rule | mean bytes |\n|---|---|---|---|---|\n")
+	for _, p := range l.protocols {
+		fmt.Fprintf(&b, "| %s | %d | %s | %s | %d |\n", p.name, p.calls,
+			pct(float64(p.topical)/float64(queries)), pct(float64(p.rule)/float64(queries)), p.bytes/queries)
+	}
+	fmt.Fprintf(&b, "\nAn agent that reads only the old core loop gets the cheapest response but almost "+
+		"never sees a standing rule, and an unscoped top 5 lets other projects' memories crowd out "+
+		"the target. The old full text recovers the rules only with a second call whose recency-ranked "+
+		"bundle adds no topical hits. One `mem_context` call with a query returns both the target and "+
+		"the rules, in fewer bytes than the old two-call protocol.\n")
 	return b.String()
 }
 
