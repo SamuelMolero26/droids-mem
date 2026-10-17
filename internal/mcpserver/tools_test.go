@@ -308,3 +308,18 @@ func TestCorpusHandler_IncludesManualSummariesNewerThanAutos(t *testing.T) {
 		t.Errorf("recent_sessions not newest-first: %d then %d", first.CreatedAt, second.CreatedAt)
 	}
 }
+
+// TestWholeInt_Unmarshal guards integer binding on its own, for when schema
+// validation is skipped: integral encodings bind, fractional ones are refused.
+func TestWholeInt_Unmarshal(t *testing.T) {
+	for _, in := range []string{"5", "5.0", "5e0"} {
+		var w wholeInt
+		if err := json.Unmarshal([]byte(in), &w); err != nil || w != 5 {
+			t.Errorf("Unmarshal(%s) = %d, %v; want 5, nil", in, w, err)
+		}
+	}
+	var w wholeInt
+	if err := json.Unmarshal([]byte("2.5"), &w); err == nil {
+		t.Errorf("Unmarshal(2.5) = %d, nil; want an error", w)
+	}
+}

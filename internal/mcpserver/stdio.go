@@ -20,6 +20,8 @@ func newMCPServer(cfg Config, st *store.Store) *server.MCPServer {
 		server.WithToolCapabilities(true),
 		server.WithLogging(),
 		server.WithInstructions(serverInstructions),
+		server.WithInputSchemaValidation(),
+		server.WithStrictInputSchemaDefault(),
 	)
 	registerTools(s, st)
 	if cfg.Graphs != nil {
