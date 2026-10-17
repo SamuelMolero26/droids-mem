@@ -139,6 +139,7 @@ Session retention: on `session_summary` save, delete oldest if > 5 for that `tas
 8 tools: `mem_save`, `mem_search`, `mem_context`, `mem_get`, `mem_corpus` (memory) + `graph_symbol`, `graph_package`, `graph_build_wait` (code graph — signatures-first, agent passes `repo` = absolute project root).
 
 - `mem_context` mints `session_id` (stateless server — agent stores and reuses it).
+- Tool arguments are validated against each tool's input schema before the handler runs (`WithInputSchemaValidation` + `WithStrictInputSchemaDefault`): unknown keys and fractional integers are rejected as tool errors (`input schema validation failed: ...`); integer fields accept integral encodings (`5`, `5.0`, `5e0`).
 - Auth: `Authorization: Bearer <token>` on every `/mcp` request. Stdio transport (`serve --stdio`) has no port/token — the pipe is private to the spawning host; same tool surface and instructions. Claude Code shows the model only the first 2048 chars of `instructions` (measured), so rules past that never land: keep the numbered core loop in the first 512 chars and the whole string under 2048.
 - `*store.ValidationError` → MCP tool error `{error, field, message}`; other runtime errors → structured envelope `{status, error, message, retryable, suggestion}` (dominant case: transient `BEGIN IMMEDIATE` write-lock timeout).
 - SIGTERM → `http.Server.Shutdown` (10 s grace) → `db.Close`.

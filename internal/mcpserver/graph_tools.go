@@ -27,13 +27,13 @@ func registerGraphTools(s *server.MCPServer, gm *graph.Manager) {
 // ---------- graph_symbol ----------
 
 type graphSymbolArgs struct {
-	Repo      string `json:"repo"`
-	Symbol    string `json:"symbol"`
-	Direction string `json:"direction,omitempty"`
-	Depth     int    `json:"depth,omitempty"`
-	NoSource  bool   `json:"no_source,omitempty"`
-	NoTests   bool   `json:"no_tests,omitempty"`
-	To        string `json:"to,omitempty"`
+	Repo      string  `json:"repo"`
+	Symbol    string  `json:"symbol"`
+	Direction string  `json:"direction,omitempty"`
+	Depth     float64 `json:"depth,omitempty"`
+	NoSource  bool    `json:"no_source,omitempty"`
+	NoTests   bool    `json:"no_tests,omitempty"`
+	To        string  `json:"to,omitempty"`
 }
 
 func graphSymbolToolDef() mcp.Tool {
@@ -54,7 +54,7 @@ DEGRADED ANSWERS: freshness.stale is true only on a genuine build failure (I/O, 
 			mcp.Description("Which edges to follow: up (callers — who depends on this), down (callees — what this uses), both (default)."),
 			mcp.Enum("up", "down", "both"),
 		),
-		mcp.WithNumber("depth",
+		mcp.WithInteger("depth",
 			mcp.Description("Transitive hops to walk (default 1, max 5). Use direction=up with depth 3-5 for 'what breaks if I change this'."),
 			mcp.DefaultNumber(1), mcp.Min(1), mcp.Max(5),
 		),
@@ -74,7 +74,7 @@ func graphSymbolHandler(gm *graph.Manager) func(context.Context, mcp.CallToolReq
 			Repo:      a.Repo,
 			Symbol:    a.Symbol,
 			Direction: a.Direction,
-			Depth:     a.Depth,
+			Depth:     int(a.Depth),
 			To:        a.To,
 			NoSource:  a.NoSource,
 			NoTests:   a.NoTests,
@@ -127,8 +127,8 @@ const (
 )
 
 type graphBuildWaitArgs struct {
-	Repo    string `json:"repo"`
-	Timeout int    `json:"timeout,omitempty"` // seconds, default 10
+	Repo    string  `json:"repo"`
+	Timeout float64 `json:"timeout,omitempty"` // seconds, default 10
 }
 
 func graphBuildWaitToolDef() mcp.Tool {
@@ -136,7 +136,7 @@ func graphBuildWaitToolDef() mcp.Tool {
 		mcp.WithDescription("Bring the repo's graph up to date and block until that finishes, or until timeout. Attaches to a rebuild already in flight, and triggers one if the graph is stale but no build has started. Returns the final freshness state; completed: false means the timeout expired first, not that anything failed. Use after graph_symbol returns rebuilding: true."),
 		mcp.WithString("repo", mcp.Required(),
 			mcp.Description("Absolute path to the repo root (your project working directory).")),
-		mcp.WithNumber("timeout",
+		mcp.WithInteger("timeout",
 			mcp.Description("Max seconds to wait (default 10, max 60)."),
 			mcp.DefaultNumber(10), mcp.Min(1), mcp.Max(60),
 		),

@@ -5,6 +5,14 @@ All notable changes to droids-mem are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **MCP tools validate arguments against their input schema.** Unknown keys
+  (e.g. `dryRun` for `dry_run`, which used to save for real), missing required
+  fields and out-of-range values are tool errors naming the field.
+- **Integer arguments accept `5.0` and `5e0`** and reject fractional values.
+
 ## [1.3.0] — 2026-09-30
 
 Headline: a browser viewer for the code graph, leaner `mem_search` and

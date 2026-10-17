@@ -106,11 +106,11 @@ func saveHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, sav
 // ---------- mem_search ----------
 
 type searchArgs struct {
-	Query       string `json:"query"`
-	TaskType    string `json:"task_type,omitempty"`
-	Kind        string `json:"kind,omitempty"`
-	Limit       int    `json:"limit,omitempty"`
-	AllProjects bool   `json:"all_projects,omitempty"`
+	Query       string  `json:"query"`
+	TaskType    string  `json:"task_type,omitempty"`
+	Kind        string  `json:"kind,omitempty"`
+	Limit       float64 `json:"limit,omitempty"`
+	AllProjects bool    `json:"all_projects,omitempty"`
 }
 
 func searchToolDef() mcp.Tool {
@@ -130,7 +130,7 @@ When total is 0 the response carries a display-only message naming the empty sta
 			mcp.Description("Optional kind filter."),
 			mcp.Enum("error_resolution", "task_pattern", "user_rule", "session_summary"),
 		),
-		mcp.WithNumber("limit",
+		mcp.WithInteger("limit",
 			mcp.Description("Max results to return (default 5, max 20). Internal fetch is 3× this for re-ranking."),
 			mcp.DefaultNumber(5), mcp.Min(1), mcp.Max(20),
 		),
@@ -145,7 +145,7 @@ func searchHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, s
 			Query:       a.Query,
 			TaskType:    a.TaskType,
 			Kind:        a.Kind,
-			Limit:       a.Limit,
+			Limit:       int(a.Limit),
 			AllProjects: a.AllProjects,
 		})
 		if err != nil {
@@ -239,7 +239,7 @@ func getHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, getA
 // ---------- mem_corpus ----------
 
 type corpusArgs struct {
-	Limit int `json:"limit,omitempty"`
+	Limit float64 `json:"limit,omitempty"`
 }
 
 // RecentSessionStub is a lightweight summary of one session_summary memory
@@ -262,7 +262,7 @@ type corpusResponse struct {
 func corpusToolDef() mcp.Tool {
 	return mcp.NewTool("mem_corpus",
 		mcp.WithDescription("Return a census of the memory corpus: task_type list with counts, kind breakdown, total memory count, and recent session_summary titles (manual + auto, newest first, each with its origin). Call this at the start of a task to discover orphaned task_types or to assess corpus health."),
-		mcp.WithNumber("limit",
+		mcp.WithInteger("limit",
 			mcp.Description("Max recent_sessions to return (default 5, max 20)."),
 			mcp.DefaultNumber(5), mcp.Min(1), mcp.Max(20),
 		),
@@ -271,7 +271,7 @@ func corpusToolDef() mcp.Tool {
 
 func corpusHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, corpusArgs) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, _ mcp.CallToolRequest, a corpusArgs) (*mcp.CallToolResult, error) {
-		limit := a.Limit
+		limit := int(a.Limit)
 		if limit <= 0 {
 			limit = 5
 		}
