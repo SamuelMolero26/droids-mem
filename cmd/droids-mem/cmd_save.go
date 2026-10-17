@@ -89,7 +89,7 @@ func newSaveCmd(a *app) *cobra.Command {
 	cmd.Flags().StringVar(&what, "what", "", "What happened (required)")
 	cmd.Flags().StringVar(&learned, "learned", "", "What the agent should do next time (required)")
 	cmd.Flags().StringVar(&tags, "tags", "", "Space-delimited tags, e.g. \"hubspot phone field-mapping\"")
-	cmd.Flags().StringVar(&scope, "scope", "", "Memory scope: shared (default) | personal")
+	cmd.Flags().StringVar(&scope, "scope", "", "Memory scope: personal (default) | shared")
 	cmd.Flags().BoolVar(&force, "force", false, "Overwrite existing memory with same fingerprint (HITL correction)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview save without writing to DB (exit 10 on pass)")
 

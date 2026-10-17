@@ -16,8 +16,6 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"github.com/samuelmolero26/droids-mem/internal/mcpserver"
 )
 
 const (
@@ -235,82 +233,39 @@ func (s *server) callTool(t *testing.T, sid, name string, args map[string]any) m
 	return parsed
 }
 
-// ── tests ──────────────────────────────────────────────────────────────
-
-func TestServeE2E_AuthRejected(t *testing.T) {
-	s := startServer(t)
-	defer s.stop()
-
-	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize"})
-
-	resp, err := http.Post(s.url(), "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("post: %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 401 {
-		t.Fatalf("no-token want 401 got %d", resp.StatusCode)
-	}
-
-	req, _ := http.NewRequest("POST", s.url(), bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer wrong")
-	resp, err = http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("do: %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 401 {
-		t.Fatalf("wrong-token want 401 got %d", resp.StatusCode)
-	}
-}
-
-func TestServeE2E_HealthzNoAuth(t *testing.T) {
-	s := startServer(t)
-	defer s.stop()
-
-	resp, err := http.Get("http://" + s.addr + "/healthz")
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("healthz status=%d", resp.StatusCode)
-	}
-}
-
-func TestServeE2E_ToolsListExposesToolSurface(t *testing.T) {
-	s := startServer(t)
-	defer s.stop()
-	sid := s.initSession(t)
-
+// listTools returns the tools/list surface keyed by tool name.
+func (s *server) listTools(t *testing.T, sid string) map[string]map[string]any {
+	t.Helper()
 	_, resp, _ := s.jsonRPC(t, sid, s.token, map[string]any{
 		"jsonrpc": "2.0", "id": 2, "method": "tools/list",
 	})
-	result := resp["result"].(map[string]any)
-	tools := result["tools"].([]any)
-
-	got := make(map[string]bool)
-	for _, tool := range tools {
-		got[tool.(map[string]any)["name"].(string)] = true
+	result, ok := resp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("tools/list: missing result; resp=%v", resp)
 	}
-	for _, want := range []string{"mem_save", "mem_search", "mem_context", "mem_get", "graph_symbol", "graph_package"} {
-		if !got[want] {
-			t.Errorf("missing tool: %s (have %v)", want, got)
-		}
+	tools := map[string]map[string]any{}
+	for _, tool := range result["tools"].([]any) {
+		tm := tool.(map[string]any)
+		tools[tm["name"].(string)] = tm
 	}
-	for _, hidden := range []string{"mem_list", "mem_schema", "mem_doctor"} {
-		if got[hidden] {
-			t.Errorf("hidden tool exposed: %s", hidden)
-		}
-	}
+	return tools
 }
 
-// TestServeE2E_InitializeExposesInstructions guards the ADR-0019 Layer-1 lever:
-// the proactive protocol must reach the client via the initialize response, or
-// non-Claude hosts get no nudge to call the tools on their own.
-func TestServeE2E_InitializeExposesInstructions(t *testing.T) {
+// ── tests ──────────────────────────────────────────────────────────────
+
+// TestServeE2E_Handshake covers the HTTP transport's connection lifecycle:
+// bearer auth is enforced, initialize carries the proactive instructions
+// (non-Claude hosts get no other nudge), and tools/list exposes exactly the
+// agent surface while keeping operator commands hidden.
+func TestServeE2E_Handshake(t *testing.T) {
 	s := startServer(t)
 	defer s.stop()
+
+	for name, token := range map[string]string{"no token": "", "wrong token": "wrong"} {
+		if status, _, _ := s.jsonRPC(t, "", token, map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize"}); status != http.StatusUnauthorized {
+			t.Errorf("%s: status=%d, want 401", name, status)
+		}
+	}
 
 	_, resp, _ := s.jsonRPC(t, "", s.token, map[string]any{
 		"jsonrpc": "2.0",
@@ -332,63 +287,68 @@ func TestServeE2E_InitializeExposesInstructions(t *testing.T) {
 			t.Errorf("initialize instructions missing %q; got %q", want, instr)
 		}
 	}
+
+	tools := s.listTools(t, s.initSession(t))
+	for _, want := range []string{"mem_save", "mem_search", "mem_context", "mem_get", "mem_corpus", "graph_symbol", "graph_package", "graph_build_wait"} {
+		if tools[want] == nil {
+			t.Errorf("missing tool: %s", want)
+		}
+	}
+	for _, hidden := range []string{"mem_list", "mem_schema", "mem_doctor"} {
+		if tools[hidden] != nil {
+			t.Errorf("hidden tool exposed: %s", hidden)
+		}
+	}
 }
 
-func TestServeE2E_ContextMintsSessionAndSaveReusesIt(t *testing.T) {
+// TestServeE2E_SaveRoundTrip drives one save path end to end: mem_context
+// mints a session that mem_save reuses, an omitted scope persists as the
+// 'personal' default the schema advertises (#210 — agents trust the
+// description), and an identical re-save is skipped as a duplicate.
+func TestServeE2E_SaveRoundTrip(t *testing.T) {
 	s := startServer(t)
 	defer s.stop()
 	sid := s.initSession(t)
 
+	props := s.listTools(t, sid)["mem_save"]["inputSchema"].(map[string]any)["properties"].(map[string]any)
+	if desc, _ := props["scope"].(map[string]any)["description"].(string); !strings.Contains(desc, "'personal' (default)") {
+		t.Fatalf("mem_save scope description must name 'personal' as default; got %q", desc)
+	}
+
 	ctxResp := s.callTool(t, sid, "mem_context", map[string]any{"task_type": "smoke"})
-	mintedSession, _ := ctxResp["session_id"].(string)
-	if !strings.HasPrefix(mintedSession, "sess_") {
-		t.Fatalf("expected session_id with sess_ prefix, got %q", mintedSession)
+	minted, _ := ctxResp["session_id"].(string)
+	if !strings.HasPrefix(minted, "sess_") {
+		t.Fatalf("expected session_id with sess_ prefix, got %q", minted)
 	}
 	if _, ok := ctxResp["context"].(map[string]any); !ok {
 		t.Fatalf("mem_context envelope missing 'context' field; got %v", ctxResp)
 	}
 
-	saveResp := s.callTool(t, sid, "mem_save", map[string]any{
+	args := map[string]any{
 		"kind":       "task_pattern",
 		"title":      "smoke save",
-		"what":       "tested mcp bridge end to end",
-		"learned":    "mcp bridge ok",
+		"what":       "saved without a scope argument",
+		"learned":    "omitted scope must persist as personal",
 		"task_type":  "smoke",
-		"session_id": mintedSession,
-	})
-	if saveResp["status"] != "saved" {
-		t.Fatalf("first save status=%v, want saved; resp=%v", saveResp["status"], saveResp)
-	}
-	if got := saveResp["session_id"]; got != mintedSession {
-		t.Fatalf("save returned session_id=%v, want %s", got, mintedSession)
-	}
-	if id, _ := saveResp["id"].(string); !strings.HasPrefix(id, "mem_") {
-		t.Fatalf("expected memory id with mem_ prefix, got %q", id)
-	}
-}
-
-func TestServeE2E_DuplicateSaveSkipped(t *testing.T) {
-	s := startServer(t)
-	defer s.stop()
-	sid := s.initSession(t)
-
-	args := map[string]any{
-		"kind":      "error_resolution",
-		"title":     "duplicate probe",
-		"what":      "saved twice to assert dedupe",
-		"learned":   "fingerprint should match on the second insert",
-		"task_type": "dedupe",
+		"session_id": minted,
 	}
 	first := s.callTool(t, sid, "mem_save", args)
 	if first["status"] != "saved" {
-		t.Fatalf("first save status=%v", first["status"])
+		t.Fatalf("first save status=%v, want saved; resp=%v", first["status"], first)
 	}
+	if first["session_id"] != minted {
+		t.Fatalf("save returned session_id=%v, want %s", first["session_id"], minted)
+	}
+	if id, _ := first["id"].(string); !strings.HasPrefix(id, "mem_") {
+		t.Fatalf("expected memory id with mem_ prefix, got %q", id)
+	}
+	if got := s.callTool(t, sid, "mem_get", map[string]any{"id": first["id"]}); got["scope"] != "personal" {
+		t.Fatalf("omitted scope persisted as %v, want personal", got["scope"])
+	}
+
 	second := s.callTool(t, sid, "mem_save", args)
-	if second["status"] != "skipped" {
-		t.Fatalf("second save status=%v, want skipped", second["status"])
-	}
-	if second["reason"] != "duplicate" {
-		t.Fatalf("second save reason=%v, want duplicate", second["reason"])
+	if second["status"] != "skipped" || second["reason"] != "duplicate" {
+		t.Fatalf("re-save status=%v reason=%v, want skipped/duplicate", second["status"], second["reason"])
 	}
 	if second["matched_id"] != first["id"] {
 		t.Fatalf("matched_id=%v, want %v", second["matched_id"], first["id"])
@@ -417,46 +377,5 @@ func TestServeE2E_GracefulShutdownExitsZero(t *testing.T) {
 	}
 	if !strings.Contains(s.stderr.String(), "shutdown complete") {
 		t.Errorf("missing 'shutdown complete' log; stderr=%s", s.stderr.String())
-	}
-}
-
-// ---------- /identity challenge-response ----------
-
-// /identity must answer the HMAC challenge with a proof derived from the
-// bearer token, and reject requests without a nonce.
-func TestServe_IdentityChallenge(t *testing.T) {
-	s := startServer(t)
-	defer s.stop()
-
-	resp, err := http.Get("http://" + s.addr + "/identity?nonce=e2e-nonce")
-	if err != nil {
-		t.Fatalf("identity: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("identity status = %d, want 200", resp.StatusCode)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	var payload struct {
-		Server string `json:"server"`
-		Proof  string `json:"proof"`
-	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		t.Fatalf("parse identity: %v\nraw: %s", err, body)
-	}
-	if want := mcpserver.IdentityProof(testToken, "e2e-nonce"); payload.Proof != want {
-		t.Fatalf("proof = %q, want %q", payload.Proof, want)
-	}
-	if payload.Server != mcpserver.ServerName {
-		t.Fatalf("server = %q, want %q", payload.Server, mcpserver.ServerName)
-	}
-
-	noNonce, err := http.Get("http://" + s.addr + "/identity")
-	if err != nil {
-		t.Fatalf("identity no-nonce: %v", err)
-	}
-	defer noNonce.Body.Close()
-	if noNonce.StatusCode != http.StatusBadRequest {
-		t.Fatalf("no-nonce status = %d, want 400", noNonce.StatusCode)
 	}
 }

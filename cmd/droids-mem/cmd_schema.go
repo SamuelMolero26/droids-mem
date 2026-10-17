@@ -13,7 +13,7 @@ var schemaDefinitions = map[string]any{
 			{"name": "what", "type": "string", "required": true, "description": "What happened"},
 			{"name": "learned", "type": "string", "required": true, "description": "What to do next time"},
 			{"name": "tags", "type": "string", "required": false, "description": "Space-delimited tags"},
-			{"name": "scope", "type": "enum", "required": false, "values": []string{"shared", "personal"}, "default": "shared", "description": "Memory scope"},
+			{"name": "scope", "type": "enum", "required": false, "values": []string{"personal", "shared"}, "default": "personal", "description": "Memory scope"},
 			{"name": "session-id", "type": "string", "required": false, "description": "Group saves in one run (auto-generated if omitted)"},
 			{"name": "force", "type": "bool", "required": false, "default": false, "description": "Overwrite existing memory (HITL correction)"},
 			{"name": "dry-run", "type": "bool", "required": false, "default": false, "description": "Preview without writing, exits 10"},

@@ -12,6 +12,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (e.g. `dryRun` for `dry_run`, which used to save for real), missing required
   fields and out-of-range values are tool errors naming the field.
 - **Integer arguments accept `5.0` and `5e0`** and reject fractional values.
+- **`scope` docs state the real default, `personal`.** The `mem_save` schema,
+  `save --scope` help, `droids-mem schema` and the invalid-scope suggestion
+  still said `shared`, so agents skipped `scope` expecting to share and the
+  memory never reached the share pool. Runtime behavior is unchanged (#210).
 
 ## [1.3.0] — 2026-09-30
 
