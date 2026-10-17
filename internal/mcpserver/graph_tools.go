@@ -38,32 +38,29 @@ type graphSymbolArgs struct {
 
 func graphSymbolToolDef() mcp.Tool {
 	return mcp.NewTool("graph_symbol",
-		mcp.WithDescription(`Query the code graph of a Go, Python, TypeScript, or JavaScript repo (hybrid: Go resolved, mapper syntactic — see hint) anchored on one symbol — use this INSTEAD of grep/file-reading to understand code. Returns the symbol's full source plus its callers/callees as one-line signature stubs (interface dispatch resolved) and 'transitive_callers': the blast size (how many symbols transitively call it) so you know if a change is risky before walking it (set on funcs/methods only — a type/const/var omits it and the hint says how to gauge its dependents instead). depth>1 with direction=up lists that blast radius; 'to' gives the call path between two symbols. If the symbol is an INTERFACE, 'implementers' lists the concrete types that satisfy it (the exact set a method-signature change must update) with 'implementers_total'; if it is a concrete TYPE, 'satisfies' lists the interfaces it implements — use these instead of grepping for method sets. To read a stub's body, call again with its exact qname. SEARCH FALLBACK: if 'symbol' does not resolve to a name, it is treated as a task phrase and you get a relevance-ranked 'matches' menu of signatures — re-query with one of their qnames for full context. The graph auto-rebuilds when the repo changed. A package that does not type-check no longer blanks the graph: every other package is indexed fresh, and the broken one's outgoing edges are carried forward from the previous build — 'carried': true on the symbol and 'stale_units' on freshness name what rode along. A 'stale' freshness flag now means only a genuine build failure (I/O, corrupt cache), where the whole last good graph is served. A call *into* a closure is not an edge, so a callback is never reported as a caller of the function it was passed to; a call made *from* inside a closure IS an edge, attributed to the enclosing declaration.
+		mcp.WithDescription(`Code graph around one symbol in a Go (type-resolved) or Python/TS/JS (syntactic; see hint) repo; use instead of grep or reading files. Returns its source, callers/callees as one-line stubs (interface dispatch resolved), and transitive_callers, the count of transitive callers (funcs/methods only; for a type/const/var the hint says how to gauge dependents). An interface lists 'implementers' (+ implementers_total), the set a method-signature change must update; a concrete type lists the interfaces it 'satisfies'. Re-query a stub's qname for its body. An unresolved 'symbol' is treated as a task phrase and returns a ranked 'matches' menu of qnames. Rebuilds automatically when the repo changes. A call into a closure is not an edge (a callback is never a caller of the function receiving it); a call inside a closure belongs to the enclosing declaration.
 
-USAGE PATTERNS:
-- Before EDITING a function: call with direction=up depth=3 first. The transitive_callers count tells you how many symbols break if you change the interface. A high number (>10) means proceed carefully — add a layer or preserve backward compat.
-- Before READING unfamiliar code: use direction=down depth=1 to see what a function depends on, then drill callees that look relevant.
-- Call path (--to): to understand how data flows between two points, e.g. graph_symbol "Store.Save" --to "Store.Search" shows the shortest call chain.
+Before editing: direction=up depth=3; transitive_callers > 10 means add a layer or keep backward compat. Before reading: direction=down depth=1, then drill callees.
 
-DEGRADED ANSWERS: freshness.stale is true only on a genuine build failure (I/O, corrupt cache, or more than half the packages broken), where the whole last good index is served — verify critical findings against source. A single package that does not type-check degrades alone instead: 'carried': true means the queried symbol's package rode on the previous build's edges, and freshness.stale_units names those packages (capped, see stale_units_total). freshness.index_error says why a rebuild failed.`),
+DEGRADED: freshness.stale = genuine build failure (I/O, corrupt cache, or over half the packages broken); the last good index is served whole. A package failing to type-check degrades alone: 'carried': true = the symbol's package uses the previous build's edges; freshness.stale_units names those packages (capped; see stale_units_total). freshness.index_error says why a rebuild failed. Verify critical degraded findings in source.`),
 		mcp.WithString("repo", mcp.Required(),
-			mcp.Description("Absolute path to the repo root (your project working directory).")),
+			mcp.Description("Absolute path to the project root.")),
 		mcp.WithString("symbol", mcp.Required(),
-			mcp.Description("A symbol name ('Save'), receiver-qualified ('Store.Save'), or exact qname ('internal/store.Store.Save') — OR a free-text task phrase ('dedupe race on save') to search when you don't know the name.")),
+			mcp.Description("Name ('Save'), receiver-qualified ('Store.Save'), or qname ('internal/store.Store.Save'); or a task phrase ('dedupe race on save') when the name is unknown.")),
 		mcp.WithString("direction",
-			mcp.Description("Which edges to follow: up (callers — who depends on this), down (callees — what this uses), both (default)."),
+			mcp.Description("up = callers, down = callees, both (default)."),
 			mcp.Enum("up", "down", "both"),
 		),
 		mcp.WithInteger("depth",
-			mcp.Description("Transitive hops to walk (default 1, max 5). Use direction=up with depth 3-5 for 'what breaks if I change this'."),
+			mcp.Description("Transitive hops (default 1, max 5)."),
 			mcp.DefaultNumber(1), mcp.Min(1), mcp.Max(5),
 		),
 		mcp.WithString("to",
-			mcp.Description("Optional target symbol: returns the shortest call path from 'symbol' to 'to' instead of neighbors.")),
+			mcp.Description("Target symbol: return the shortest call path from 'symbol' to it instead of neighbors.")),
 		mcp.WithBoolean("no_source",
-			mcp.Description("Omit the symbol's own source body (signature + callers/callees only). Roughly halves the response for large functions; use with direction=up for 'who calls this'.")),
+			mcp.Description("Omit the symbol's source body; roughly halves large responses. Pairs with direction=up.")),
 		mcp.WithBoolean("no_tests",
-			mcp.Description("Drop _test.go callers/callees from the rows (callers_in_tests still reports how many exist). Use for 'which production code breaks'; tests are usually most of a hub's rows.")),
+			mcp.Description("Drop _test.go callers/callees (callers_in_tests still counts them). For production-only impact; tests are often most of a hub's rows.")),
 	)
 }
 
@@ -95,15 +92,11 @@ type graphPackageArgs struct {
 
 func graphPackageToolDef() mcp.Tool {
 	return mcp.NewTool("graph_package",
-		mcp.WithDescription(`Get the public surface of one package (Go, Python, TS, JS — dotted/slash/bare/dir all accepted; Python dotted module path) — exported symbols as one-line signatures with first doc lines, never bodies. Use this to orient in an area of a repo before drilling into symbols with graph_symbol.
-
-USAGE PATTERN: start with graph_package to see the lay of the land, then call graph_symbol on the symbol you need to understand. unexported_count tells you how many internal symbols exist (they are queryable by name via graph_symbol).
-
-DEGRADED ANSWERS: same semantics as graph_symbol — freshness.stale means a whole-graph fallback, while stale_units names individual packages riding on carried-forward edges. Cross-check against source when either fires.`),
+		mcp.WithDescription(`Public surface of one Go/Python/TS/JS package: exported symbols as one-line signatures with first doc line, no bodies. Use to orient before graph_symbol. unexported_count = internal symbols, queryable by name via graph_symbol. Degraded as in graph_symbol: freshness.stale = whole-graph fallback; stale_units = packages on carried-forward edges. Cross-check source when either fires.`),
 		mcp.WithString("repo", mcp.Required(),
-			mcp.Description("Absolute path to the repo root (your project working directory).")),
+			mcp.Description("Absolute path to the project root.")),
 		mcp.WithString("package", mcp.Required(),
-			mcp.Description("Package path or suffix, e.g. 'internal/store' or just 'store'.")),
+			mcp.Description("Path or suffix: slash ('internal/store'), dotted (Python module), bare ('store'), or dir.")),
 	)
 }
 
@@ -133,9 +126,9 @@ type graphBuildWaitArgs struct {
 
 func graphBuildWaitToolDef() mcp.Tool {
 	return mcp.NewTool("graph_build_wait",
-		mcp.WithDescription("Bring the repo's graph up to date and block until that finishes, or until timeout. Attaches to a rebuild already in flight, and triggers one if the graph is stale but no build has started. Returns the final freshness state; completed: false means the timeout expired first, not that anything failed. Use after graph_symbol returns rebuilding: true."),
+		mcp.WithDescription("Bring the repo's graph up to date, blocking until done or timeout. Attaches to an in-flight rebuild, or starts one if the graph is stale. Returns final freshness; completed: false means the timeout expired, not a failure. Use after graph_symbol returns rebuilding: true."),
 		mcp.WithString("repo", mcp.Required(),
-			mcp.Description("Absolute path to the repo root (your project working directory).")),
+			mcp.Description("Absolute path to the project root.")),
 		mcp.WithInteger("timeout",
 			mcp.Description("Max seconds to wait (default 10, max 60)."),
 			mcp.DefaultNumber(10), mcp.Min(1), mcp.Max(60),

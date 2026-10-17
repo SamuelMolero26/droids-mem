@@ -7,6 +7,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Session start routes to `mem_context` with a query.** The core loop sent
+  agents to `mem_search` at task start, which surfaced a standing `user_rule`
+  in only 6% of queries under load. Task start now calls `mem_context`
+  (`task_type` = repo name, `query` = task); `mem_search` covers topic shifts
+  (#216).
+- **Smaller always-sent prompt.** Server instructions shrink 1938 → 1406 chars
+  and the eight tool definitions 13.8 KB → 9.5 KB (−31%), with the same rules
+  and output semantics.
+
 ### Fixed
 - **MCP tools validate arguments against their input schema.** Unknown keys
   (e.g. `dryRun` for `dry_run`, which used to save for real), missing required
