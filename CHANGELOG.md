@@ -16,7 +16,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   total). `stale` now means only that the current source failed to build and
   the previous index is served — what the tool docs always claimed.
 
+- **`graph_build_wait` waits 30 s by default (was 10 s).** A cold build of a
+  ~1M-LOC Go tree takes ~14 s, so the old default timed out on large repos.
+  Still under the ~60 s cap some MCP hosts apply to a tool call.
+
 ### Fixed
+- **A timed-out `graph_build_wait` no longer lists every file as changed
+  after an upgrade.** While the cold build replacing a graph from an older
+  binary ran, the timeout response qualified that old graph against the
+  current files. It now reports no graph yet, the way queries already treat it.
 - **Edits under `testdata/` or a nested Go module no longer rebuild the
   graph.** The stamp walk counted directories `packages.Load("./...")` never
   loads, forcing full rebuilds that produced an identical graph. The mapper

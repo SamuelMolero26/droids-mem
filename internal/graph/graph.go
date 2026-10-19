@@ -818,7 +818,9 @@ func (m *Manager) freshnessNow(repo string) (Freshness, bool, error) {
 		return Freshness{}, false, err
 	}
 	defer release()
-	if conn == nil {
+	// Another generation's graph is never served (see ensureFresh), so it is
+	// no graph yet: qualifying it would flag every file as changed.
+	if conn == nil || !strings.HasPrefix(fresh.Stamp, currentGen+":") {
 		return Freshness{}, false, nil // no graph yet: nothing to qualify
 	}
 	m.annotate(repo, &fresh, cur)

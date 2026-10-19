@@ -170,6 +170,42 @@ func TestEnsureFresh_OtherGenerationRebuildsInsteadOfServingStale(t *testing.T) 
 	}
 }
 
+// freshnessNow is what a timed-out WaitBuild reports while the cold build that
+// replaces an other-generation graph is still running. That graph predates the
+// file_stamps census, so qualifying it flags every file as changed; it must
+// read as "no graph yet", the same as ensureFresh and openNoBuild treat it.
+func TestFreshnessNow_OtherGenerationReadsAsNoGraph(t *testing.T) {
+	repo := copyFixture(t)
+	m := managerFor(t)
+
+	if _, err := m.Index(context.Background(), repo); err != nil {
+		t.Fatal(err)
+	}
+	canon, err := canonicalRepo(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := sql.Open("sqlite", m.dbPath(canon))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(`DROP TABLE file_stamps;
+		UPDATE meta SET value = 'v00000000' || substr(value, instr(value, ':')) WHERE key = 'stamp'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh, upToDate, err := m.freshnessNow(canon)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upToDate || fresh.Stamp != "" || fresh.ChangedFilesTotal != 0 {
+		t.Fatalf("other-generation graph was qualified: upToDate=%v %+v", upToDate, fresh)
+	}
+}
+
 func TestEnsureFresh_HandleSurvivesRebuild(t *testing.T) {
 	repo := copyFixture(t)
 	m := managerFor(t)
