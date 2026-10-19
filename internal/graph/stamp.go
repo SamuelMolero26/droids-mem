@@ -87,16 +87,34 @@ var currentGen = stampGen(schema, indexedExtensions(), indexerGen)
 // skipDir reports whether a directory is excluded from the source walk.
 // Dotdirs cover .git/.venv; the rest are build output and dependency trees,
 // which are not source: walking them moves the stamp on every build, and once
-// the index covers more than .go it would index generated code.
+// the index covers more than .go it would index generated code. testdata is
+// fixtures, which packages.Load("./...") never loads either.
 func skipDir(name string) bool {
 	if strings.HasPrefix(name, ".") {
 		return true
 	}
 	switch name {
-	case "vendor", "node_modules", "dist", "build", "target", "__pycache__", "out":
+	case "vendor", "node_modules", "dist", "build", "target", "__pycache__", "out", "testdata":
 		return true
 	}
 	return false
+}
+
+// nestedModuleSkipper returns the per-directory check for a nested Go module.
+// packages.Load("./...") never loads one, so its files must not move the stamp
+// or reach the mapper. That holds only when repo is itself a module without a
+// go.work: under a workspace, or a non-Go root anchored at .git, a nested
+// go.mod dir is in-scope source.
+func nestedModuleSkipper(repo string) func(dir string) bool {
+	if !fileExists(filepath.Join(repo, "go.mod")) || fileExists(filepath.Join(repo, "go.work")) {
+		return func(string) bool { return false }
+	}
+	return func(dir string) bool { return fileExists(filepath.Join(dir, "go.mod")) }
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }
 
 // stamp fingerprints the repo's indexed source state: count, total size, and
@@ -141,12 +159,13 @@ func stamp(repo string) (string, error) {
 		maxMtime = max(maxMtime, mtime)
 		fmt.Fprintf(h, "%s\x00%d\x00%d\x00", filepath.ToSlash(rel), info.Size(), mtime)
 	}
+	nested := nestedModuleSkipper(repo)
 	err := filepath.WalkDir(repo, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil //nolint:nilerr // unreadable entries don't invalidate the walk
 		}
 		if d.IsDir() {
-			if p != repo && skipDir(d.Name()) {
+			if p != repo && (skipDir(d.Name()) || nested(p)) {
 				return fs.SkipDir
 			}
 			return nil
