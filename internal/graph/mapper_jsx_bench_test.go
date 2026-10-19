@@ -101,7 +101,7 @@ func BenchmarkBuildIndex_MapperTier_JSX(b *testing.B) {
 	ctx := b.Context()
 	b.ReportAllocs()
 	for b.Loop() {
-		if err := buildIndex(ctx, repo, dbPath, st); err != nil {
+		if err := buildIndex(ctx, repo, dbPath, snapshot{stamp: st}); err != nil {
 			b.Fatal(err)
 		}
 	}

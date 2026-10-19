@@ -107,7 +107,7 @@ func TestBuildIndex_TSImportLandsInImportsTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+	if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: st}); err != nil {
 		t.Fatalf("buildIndex: %v", err)
 	}
 
@@ -145,7 +145,7 @@ func TestBuildIndex_PythonImportLandsInImportsTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+	if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: st}); err != nil {
 		t.Fatalf("buildIndex: %v", err)
 	}
 

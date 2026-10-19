@@ -26,11 +26,9 @@ const (
 	searchHint    = "no exact symbol match; these are the closest by relevance — re-query with one qname from matches for its full body, callers, and callees"
 	maxSeeds      = 10  // search-fallback menu size
 	blastCap      = 500 // transitive-caller count sentinel (compute + number guard)
-	// staleGraphHint no longer claims the repo "no longer type-checks" — Stale
-	// also covers a benign in-flight rebuild with no failure at all (a partial
-	// build that itself succeeds is never stale; see graph.go's Freshness doc).
-	// freshness.index_error, when present, carries the real failure reason.
-	staleGraphHint = "graph is stale: serving the last good index while it updates (see freshness.index_error if the last build failed)"
+	// staleGraphHint: Stale means the current source failed to build (see
+	// graph.go's Freshness doc); a pending rebuild is flagged per row instead.
+	staleGraphHint = "graph is stale: the current source failed to build, so the last good index is served (see freshness.index_error)"
 	// The two tiers exclude tests for different reasons and leave the agent
 	// different escape hatches, so they cannot share one wording. Go indexes
 	// _test.go declarations (packages.Load Tests:true) and merely keeps them
@@ -57,8 +55,14 @@ const (
 	// retained slice is same-package-first then alphabetical — a partial slice,
 	// NOT the closest callers. callers_total/callees_total carry the real count
 	// (depth=1 only). Redirect: narrow with direction+depth=1 or graph_package.
-	truncatedHint  = "neighbor list is a partial slice at the cap (see *_total), not the closest — narrow with a single direction at depth=1, or graph_package"
-	rebuildingHint = "graph is being rebuilt asynchronously — use graph_build_wait to block until ready, or retry"
+	truncatedHint = "neighbor list is a partial slice at the cap (see *_total), not the closest — narrow with a single direction at depth=1, or graph_package"
+	// rebuildingHint is attached only when a row is changed: an answer drawn
+	// from untouched files is current and needs no wait.
+	rebuildingHint = "rows marked changed come from files edited since indexing and may be out of date; a rebuild is running — use graph_build_wait to block until ready, or retry"
+	// additionsHint covers what no row flag can: a caller or implementer added
+	// in a changed file is absent until the rebuild lands, even when every
+	// returned row is from an untouched file. %d is ChangedFilesTotal.
+	additionsHint = "%d file(s) changed since indexing, so callers/implementers added there may be missing and rows marked changed may be out of date; a rebuild is running — graph_build_wait gives complete lists"
 	// carriedHint names WHICH half of a carried answer is degraded. Carried
 	// alone is a bare fact, and the safe reading of a bare fact is to distrust
 	// the whole response — which discards a freshly-analyzed caller list, the
@@ -127,6 +131,8 @@ type Neighbor struct {
 	File      string `json:"file"`
 	Line      int    `json:"line"`
 	Depth     int    `json:"depth"`
+	// Changed: this row's file was edited since the graph was indexed.
+	Changed bool `json:"changed,omitempty"`
 }
 
 // NavigationDestination is a proven Next.js navigation outcome projected for
@@ -186,6 +192,9 @@ type SymbolResponse struct {
 	// build's carried_units set) — a partial-index honesty signal distinct
 	// from Freshness.Stale (which a successful partial build does not set).
 	Carried bool `json:"carried,omitempty"`
+	// Changed reports the queried symbol's file was edited since indexing, so
+	// its line, source, and edges may be out of date until the rebuild lands.
+	Changed bool `json:"changed,omitempty"`
 	// Precision names the queried symbol's own tier: "resolved" (Go,
 	// type-checked) or "syntactic" (mapper: FactCalls + name/containment
 	// heuristics, never type-checked). Because the two edge subgraphs are
@@ -258,6 +267,49 @@ func symbolPrecision(file string) string {
 
 // Symbol resolves and answers a symbol-anchored query against repo's graph.
 func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolResponse, error) {
+	resp, err := m.symbol(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	resp.flagChanged(req)
+	return resp, nil
+}
+
+// flagChanged marks the symbol and every neighbor row whose file changed since
+// indexing. While a rebuild is in flight it points at graph_build_wait when a
+// returned row changed, or when the answer is a caller/implementer list or
+// path — those can miss additions made in changed files, which no row flag
+// shows. A callee-only answer from untouched files is already current.
+func (r *SymbolResponse) flagChanged(req SymbolRequest) {
+	f := r.Freshness
+	if len(f.changed) == 0 {
+		return
+	}
+	anyChanged := false
+	if r.Symbol != nil && f.isChanged(r.Symbol.File) {
+		r.Changed, anyChanged = true, true
+	}
+	for _, list := range [][]Neighbor{r.Callers, r.Callees, r.Path, r.Matches, r.Implementers, r.Satisfies} {
+		for i := range list {
+			if f.isChanged(list[i].File) {
+				list[i].Changed, anyChanged = true, true
+			}
+		}
+	}
+	if !f.Rebuilding {
+		return
+	}
+	callerish := req.To != "" || r.ImplementersTotal != nil ||
+		(req.Direction != "down" && (r.TransitiveCallers != nil || len(r.Callers) > 0))
+	switch {
+	case callerish:
+		r.Hint = addHint(r.Hint, fmt.Sprintf(additionsHint, f.ChangedFilesTotal))
+	case anyChanged:
+		r.Hint = addHint(r.Hint, rebuildingHint)
+	}
+}
+
+func (m *Manager) symbol(ctx context.Context, req SymbolRequest) (*SymbolResponse, error) {
 	if strings.TrimSpace(req.Repo) == "" {
 		return nil, fmt.Errorf("repo is required: %w", ErrInvalidArgument)
 	}
@@ -382,9 +434,6 @@ func (m *Manager) Symbol(ctx context.Context, req SymbolRequest) (*SymbolRespons
 	// keep its blast-radius redirect as well as the carried caveat.
 	if resp.Carried {
 		resp.Hint = addHint(resp.Hint, carriedHint)
-	}
-	if fresh.Rebuilding {
-		resp.Hint = addHint(resp.Hint, rebuildingHint)
 	}
 	if resp.Precision == precisionSyntactic {
 		resp.Hint = addHint(resp.Hint, syntacticHint)
@@ -840,6 +889,7 @@ type PackageSymbol struct {
 	Doc       string `json:"doc,omitempty"`
 	File      string `json:"file"`
 	Line      int    `json:"line"`
+	Changed   bool   `json:"changed,omitempty"`
 }
 
 // PackageResponse answers a scope-anchored query.
@@ -985,6 +1035,24 @@ func packageDirWhere(pkg string) (string, []any) {
 // Package returns the exported surface of one package: signatures + first
 // doc line per symbol, never bodies.
 func (m *Manager) Package(ctx context.Context, req PackageRequest) (*PackageResponse, error) {
+	resp, err := m.pkgSurface(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	// Same rule as SymbolResponse.flagChanged.
+	anyChanged := false
+	for i := range resp.Symbols {
+		if resp.Freshness.isChanged(resp.Symbols[i].File) {
+			resp.Symbols[i].Changed, anyChanged = true, true
+		}
+	}
+	if anyChanged && resp.Freshness.Rebuilding {
+		resp.Hint = addHint(resp.Hint, rebuildingHint)
+	}
+	return resp, nil
+}
+
+func (m *Manager) pkgSurface(ctx context.Context, req PackageRequest) (*PackageResponse, error) {
 	if strings.TrimSpace(req.Repo) == "" {
 		return nil, fmt.Errorf("repo is required: %w", ErrInvalidArgument)
 	}
@@ -1090,12 +1158,8 @@ func packageHint(fresh Freshness, mapper bool) string {
 	if mapper {
 		limit = pkgSymbolsLimitMapper
 	}
-	var hints []string
 	if fresh.Stale {
-		hints = append(hints, staleGraphHint)
+		return staleGraphHint + "; " + limit
 	}
-	if fresh.Rebuilding {
-		hints = append(hints, rebuildingHint)
-	}
-	return strings.Join(append(hints, limit), "; ")
+	return limit
 }

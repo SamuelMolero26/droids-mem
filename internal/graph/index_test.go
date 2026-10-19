@@ -33,7 +33,7 @@ func TestHubFromTest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+	if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: st}); err != nil {
 		t.Fatalf("buildIndex: %v", err)
 	}
 
@@ -111,7 +111,7 @@ func Broken() {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+	if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: st}); err != nil {
 		t.Fatalf("buildIndex must partition around a single body-local type error, got: %v", err)
 	}
 
@@ -158,7 +158,7 @@ func Broken() {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+	if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: st}); err != nil {
 		t.Fatalf("buildIndex must partition around a single body-local type error, got: %v", err)
 	}
 
@@ -207,7 +207,7 @@ func TestBuildIndex_PersistsDispatchLabel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+	if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: st}); err != nil {
 		t.Fatalf("buildIndex: %v", err)
 	}
 	conn, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
@@ -249,7 +249,7 @@ func TestBuildIndex_PersistsCarriedUnits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := buildIndex(context.Background(), repo, dbPath, st1); err != nil {
+	if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: st1}); err != nil {
 		t.Fatalf("first (clean) buildIndex: %v", err)
 	}
 
@@ -264,7 +264,7 @@ func Broken() {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := buildIndex(context.Background(), repo, dbPath, st2); err != nil {
+	if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: st2}); err != nil {
 		t.Fatalf("second (partial) buildIndex: %v", err)
 	}
 
@@ -302,7 +302,7 @@ func TestBuildIndex_CarryForwardRecoversBrokenPackageInternalEdge(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := buildIndex(context.Background(), repo, dbPath, st1); err != nil {
+	if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: st1}); err != nil {
 		t.Fatalf("first (clean) buildIndex: %v", err)
 	}
 
@@ -317,7 +317,7 @@ func Broken() {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := buildIndex(context.Background(), repo, dbPath, st2); err != nil {
+	if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: st2}); err != nil {
 		t.Fatalf("second (partial) buildIndex: %v", err)
 	}
 

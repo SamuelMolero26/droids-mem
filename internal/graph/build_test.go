@@ -188,8 +188,8 @@ func TestEnsureFresh_HandleSurvivesRebuild(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer release()
-	if !fresh.Stale {
-		t.Fatalf("expected a stale warm-serve, got %+v", fresh)
+	if !fresh.Rebuilding {
+		t.Fatalf("expected a rebuilding warm-serve, got %+v", fresh)
 	}
 
 	// Let the async rebuild finish while we still hold the handle.
@@ -405,8 +405,10 @@ func TestWaitBuild_Timeout(t *testing.T) {
 	if resp.Completed {
 		t.Fatalf("want completed=false on timeout, got %+v", resp)
 	}
-	if !resp.Freshness.Stale || !resp.Freshness.Rebuilding {
-		t.Errorf("timeout must report stale+rebuilding, got %+v", resp.Freshness)
+	// Nothing failed, so not stale: the pending build shows as rebuilding plus
+	// the file it has yet to index.
+	if f := resp.Freshness; f.Stale || !f.Rebuilding || !slices.Equal(f.ChangedFiles, []string{"added.go"}) {
+		t.Errorf("timeout must report rebuilding + changed added.go, not stale; got %+v", f)
 	}
 	// D7: the timeout branch used to fabricate an empty Freshness, hiding the
 	// perfectly valid stamp of the graph still being served.
@@ -429,13 +431,14 @@ func TestBuildAsync_FailureServesStaleAndRecordsError(t *testing.T) {
 
 	breakMajority(t, repo)
 
-	// First query launches the doomed build and serves the old graph.
+	// First query launches the doomed build and serves the old graph. The
+	// build has not failed yet, so this is a pending rebuild, not stale.
 	resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"})
 	if err != nil {
 		t.Fatalf("degraded serve failed: %v", err)
 	}
-	if !resp.Freshness.Stale {
-		t.Errorf("want stale on a broken repo, got %+v", resp.Freshness)
+	if resp.Freshness.Stale || !resp.Freshness.Rebuilding {
+		t.Errorf("want rebuilding (not yet failed) on the first query, got %+v", resp.Freshness)
 	}
 	waitForBuild(t, m, repo, 30*time.Second)
 
@@ -449,8 +452,8 @@ func TestBuildAsync_FailureServesStaleAndRecordsError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("degraded serve failed after the build error: %v", err)
 	}
-	if resp.Freshness.IndexError == "" {
-		t.Error("IndexError should surface the type-check failure")
+	if !resp.Freshness.Stale || resp.Freshness.IndexError == "" {
+		t.Errorf("a failed build must serve stale with IndexError, got %+v", resp.Freshness)
 	}
 	if !strings.Contains(resp.Freshness.IndexError, "type-check") {
 		t.Errorf("unexpected IndexError: %q", resp.Freshness.IndexError)
@@ -463,7 +466,8 @@ func TestBuildAsync_FailureServesStaleAndRecordsError(t *testing.T) {
 // TestBuildIndex_MajorityBrokenServesPreviousGraph pins task 3.7/3.8 (spec
 // "Greater-than-50%-broken safety cap"): when more than half of the loaded
 // packages are broken, no fresh graph.db is written and the previously
-// persisted graph continues to be served with Freshness.Stale: true.
+// persisted graph continues to be served, with Freshness.Stale: true once the
+// build has failed.
 func TestBuildIndex_MajorityBrokenServesPreviousGraph(t *testing.T) {
 	repo := copyFixture(t)
 	m := managerFor(t)
@@ -476,17 +480,20 @@ func TestBuildIndex_MajorityBrokenServesPreviousGraph(t *testing.T) {
 
 	breakMajority(t, repo) // both of testmod's 2 packages: 100% > 50%
 
-	resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"})
-	if err != nil {
+	if _, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"}); err != nil {
 		t.Fatalf("degraded serve failed: %v", err)
-	}
-	if !resp.Freshness.Stale {
-		t.Errorf("want stale when a majority of packages are broken, got %+v", resp.Freshness)
 	}
 	waitForBuild(t, m, repo, 30*time.Second)
 
 	if after := graphChecksum(t, m, repo); after != before {
 		t.Error("a majority-broken build must not write a fresh graph.db")
+	}
+	resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"})
+	if err != nil {
+		t.Fatalf("degraded serve failed after the build error: %v", err)
+	}
+	if !resp.Freshness.Stale {
+		t.Errorf("want stale once the majority-broken build failed, got %+v", resp.Freshness)
 	}
 	if resp.Symbol == nil {
 		t.Error("the previous graph should still resolve symbols")
@@ -860,7 +867,7 @@ func TestCallEdges_MatchesCleanGoldenEdgeSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+	if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: st}); err != nil {
 		t.Fatalf("buildIndex: %v", err)
 	}
 	conn, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")

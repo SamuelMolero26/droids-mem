@@ -78,7 +78,7 @@ SAVE: kind error_resolution (problem + fix), task_pattern (repeatable approach) 
 
 SUMMARY: when the task is done or the user wraps up, mem_save kind=session_summary: what happened, what you learned, what comes next. Once per run; if a host hook already asked you to stage one, that counts.
 
-GRAPH: re-query a stub's exact qname to expand it; 'to' returns a call path; pass the project root as 'repo'. freshness.stale: true means the whole previous index is served; carried: true or stale_units means that package rides on old edges. Mapper-tier (Python/TS/JS) edges are heuristic. Verify critical findings against source.
+GRAPH: re-query a stub's exact qname to expand it; 'to' returns a call path; pass the project root as 'repo'. changed: true marks a result whose file was edited since indexing; freshness.stale: true means the last build failed and the previous index is served; carried: true or stale_units means that package rides on old edges. Mapper-tier (Python/TS/JS) edges are heuristic. Verify critical findings against source.
 
 After a memory or graph call, say in one line what it told you, e.g. "Store.Save has 15 transitive callers, keeping its signature".
 

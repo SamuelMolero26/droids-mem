@@ -49,7 +49,7 @@ func (m *Manager) openNoBuild(ctx context.Context, repo string) (*sql.DB, func()
 	if err != nil {
 		return nil, noopRelease, Freshness{}, err
 	}
-	current, err := m.cachedStamp(repo)
+	cur, err := m.cachedSnapshot(repo)
 	if err != nil {
 		return nil, noopRelease, Freshness{}, err
 	}
@@ -81,11 +81,7 @@ func (m *Manager) openNoBuild(ctx context.Context, repo string) (*sql.DB, func()
 		return nil, noopRelease, Freshness{}, notIndexed
 	}
 
-	m.buildsMu.Lock()
-	fresh.IndexError = m.lastBuildErrors[repo]
-	_, fresh.Rebuilding = m.builds[repo]
-	m.buildsMu.Unlock()
-	fresh.Stale = fresh.Stamp != current
+	m.annotate(repo, &fresh, cur)
 	return conn, release, fresh, nil
 }
 

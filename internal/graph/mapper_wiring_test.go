@@ -28,7 +28,7 @@ func TestBuildIndex_MapperSymbols_LandInGraphDB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+	if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: st}); err != nil {
 		t.Fatalf("buildIndex: %v", err)
 	}
 
@@ -93,7 +93,7 @@ func TestBuildIndex_MapperQNameCollisionCounted(t *testing.T) {
 	}
 
 	before := mapperQNameCollisions.Load()
-	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+	if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: st}); err != nil {
 		t.Fatalf("buildIndex: %v", err)
 	}
 	if got := mapperQNameCollisions.Load() - before; got != 1 {
@@ -164,7 +164,7 @@ func TestBuildIndex_BothTiersEmpty_HardErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := buildIndex(context.Background(), repo, dbPath, st); err == nil {
+	if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: st}); err == nil {
 		t.Fatal("buildIndex succeeded on a repo with neither Go packages nor mapper symbols, want a hard error")
 	}
 }
@@ -188,7 +188,7 @@ func TestBuildIndex_GoPackageWithZeroDecls_EmptyReasonHint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+	if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: st}); err != nil {
 		t.Fatalf("buildIndex: %v", err)
 	}
 
@@ -223,7 +223,7 @@ func TestBuildIndex_MajorityBrokenGo_MapperSymbolsStillLand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+	if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: st}); err != nil {
 		t.Fatalf("buildIndex must suppress the Go tier and still succeed via mapper symbols, got: %v", err)
 	}
 
@@ -263,7 +263,7 @@ func TestBuildIndex_MajorityBrokenGo_NoMapperContent_StillHardErrors(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := buildIndex(context.Background(), repo, dbPath, st); err == nil {
+	if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: st}); err == nil {
 		t.Fatal("buildIndex succeeded on a majority-broken Go-only repo, want the existing hard error preserved")
 	}
 }
@@ -295,7 +295,7 @@ class C:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+	if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: st}); err != nil {
 		t.Fatalf("buildIndex: %v", err)
 	}
 	conn, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")

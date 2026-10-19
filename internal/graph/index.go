@@ -96,7 +96,7 @@ var mapperQNameCollisions atomic.Uint64
 // this PR must not merge to develop standalone — it under-reports every
 // mapper caller until PR-D wires FactCalls-derived call edges on top of the
 // symbols this PR produces. Definitions and calls land together.
-func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
+func buildIndex(ctx context.Context, repo, dbPath string, snap snapshot) error {
 	buildStarts.Add(1)
 	cfg := &packages.Config{
 		Context: ctx,
@@ -367,7 +367,7 @@ func buildIndex(ctx context.Context, repo, dbPath, stampVal string) error {
 		dbPath,
 		repo,
 		module,
-		stampVal,
+		snap,
 		symbols,
 		edges,
 		impls,
@@ -799,7 +799,7 @@ func implementsEdges(pkgs []*packages.Package, byPos map[string]*symRow) map[[2]
 // carrying its own explicit precision (the imports.precision column has no
 // DDL default, unlike edges/implements). fileDirectives maps repo-relative
 // file → "client" | "server" (P3); persisted to file_directives table.
-func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string, emptyReason string, fanoutCapped, testsSkipped int, imports []importRow, fileDirectives map[string]string, navigation nextNavigationGraph) error {
+func writeGraphDB(ctx context.Context, dbPath, repo, module string, snap snapshot, symbols []*symRow, edges edgeSet, impls map[[2]int64]bool, carriedUnits []string, emptyReason string, fanoutCapped, testsSkipped int, imports []importRow, fileDirectives map[string]string, navigation nextNavigationGraph) error {
 	if err := ctx.Err(); err != nil {
 		return err // cancelled before work started
 	}
@@ -871,6 +871,18 @@ func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, sy
 				return fmt.Errorf("insert import %s -> %s: %w", r.importerFile, r.importedModule, err)
 			}
 		}
+		// The census this graph was built from, so a later query can name
+		// exactly which files changed since (Freshness.ChangedFiles).
+		fsIns, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO file_stamps (path, size, mtime) VALUES (?,?,?)`)
+		if err != nil {
+			return err
+		}
+		defer fsIns.Close()
+		for _, f := range snap.files {
+			if _, err := fsIns.ExecContext(ctx, f.path, f.size, f.mtime); err != nil {
+				return fmt.Errorf("insert file_stamp %s: %w", f.path, err)
+			}
+		}
 		dirIns, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO file_directives (file, directive) VALUES (?,?)`)
 		if err != nil {
 			return err
@@ -893,7 +905,7 @@ func writeGraphDB(ctx context.Context, dbPath, repo, module, stampVal string, sy
 			return fmt.Errorf("populate symbols_fts: %w", err)
 		}
 		for k, v := range map[string]string{
-			"stamp": stampVal, "repo": repo, "module": module, "indexed_at": time.Now().UTC().Format(time.RFC3339),
+			"stamp": snap.stamp, "repo": repo, "module": module, "indexed_at": time.Now().UTC().Format(time.RFC3339),
 			"carried_units": strings.Join(carriedUnits, "\n"),
 			"empty_reason":  emptyReason,
 			"fanout_capped": strconv.Itoa(fanoutCapped),

@@ -91,20 +91,20 @@ func acquireBuildLock(ctx context.Context, dbPath string) (func(), error) {
 // A lock failure is not fatal. Falling through to an unlocked build restores
 // exactly the previous behaviour (duplicate work, correct result) rather than
 // failing a query over a coalescing optimisation.
-func buildIndexLocked(ctx context.Context, repo, dbPath, stampVal string) error {
+func buildIndexLocked(ctx context.Context, repo, dbPath string, snap snapshot) error {
 	release, err := acquireBuildLock(ctx, dbPath)
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return buildIndex(ctx, repo, dbPath, stampVal)
+		return buildIndex(ctx, repo, dbPath, snap)
 	}
 	defer release()
 
-	if stampOnDisk(ctx, dbPath) == stampVal {
+	if stampOnDisk(ctx, dbPath) == snap.stamp {
 		return nil // another process built exactly this while we waited
 	}
-	return buildIndex(ctx, repo, dbPath, stampVal)
+	return buildIndex(ctx, repo, dbPath, snap)
 }
 
 // stampOnDisk reads meta.stamp directly from the graph db, bypassing every

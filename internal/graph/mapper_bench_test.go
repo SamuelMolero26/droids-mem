@@ -78,7 +78,7 @@ func BenchmarkBuildIndex_MapperTier(b *testing.B) {
 			ctx := context.Background()
 			b.ReportAllocs()
 			for b.Loop() {
-				if err := buildIndex(ctx, repo, dbPath, st); err != nil {
+				if err := buildIndex(ctx, repo, dbPath, snapshot{stamp: st}); err != nil {
 					b.Fatal(err)
 				}
 			}

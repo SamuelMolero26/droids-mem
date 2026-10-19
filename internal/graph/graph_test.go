@@ -19,7 +19,7 @@ func TestWriteGraphDB_CancelledCtxDoesNotPublish(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if err := writeGraphDB(ctx, dbPath, "repo", "mod", "s", nil, nil, nil, nil, "", 0, 0, nil, nil, nextNavigationGraph{}); !errors.Is(err, context.Canceled) {
+	if err := writeGraphDB(ctx, dbPath, "repo", "mod", snapshot{stamp: "s"}, nil, nil, nil, nil, "", 0, 0, nil, nil, nextNavigationGraph{}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
@@ -188,7 +188,9 @@ func TestDegradedServeOnBrokenRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Break the repo: staleness check must trip and serve the old graph stale.
+	// Break one package: the stamp moves, the old graph is served while the
+	// rebuild runs, and the edited file is named. One broken package is a
+	// partial build, not a failure, so this is not Stale.
 	if err := os.WriteFile(filepath.Join(repo, "broken_fixture.go"),
 		[]byte("package main\nfunc Bad() { undefined("), 0o600); err != nil {
 		t.Fatal(err)
@@ -198,8 +200,8 @@ func TestDegradedServeOnBrokenRepo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Symbol on broken repo: %v", err)
 	}
-	if !resp.Freshness.Stale {
-		t.Errorf("expected stale degraded serve, got %+v", resp.Freshness)
+	if f := resp.Freshness; f.Stale || !f.Rebuilding || !slices.Contains(f.ChangedFiles, "broken_fixture.go") {
+		t.Errorf("expected rebuilding serve naming broken_fixture.go, got %+v", f)
 	}
 	if resp.Symbol == nil || resp.Symbol.QName != "testmod.Announce" {
 		t.Errorf("degraded serve must still resolve symbols, got %+v", resp.Symbol)

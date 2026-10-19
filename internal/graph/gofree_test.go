@@ -183,7 +183,7 @@ func TestBuildIndex_GoFreeTree_DoesNotPanic(t *testing.T) {
 						t.Fatalf("buildIndex panicked on a Go-free tree: %v", r)
 					}
 				}()
-				if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+				if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: st}); err != nil {
 					t.Fatalf("buildIndex returned a hard error on a Go-free tree (must tolerate it, not fail): %v", err)
 				}
 			}()
@@ -209,7 +209,7 @@ func TestBuildIndex_NonEmptyGraph_NoEmptyReason(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+	if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: st}); err != nil {
 		t.Fatalf("buildIndex: %v", err)
 	}
 
@@ -241,7 +241,7 @@ func TestBuildIndex_GoFreeTree_MajorityBrokenCapNotFalselyTriggered(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+	if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: st}); err != nil {
 		t.Fatalf("buildIndex: %v (majority-broken cap must not fire on a Go-free tree)", err)
 	}
 }
