@@ -40,33 +40,33 @@ type saveArgs struct {
 
 func saveToolDef() mcp.Tool {
 	return mcp.NewTool("mem_save",
-		mcp.WithDescription("Persist a memory (lesson) for future agent runs. Call this on your own whenever you learn something reusable — a fix that worked, a repeatable approach, a user correction; do not wait to be asked. Returns the saved or matched memory id, the session_id used, and a scrub block when any sensitive content was redacted before storage."),
+		mcp.WithDescription("Save a reusable lesson, unprompted: a fix that worked, a repeatable approach, a user correction. Returns the saved or matched id, the session_id, and a scrub block if sensitive content was redacted."),
 		mcp.WithString("kind", mcp.Required(),
-			mcp.Description("Memory kind. One of: error_resolution, task_pattern, user_rule, session_summary."),
+			mcp.Description("Memory kind."),
 			mcp.Enum("error_resolution", "task_pattern", "user_rule", "session_summary"),
 		),
 		mcp.WithString("title", mcp.Required(),
-			mcp.Description("Short imperative summary of the lesson (1 line). Max 200 bytes.")),
+			mcp.Description("One-line imperative summary. Max 200 bytes.")),
 		mcp.WithString("what", mcp.Required(),
-			mcp.Description("What happened or what was attempted (factual context). Max 8192 bytes.")),
+			mcp.Description("What happened or was attempted. Max 8192 bytes.")),
 		mcp.WithString("learned", mcp.Required(),
-			mcp.Description("The reusable insight the agent should apply next time. Max 4096 bytes.")),
+			mcp.Description("The insight to apply next time. Max 4096 bytes.")),
 		mcp.WithString("task_type", mcp.Required(),
-			mcp.Description("Free-form workflow tag (e.g. 'crm_upload'). Scopes context retrieval and session_summary retention.")),
+			mcp.Description("Workflow tag, e.g. the repo name. Scopes context retrieval and session_summary retention.")),
 		mcp.WithString("tags",
-			mcp.Description("Space-delimited tokens. Max 500 bytes. Tags are stored unscrubbed — never embed secrets in them.")),
+			mcp.Description("Space-delimited tokens. Max 500 bytes. Stored unscrubbed: no secrets.")),
 		mcp.WithString("scope",
-			mcp.Description("Memory scope: 'personal' (default) or 'shared'. Only 'shared' memories enter the share pool — pass it explicitly to share."),
+			mcp.Description("'personal' (default) or 'shared'. Only 'shared' enters the share pool."),
 			mcp.Enum("personal", "shared"),
 		),
 		mcp.WithString("session_id",
-			mcp.Description("Session id from mem_context. Omit on first save in a Run to mint a new one.")),
+			mcp.Description("Session id from mem_context. Omit on a Run's first save to mint one.")),
 		mcp.WithBoolean("force",
-			mcp.Description("HITL correction: overwrite an existing memory matched by fingerprint instead of skipping.")),
+			mcp.Description("Human correction: overwrite the fingerprint-matched memory instead of skipping.")),
 		mcp.WithString("supersedes",
-			mcp.Description("Id of a memory this save replaces. The target is hard-deleted on successful insert (same kind/task_type/scope required, else no-op). Response echoes 'superseded' with the deleted id.")),
+			mcp.Description("Id of a memory this save replaces; hard-deleted on successful insert (needs same kind/task_type/scope, else no-op). Response echoes 'superseded' with that id.")),
 		mcp.WithBoolean("dry_run",
-			mcp.Description("Preview the outcome without persisting. Runs the full validate → scrub → dedupe pipeline under the real write lock, then rolls back. Response is {status:\"dry_run\", would, matched_id, reason}.")),
+			mcp.Description("Preview without persisting: full validate → scrub → dedupe under the real write lock, then rollback. Returns {status:\"dry_run\", would, matched_id, reason}.")),
 	)
 }
 
@@ -115,27 +115,23 @@ type searchArgs struct {
 
 func searchToolDef() mcp.Tool {
 	return mcp.NewTool("mem_search",
-		mcp.WithDescription(`Full-text search across stored memories ranked by BM25 with TokenOverlap re-ranking. Call this proactively at the start of a task and whenever the topic shifts — do not wait to be asked; prior fixes, decisions, and conventions live here.
+		mcp.WithDescription(`BM25 full-text search over memories, re-ranked by token overlap. Use mid-run on a topic shift or a gap mem_context missed. For code structure use graph_symbol/graph_package.
 
-Each result carries a learned_preview (first 500 chars of the lesson, with a total-length marker when truncated) instead of the full body — ordering already implies relevance. Call mem_get with a result id to read the full body. Each result also carries authored_at (unix seconds, when the lesson was originally written; imported lessons predate created_at) — an old lesson about fast-moving code may be stale, so verify it against current code.
-
-Pass all_projects=true to search across ALL task_types, not just the current project. Use this when investigating a problem that may span repos, or when you don't yet know which project owns the relevant memory. For code-structure questions in Go, Python, TypeScript or JavaScript repos, prefer graph_symbol/graph_package over text search.
-
-When total is 0 the response carries a display-only message naming the empty state (no searchable text vs no match); treat total == 0 as the machine gate and message as hint text only.`),
+Results are ranked previews: learned_preview is the first 500 chars (with a total-length marker if truncated); mem_get an id for the full body. authored_at (unix seconds) is when the lesson was written (imports predate created_at); verify old lessons against current code. On total == 0, a display-only message names the empty state; gate on total, not message.`),
 		mcp.WithString("query", mcp.Required(),
-			mcp.Description("Free-text search phrase.")),
+			mcp.Description("Search phrase.")),
 		mcp.WithString("task_type",
-			mcp.Description("Optional task_type filter. Ignored when all_projects=true.")),
+			mcp.Description("Filter to one project. Ignored when all_projects=true.")),
 		mcp.WithString("kind",
-			mcp.Description("Optional kind filter."),
+			mcp.Description("Kind filter."),
 			mcp.Enum("error_resolution", "task_pattern", "user_rule", "session_summary"),
 		),
 		mcp.WithInteger("limit",
-			mcp.Description("Max results to return (default 5, max 20). Internal fetch is 3× this for re-ranking."),
+			mcp.Description("Max results (default 5, max 20)."),
 			mcp.DefaultNumber(5), mcp.Min(1), mcp.Max(20),
 		),
 		mcp.WithBoolean("all_projects",
-			mcp.Description("Search every task_type instead of filtering by the current one (default false).")),
+			mcp.Description("Search every task_type (default false): for problems spanning repos, or when the owning project is unknown.")),
 	)
 }
 
@@ -174,15 +170,15 @@ type contextEnvelope struct {
 
 func contextToolDef() mcp.Tool {
 	return mcp.NewTool("mem_context",
-		mcp.WithDescription("Load the two-tier orientation bundle for a task_type at the start of a Run. Call this on your own at the start of work when the project has a stable task_type (derive it from the repo or directory name and reuse the exact same string every session). Returns always-tier memories (full body) + browse-tier titles/snippets, plus a session_id to thread through subsequent mem_save calls. For code-structure questions in Go, Python, TypeScript or JavaScript repos, prefer graph_symbol/graph_package over text search."),
+		mcp.WithDescription("Load the orientation bundle for a task_type. Call first at every task start: task_type = the git repo name (same string every session), query = a short task description. Returns always-tier memories (full body), browse-tier titles/snippets, and a session_id for later mem_save calls."),
 		mcp.WithString("task_type", mcp.Required(),
 			mcp.Description("Workflow tag scoping the bundle.")),
 		mcp.WithString("query",
-			mcp.Description("Optional focus query for browse-tier ranking. Absent or punctuation-only ranks the tier by recency instead. Invalid with mode=refresh.")),
+			mcp.Description("Short task description; ranks the browse tier by relevance. Absent or punctuation-only ranks by recency, missing older lessons. Invalid with mode=refresh.")),
 		mcp.WithString("mode",
-			mcp.Description("Retrieval depth: orient (default — always tier + browse snippets), deep (always tier with all rules full + browse full bodies), refresh (always tier only, cheap mid-run re-anchor).")),
+			mcp.Description("orient (default: always tier + browse snippets), deep (all rules and browse bodies in full), refresh (always tier only; cheap mid-run re-anchor).")),
 		mcp.WithString("session_id",
-			mcp.Description("Optional pre-existing session_id to reuse. Omit ONLY on the first call of a Run (mints a fresh one); on any repeat call in the same Run (topic pivot, mode=refresh) pass your existing session_id back in, or the Run's memories fragment across two ids.")),
+			mcp.Description("Omit only on a Run's first call (mints one). On later calls (topic pivot, mode=refresh) pass it back, or the Run's memories split across two ids.")),
 	)
 }
 
@@ -217,7 +213,7 @@ type getArgs struct {
 
 func getToolDef() mcp.Tool {
 	return mcp.NewTool("mem_get",
-		mcp.WithDescription("Fetch the full body of a single memory by id (typically a browse-tier id returned by mem_context or a result id returned by mem_search). Use it on your own to expand a promising stub before relying on it. This is the sole full-detail escape hatch — list responses carry only previews. For code-structure questions in Go, Python, TypeScript or JavaScript repos, prefer graph_symbol/graph_package over text search."),
+		mcp.WithDescription("Fetch one memory's full body by id (a mem_context browse id or mem_search result id). Expand a stub before relying on it; list responses carry only previews."),
 		mcp.WithString("id", mcp.Required(),
 			mcp.Description("Memory id, e.g. 'mem_01J...'.")),
 	)
@@ -261,9 +257,9 @@ type corpusResponse struct {
 
 func corpusToolDef() mcp.Tool {
 	return mcp.NewTool("mem_corpus",
-		mcp.WithDescription("Return a census of the memory corpus: task_type list with counts, kind breakdown, total memory count, and recent session_summary titles (manual + auto, newest first, each with its origin). Call this at the start of a task to discover orphaned task_types or to assess corpus health."),
+		mcp.WithDescription("Corpus census: task_types with counts, kind breakdown, total, and recent session_summary titles (newest first, each with origin manual/auto). Call only when unsure which task_type this project uses, or to check corpus health."),
 		mcp.WithInteger("limit",
-			mcp.Description("Max recent_sessions to return (default 5, max 20)."),
+			mcp.Description("Max recent_sessions (default 5, max 20)."),
 			mcp.DefaultNumber(5), mcp.Min(1), mcp.Max(20),
 		),
 	)

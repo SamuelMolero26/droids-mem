@@ -2,9 +2,11 @@ package store_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -145,6 +147,250 @@ var benchQueries = []benchQuery{
 	{"build a call graph so a library package with no main still gets indexed", "Build a Go code graph with CHA, not RTA, so library repos still index", "droids-mem", "reword"},
 }
 
+// benchRules are standing user_rule memories for the load scenario: constraints
+// an agent must honour all session (commit conventions, review etiquette, tool
+// preferences), worded independently of the topical benchQueries. At most 5 per
+// task_type, so mem_context's always tier holds every one.
+var benchRules = []store.SaveRequest{
+	{TaskType: "git", Kind: "user_rule", Title: "Commit subjects follow Conventional Commits with no AI attribution",
+		What: "standing preference from the user", Learned: "write type(scope): summary subjects in the imperative and never append a Co-Authored-By trailer for an assistant"},
+	{TaskType: "git", Kind: "user_rule", Title: "Pull request descriptions stay under 200 words",
+		What: "standing preference from the user", Learned: "summarize the why in one short paragraph and link the issue; reviewers skip long descriptions"},
+	{TaskType: "concurrency", Kind: "user_rule", Title: "Prefer standard library sync primitives over third-party packages",
+		What: "standing preference from the user", Learned: "reach for sync and errgroup before adding a dependency for coordination"},
+	{TaskType: "concurrency", Kind: "user_rule", Title: "Explain design choices in review comments, not in chat",
+		What: "standing preference from the user", Learned: "leave the rationale on the pull request so it survives after the session ends"},
+	{TaskType: "runtime-panics", Kind: "user_rule", Title: "Do not use recover to silence failures in tests",
+		What: "standing preference from the user", Learned: "a recover that swallows the failure hides the defect; fix the cause and let the test fail loudly"},
+	{TaskType: "runtime-panics", Kind: "user_rule", Title: "Reproduce every bug with a failing test before fixing it",
+		What: "standing preference from the user", Learned: "write the test first, watch it fail, then change the code until it passes"},
+	{TaskType: "http-clients", Kind: "user_rule", Title: "Unit tests never touch the network",
+		What: "standing preference from the user", Learned: "stub every upstream with httptest so the suite runs offline and fast"},
+	{TaskType: "http-clients", Kind: "user_rule", Title: "Reply to every review thread before asking for re-review",
+		What: "standing preference from the user", Learned: "resolve or answer each thread so the reviewer knows what changed and why"},
+	{TaskType: "performance", Kind: "user_rule", Title: "Benchmark before and after any optimization",
+		What: "standing preference from the user", Learned: "attach go test -bench numbers to the pull request; no unmeasured speedups get merged"},
+	{TaskType: "performance", Kind: "user_rule", Title: "Prefer readable code over micro-optimizations",
+		What: "standing preference from the user", Learned: "only optimize a path that a profile shows is hot; otherwise keep the obvious version"},
+	{TaskType: "ci", Kind: "user_rule", Title: "Lint must be clean before a change is called done",
+		What: "standing preference from the user", Learned: "run golangci-lint with a five minute timeout and fix every finding, not just go vet"},
+	{TaskType: "ci", Kind: "user_rule", Title: "Never mark a job as allowed to fail",
+		What: "standing preference from the user", Learned: "a job whose failure is ignored stops being a signal; fix it or delete it"},
+	{TaskType: "droids-mem", Kind: "user_rule", Title: "Keep every change as small as possible",
+		What: "standing preference from the user", Learned: "we are a startup: handle only the most important cases and avoid speculative abstraction"},
+	{TaskType: "droids-mem", Kind: "user_rule", Title: "Use rg, fd and bat instead of grep, find and cat",
+		What: "standing preference from the user", Learned: "shell commands use the modern tools; install them with brew if they are missing"},
+}
+
+// loadDistractorsPerTaskType pads every task_type past mem_context's browse
+// window, which holds 10 error_resolution + 10 task_pattern rows
+// (browseErrorLimit + browseTaskLimit in context.go). The clean corpus has 3-4
+// rows per task_type, so there the bundle is the whole project and cannot miss.
+// 25 alternating distractors give each task_type 13 error_resolution and 12
+// task_pattern rows — more than either per-kind cap — so the bundle has to
+// choose, and a target can be left out.
+const loadDistractorsPerTaskType = 25
+
+// loadDistractors returns loadDistractorsPerTaskType memories per task_type,
+// built from that task_type's own title/what vocabulary so they are realistic
+// same-project neighbours. Word choice is deterministic index arithmetic (no
+// math/rand), so the report is reproducible.
+func loadDistractors() []store.SaveRequest {
+	var order []string
+	vocab := map[string][]string{}
+	for _, m := range benchCorpus {
+		if _, ok := vocab[m.TaskType]; !ok {
+			order = append(order, m.TaskType)
+		}
+		for _, w := range strings.Fields(strings.ToLower(m.Title + " " + m.What)) {
+			if w = strings.Trim(w, ",.:;()'\""); len(w) > 3 {
+				vocab[m.TaskType] = append(vocab[m.TaskType], w)
+			}
+		}
+	}
+
+	var out []store.SaveRequest
+	for _, tt := range order {
+		words := vocab[tt]
+		for i := range loadDistractorsPerTaskType {
+			// murmur3 fmix32 of (i, off, j): spreads picks like a seeded RNG
+			// would, so distractors stay below the near-duplicate threshold, but
+			// is fixed.
+			pick := func(n, off int) string {
+				out := make([]string, n)
+				for j := range out {
+					h := uint32(i<<12 | off<<6 | j)
+					h ^= h >> 16
+					h *= 0x85ebca6b
+					h ^= h >> 13
+					h *= 0xc2b2ae35
+					h ^= h >> 16
+					out[j] = words[h%uint32(len(words))]
+				}
+				return strings.Join(out, " ")
+			}
+			kind := "error_resolution"
+			if i%2 == 1 {
+				kind = "task_pattern"
+			}
+			out = append(out, store.SaveRequest{
+				TaskType: tt, Kind: kind,
+				Title:   fmt.Sprintf("%s note %d: %s", tt, i, pick(3, 0)),
+				What:    pick(6, 11),
+				Learned: pick(8, 23),
+			})
+		}
+	}
+	return out
+}
+
+// loadResult is the load scenario's outcome. Rates are over all benchQueries.
+type loadResult struct {
+	distractors, rules, total int
+	scoped5, scoped20         float64 // mem_search scoped to the query's task_type
+	ctxQuery, ctxNoQuery      float64 // mem_context browse tier
+	ruleSearch, ruleContext   float64 // a user_rule reached the agent
+	protocols                 []protocolResult
+}
+
+// protocolResult is one session-start protocol (the calls an agent following a
+// given instructions text makes) measured over all benchQueries. topical: the
+// target came back from any call; rule: a user_rule of the query's task_type
+// did; bytes: JSON size of the store responses, summed per session start.
+type protocolResult struct {
+	name          string
+	calls         int
+	topical, rule int
+	bytes         int
+}
+
+func (p *protocolResult) add(topical, rule bool, responses ...any) {
+	if topical {
+		p.topical++
+	}
+	if rule {
+		p.rule++
+	}
+	for _, r := range responses {
+		b, _ := json.Marshal(r) // plain structs: Marshal cannot fail
+		p.bytes += len(b)
+	}
+}
+
+// protocolSearchHits reports whether resp returned q's target, and a user_rule of q's
+// task_type.
+func protocolSearchHits(resp *store.SearchResponse, q benchQuery) (topical, rule bool) {
+	for _, r := range resp.Results {
+		topical = topical || r.Title == q.expect
+		rule = rule || (r.Kind == "user_rule" && r.TaskType == q.taskType)
+	}
+	return topical, rule
+}
+
+// protocolContextHits reports whether the browse tier returned q's target, and whether
+// the always tier carried a rule (it is already scoped to q's task_type).
+func protocolContextHits(resp *store.ContextResponse, q benchQuery) (topical, rule bool) {
+	for _, m := range resp.Browse {
+		topical = topical || m.Title == q.expect
+	}
+	return topical, len(resp.UserRules) > 0
+}
+
+// runLoadScenario seeds benchCorpus + distractors + rules into a fresh store and
+// measures the session-start call shapes against the same queries.
+func runLoadScenario(t *testing.T, fixtures []store.Fixture) loadResult {
+	t.Helper()
+	ctx := context.Background()
+	s := newTestStore(t)
+	distractors := loadDistractors()
+	seed := slices.Concat(benchCorpus, distractors, benchRules)
+	for _, m := range seed {
+		resp, err := s.Save(ctx, m)
+		if err != nil {
+			t.Fatalf("seed load scenario: %v", err)
+		}
+		// A deduped distractor silently shrinks the load; every row must land.
+		if resp.Status != "saved" {
+			t.Fatalf("seed %q not inserted: status=%s reason=%s matched=%q", m.Title, resp.Status, resp.Reason, resp.MatchedTitle)
+		}
+	}
+
+	rep, err := s.Eval(ctx, fixtures)
+	if err != nil {
+		t.Fatalf("Eval (load): %v", err)
+	}
+	if rep.Unresolved != 0 || rep.Ambiguous != 0 {
+		t.Fatalf("load fixtures out of sync: %d unresolved, %d ambiguous", rep.Unresolved, rep.Ambiguous)
+	}
+
+	var hit5, hit20, ruleSearch, ruleContext int
+	// The three session-start protocols the instructions text has prescribed:
+	// the old 512-char core alone, the old full text, and the current text.
+	oldCore := protocolResult{name: "old, core loop only: `mem_search` unscoped, default limit", calls: 1}
+	oldFull := protocolResult{name: "old, full text: + `mem_context` without query", calls: 2}
+	current := protocolResult{name: "new: `mem_context` with query", calls: 1}
+	for _, q := range benchQueries {
+		// 20 is mem_search's max page: the same slot budget as the 10+10 browse tier.
+		resp, err := s.Search(ctx, store.SearchRequest{Query: q.query, TaskType: q.taskType, Limit: 20})
+		if err != nil {
+			t.Fatalf("scoped search: %v", err)
+		}
+		ruleSeen := false
+		for i, r := range resp.Results {
+			if r.Title == q.expect {
+				hit20++
+				if i < 5 {
+					hit5++
+				}
+			}
+			if i < 5 && r.Kind == "user_rule" {
+				ruleSeen = true
+			}
+		}
+		if ruleSeen {
+			ruleSearch++
+		}
+
+		bundle, err := s.Context(ctx, store.ContextRequest{TaskType: q.taskType, Query: q.query, Mode: store.ModeOrient})
+		if err != nil {
+			t.Fatalf("context: %v", err)
+		}
+		if len(bundle.UserRules) > 0 {
+			ruleContext++
+		}
+
+		unscoped, err := s.Search(ctx, store.SearchRequest{Query: q.query})
+		if err != nil {
+			t.Fatalf("unscoped search: %v", err)
+		}
+		noQuery, err := s.Context(ctx, store.ContextRequest{TaskType: q.taskType, Mode: store.ModeOrient})
+		if err != nil {
+			t.Fatalf("context without query: %v", err)
+		}
+		compact := store.ToCompactSearchResponse(unscoped, "")
+		sTop, sRule := protocolSearchHits(unscoped, q)
+		nTop, nRule := protocolContextHits(noQuery, q)
+		cTop, cRule := protocolContextHits(bundle, q)
+		oldCore.add(sTop, sRule, compact)
+		oldFull.add(sTop || nTop, sRule || nRule, compact, noQuery)
+		current.add(cTop, cRule, bundle)
+	}
+
+	n := float64(len(benchQueries))
+	return loadResult{
+		distractors: loadDistractorsPerTaskType,
+		rules:       len(benchRules),
+		total:       len(seed),
+		scoped5:     float64(hit5) / n,
+		scoped20:    float64(hit20) / n,
+		ctxQuery:    rep.MemContext.BrowseHitRate,
+		ctxNoQuery:  rep.MemContext.BrowseHitRateNoQuery,
+		ruleSearch:  float64(ruleSearch) / n,
+		ruleContext: float64(ruleContext) / n,
+		protocols:   []protocolResult{oldCore, oldFull, current},
+	}
+}
+
 func TestRecallBenchmark(t *testing.T) {
 	s := newTestStore(t)
 	for _, m := range benchCorpus {
@@ -169,7 +415,9 @@ func TestRecallBenchmark(t *testing.T) {
 		t.Fatalf("benchmark fixtures out of sync with corpus: %d unresolved, %d ambiguous (check exact titles)", rep.Unresolved, rep.Ambiguous)
 	}
 
-	md := renderBenchmark(rep, len(benchCorpus))
+	load := runLoadScenario(t, fixtures)
+
+	md := renderBenchmark(rep, len(benchCorpus)) + renderLoad(load, len(benchQueries))
 	t.Log("\n" + md)
 
 	path := filepath.Join("..", "..", "eval", "RESULTS.md")
@@ -213,6 +461,16 @@ func TestRecallBenchmark(t *testing.T) {
 	if tm := rep.ByType["morphological"]; tm != nil {
 		assertFloor(t, "morphological recall@5", tm.RecallAt5, 0.95)
 	}
+
+	// Load-scenario floors. No floor on load.ctxNoQuery: it documents a known
+	// collapse (the no-query bundle ranks by recency), not a capability to guard.
+	assertFloor(t, "load: mem_context with query", load.ctxQuery, 0.95)
+	assertFloor(t, "load: scoped mem_search recall@20", load.scoped20, 0.95)
+	assertFloor(t, "load: rule recall via mem_context", load.ruleContext, 1.0)
+	n := float64(len(benchQueries))
+	current := load.protocols[len(load.protocols)-1]
+	assertFloor(t, "load: new protocol topical recall", float64(current.topical)/n, 0.95)
+	assertFloor(t, "load: new protocol rule recall", float64(current.rule)/n, 1.0)
 }
 
 func assertFloor(t *testing.T, name string, got, floor float64) {
@@ -319,6 +577,57 @@ func renderBenchmark(rep *store.EvalReport, corpusSize int) string {
 		fmt.Fprintf(&b, "| %s | %.2f | %s | %s | %s |\n",
 			rankStr(m.SearchRank), m.QueryTargetOverlap, class, m.Query, m.ExpectTitle)
 	}
+	return b.String()
+}
+
+// renderLoad formats the load scenario as a markdown section appended after the
+// clean-corpus report.
+func renderLoad(l loadResult, queries int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n## Session-start recall under load\n\n")
+	fmt.Fprintf(&b, "The clean corpus holds 3-4 memories per `task_type`, while `mem_context`'s browse "+
+		"tier holds up to 10 `error_resolution` + 10 `task_pattern` rows. There the bundle is the "+
+		"whole project, so the browse-tier rates above cannot fall below 100%%.\n\n")
+	fmt.Fprintf(&b, "This scenario adds %d distractors per `task_type`, built from that task_type's own "+
+		"vocabulary and alternating `error_resolution` / `task_pattern` so both per-kind caps "+
+		"overflow, plus %d standing `user_rule` memories (commit conventions, review etiquette, tool "+
+		"preferences) worded independently of the queries. %d memories in total; the same %d queries.\n\n",
+		l.distractors, l.rules, l.total, queries)
+
+	fmt.Fprintf(&b, "**Topical recall** — share of queries whose target is returned:\n\n")
+	fmt.Fprintf(&b, "| call shape | slots | hit rate |\n|---|---|---|\n")
+	fmt.Fprintf(&b, "| `mem_search` scoped to the query's task_type | 5 | %s |\n", pct(l.scoped5))
+	fmt.Fprintf(&b, "| `mem_search` scoped to the query's task_type | 20 | %s |\n", pct(l.scoped20))
+	fmt.Fprintf(&b, "| `mem_context` browse tier, with query | 20 | %s |\n", pct(l.ctxQuery))
+	fmt.Fprintf(&b, "| `mem_context` browse tier, no query | 20 | %s |\n\n", pct(l.ctxNoQuery))
+	fmt.Fprintf(&b, "Without a query the browse tier falls back to recency: the newest rows fill both "+
+		"per-kind caps and older targets are evicted. With a query the same 20 slots are ranked by "+
+		"BM25 within the task_type.\n\n")
+
+	fmt.Fprintf(&b, "**Rule recall** — share of queries for which at least one `user_rule` of the "+
+		"query's task_type reaches the agent:\n\n")
+	fmt.Fprintf(&b, "| where | rate |\n|---|---|\n")
+	fmt.Fprintf(&b, "| `mem_search` scoped, top 5 | %s |\n", pct(l.ruleSearch))
+	fmt.Fprintf(&b, "| `mem_context` always tier | %s |\n\n", pct(l.ruleContext))
+	fmt.Fprintf(&b, "The always tier returns the task_type's newest 5 rules regardless of the query. "+
+		"Search returns a rule only when the query happens to share its terms, so rules reach the "+
+		"agent through `mem_context`'s always tier.\n")
+
+	fmt.Fprintf(&b, "\n**Session-start protocol: before vs after** — the calls an agent makes at task "+
+		"start when following each version of the server instructions, on the same store and "+
+		"queries. Topical: the target came back from any call. Rule: a `user_rule` of the query's "+
+		"task_type did. Bytes: JSON size of the store responses per session start (compact search "+
+		"rows, context bundle), excluding the MCP envelope.\n\n")
+	fmt.Fprintf(&b, "| protocol | calls | topical | rule | mean bytes |\n|---|---|---|---|---|\n")
+	for _, p := range l.protocols {
+		fmt.Fprintf(&b, "| %s | %d | %s | %s | %d |\n", p.name, p.calls,
+			pct(float64(p.topical)/float64(queries)), pct(float64(p.rule)/float64(queries)), p.bytes/queries)
+	}
+	fmt.Fprintf(&b, "\nAn agent that reads only the old core loop gets the cheapest response but almost "+
+		"never sees a standing rule, and an unscoped top 5 lets other projects' memories crowd out "+
+		"the target. The old full text recovers the rules only with a second call whose recency-ranked "+
+		"bundle adds no topical hits. One `mem_context` call with a query returns both the target and "+
+		"the rules, in fewer bytes than the old two-call protocol.\n")
 	return b.String()
 }
 

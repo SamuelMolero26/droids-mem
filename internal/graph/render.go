@@ -200,7 +200,7 @@ func writeFreshness(b *strings.Builder, f Freshness) {
 	if len(f.StaleUnits) > 0 {
 		// "[N of M]" already says the list is capped and how much it hides;
 		// those packages ride on carried-forward edges from the previous build.
-		msgs = append(msgs, fmt.Sprintf("stale_units[%d of %d]: %s",
+		msgs = append(msgs, fmt.Sprintf("stale_units[%d of %d]: %s (edges carried from the previous build; verify in source)",
 			len(f.StaleUnits), f.StaleUnitsTotal, strings.Join(f.StaleUnits, ", ")))
 	}
 	// fanout_capped is a build-level partiality fact like stale_units above,
