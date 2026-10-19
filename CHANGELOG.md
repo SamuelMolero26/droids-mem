@@ -16,6 +16,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `save --scope` help, `droids-mem schema` and the invalid-scope suggestion
   still said `shared`, so agents skipped `scope` expecting to share and the
   memory never reached the share pool. Runtime behavior is unchanged (#210).
+- **`task_type_hint` no longer redirects the established slug to a stray.**
+  Saving under the majority spelling (`droids-mem`, hundreds of rows) while a
+  stray variant existed (`droids_mem`, a handful) told the agent to switch to
+  the stray. The hint now fires only when the saved slug is the minority.
 
 ## [1.3.0] — 2026-09-30
 
