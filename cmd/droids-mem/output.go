@@ -30,6 +30,19 @@ func writeJSON(v any) {
 	fmt.Fprintln(os.Stdout, string(b))
 }
 
+func writeBoundedJSON(v any, maxBytes int) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		writeError("encode_failed", "cannot encode response: "+err.Error(), false)
+		exitWith(ExitError)
+	}
+	if len(b)+1 > maxBytes {
+		writeError("response_too_large", fmt.Sprintf("encoded response exceeds %d-byte transport budget", maxBytes), false)
+		exitWith(ExitError)
+	}
+	fmt.Fprintln(os.Stdout, string(b))
+}
+
 // writeString prints a pre-rendered payload (e.g. the graph surface's TOON) to
 // stdout as-is.
 func writeString(s string) {

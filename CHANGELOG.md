@@ -7,6 +7,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Memory writes and context delivery now have explicit attention budgets.**
+  New saves cap the combined authored payload at 6 KiB, while `mem_context`
+  keeps encoded responses under 40,000 bytes through deterministic stubs and
+  categorized omissions with `mem_get` / `mem_search` recovery paths. Context
+  loading selects bounded metadata before fetching only the bodies that fit.
+
 ### Changed
 - **Session start routes to `mem_context` with a query.** The core loop sent
   agents to `mem_search` at task start, which surfaced a standing `user_rule`
@@ -28,6 +35,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `save --scope` help, `droids-mem schema` and the invalid-scope suggestion
   still said `shared`, so agents skipped `scope` expecting to share and the
   memory never reached the share pool. Runtime behavior is unchanged (#210).
+- **Failed session-summary flushes no longer delete staged recovery state.**
+  Staging validates and scrubs before replacing an earlier checkpoint; legacy
+  over-cap shared rows remain portable through a versioned import exception.
 
 ## [1.3.0] — 2026-09-30
 
