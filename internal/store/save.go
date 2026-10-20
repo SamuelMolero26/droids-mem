@@ -389,7 +389,12 @@ func nearMissTaskType(ctx context.Context, conn *sql.Conn, want string) (string,
 		if err := rows.Scan(&tt, &c); err != nil {
 			return "", err
 		}
-		if tt != want && normalizeSlug(tt) == wantNorm {
+		// Rows are count-desc: reaching want first means it is the established
+		// spelling, so any colliding slug below it is the stray, not the target.
+		if tt == want {
+			break
+		}
+		if normalizeSlug(tt) == wantNorm {
 			match = tt
 			break
 		}
