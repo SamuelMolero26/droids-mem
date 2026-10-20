@@ -66,23 +66,19 @@ const (
 // in 2048 — a rule past the cut never reaches the model on any Claude Code
 // surface. One text for every transport: the summary rule tells a hooked host
 // that staging counts, and dedupe absorbs a redundant save.
-const serverInstructions = `droids-mem is your persistent memory and code graph. Use it on your own, without being asked:
-1. At task start and on topic shifts: mem_search a short description of the task.
-2. Code in Go/Python/TS/JS: graph_package to orient, graph_symbol for source + callers/callees, before grep or reading files. Before editing a function: graph_symbol direction=up depth=3; cite transitive_callers.
+const serverInstructions = `droids-mem is your memory and code graph. Use it unprompted:
+1. Task start: mem_context, task_type = the git repo name, query = a short task description. Topic shift: mem_search.
+2. Go/Python/TS/JS code: graph_package to orient, graph_symbol for source + callers/callees, before grep or reading files. Before editing a function: graph_symbol direction=up depth=3; cite transitive_callers.
 3. Learned something reusable: mem_save it.
-4. End of a run: save ONE session_summary.
+4. Run ends: mem_save ONE session_summary (what happened, learned, next). A host hook asking you to stage one counts.
 
-SEARCH: results are ranked previews; mem_get an id for the full body before relying on it. all_projects=true searches every repo. For continuity also call mem_context with task_type = the git repo name, reused verbatim every session.
+MEMORY: reuse the same task_type every session; mem_context without a query shows only recent lessons. Results are previews: mem_get an id for the full body. all_projects=true searches every repo; mem_corpus lists task_types when unsure. Kinds: error_resolution (problem + fix), task_pattern (repeatable approach), user_rule (user correction or preference). Re-saving is deduped. Reuse the first call's session_id.
 
-SAVE: kind error_resolution (problem + fix), task_pattern (repeatable approach) or user_rule (a user correction or preference). Only reusable lessons; re-saving is harmless (deduped). Reuse the session_id from the first mem_context or mem_save on every later call in the run.
+GRAPH: pass the project root as repo; re-query a stub's qname to expand it; 'to' returns a call path. Python/TS/JS edges are heuristic; verify critical findings in source.
 
-SUMMARY: when the task is done or the user wraps up, mem_save kind=session_summary: what happened, what you learned, what comes next. Once per run; if a host hook already asked you to stage one, that counts.
+After each call, state its finding in one line, e.g. "Store.Save has 15 transitive callers".
 
-GRAPH: re-query a stub's exact qname to expand it; 'to' returns a call path; pass the project root as 'repo'. changed: true marks a result whose file was edited since indexing; freshness.stale: true means the last build failed and the previous index is served; carried: true or stale_units means that package rides on old edges. Mapper-tier (Python/TS/JS) edges are heuristic. Verify critical findings against source.
-
-After a memory or graph call, say in one line what it told you, e.g. "Store.Save has 15 transitive callers, keeping its signature".
-
-Never put secrets, API keys or tokens in any field, tags included: tags are stored unscrubbed.`
+Never put secrets in any field, tags included: they are stored unscrubbed.`
 
 // Config controls the MCP bridge server. Zero values fall back to defaults.
 type Config struct {

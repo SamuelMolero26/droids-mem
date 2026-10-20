@@ -15,10 +15,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   callees, package rows) and freshness lists `changed_files` (capped, with a
   total). `stale` now means only that the current source failed to build and
   the previous index is served — what the tool docs always claimed.
-
 - **`graph_build_wait` waits 30 s by default (was 10 s).** A cold build of a
   ~1M-LOC Go tree takes ~14 s, so the old default timed out on large repos.
   Still under the ~60 s cap some MCP hosts apply to a tool call.
+- **Session start routes to `mem_context` with a query.** The core loop sent
+  agents to `mem_search` at task start, which surfaced a standing `user_rule`
+  in only 6% of queries under load. Task start now calls `mem_context`
+  (`task_type` = repo name, `query` = task); `mem_search` covers topic shifts
+  (#216).
+- **Smaller always-sent prompt.** Server instructions shrink 1938 → 1309 chars
+  and the eight tool definitions 13.8 KB → 8.9 KB (−36%), with the same rules
+  and output semantics. Graph degradation (`stale`, `carried`, `stale_units`)
+  is no longer explained up front: responses already carry a hint when it
+  happens, and the `stale_units` line now states its consequence.
 
 ### Fixed
 - **A timed-out `graph_build_wait` no longer lists every file as changed
@@ -38,6 +47,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `save --scope` help, `droids-mem schema` and the invalid-scope suggestion
   still said `shared`, so agents skipped `scope` expecting to share and the
   memory never reached the share pool. Runtime behavior is unchanged (#210).
+- **`task_type_hint` no longer redirects the established slug to a stray.**
+  Saving under the majority spelling (`droids-mem`, hundreds of rows) while a
+  stray variant existed (`droids_mem`, a handful) told the agent to switch to
+  the stray. The hint now fires only when the saved slug is the minority.
 
 ## [1.3.0] — 2026-09-30
 

@@ -141,6 +141,11 @@ func TestRenderSymbol_StaleUnitsCappedWithHint(t *testing.T) {
 	if strings.Contains(out, "pkg005") {
 		t.Errorf("inlined a unit past the cap:\n%s", out)
 	}
+	// The line is the only place the consequence is stated; tool descriptions
+	// no longer explain stale_units.
+	if !strings.Contains(out, "edges carried from the previous build") {
+		t.Errorf("stale_units line does not state its consequence:\n%s", out)
+	}
 }
 
 // TestRenderSymbol_StaleWordingNotClaimedWithoutFailure pins task 6.8's

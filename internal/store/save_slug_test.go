@@ -40,6 +40,31 @@ func TestSave_TaskTypeHint_SeparatorNearMiss(t *testing.T) {
 	}
 }
 
+// The established slug must never be redirected to a stray spelling: saving
+// under droids-mem (the majority) while one droids_mem row exists is canonical.
+func TestSave_TaskTypeHint_DominantSlugNoHint(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.Save(ctx, ttReq("droids-mem", "Alpha lesson about caching", "cache the fetcher")); err != nil {
+		t.Fatalf("seed 1: %v", err)
+	}
+	if _, err := s.Save(ctx, ttReq("droids-mem", "Bravo lesson on retries", "backoff exponentially")); err != nil {
+		t.Fatalf("seed 2: %v", err)
+	}
+	if _, err := s.Save(ctx, ttReq("droids_mem", "Charlie lesson on indexes", "add composite index")); err != nil {
+		t.Fatalf("stray seed: %v", err)
+	}
+
+	resp, err := s.Save(ctx, ttReq("droids-mem", "Delta lesson on locks", "prefer per-account locks"))
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if resp.TaskTypeHint != "" {
+		t.Fatalf("dominant slug must not hint toward stray, got %q", resp.TaskTypeHint)
+	}
+}
+
 func TestSave_TaskTypeHint_ExactSlugNoHint(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
