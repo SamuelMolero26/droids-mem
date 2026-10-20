@@ -62,6 +62,8 @@ func TestShare_ExportOnlyShared(t *testing.T) {
 	}
 	if got := exportLines(t, s); len(got) != 1 || got[0].Title != "Shared lesson" {
 		t.Fatalf("export = %+v, want the one shared row", got)
+	} else if got[0].FormatVersion != store.CurrentSharedFormatVersion {
+		t.Errorf("format_version = %d, want %d", got[0].FormatVersion, store.CurrentSharedFormatVersion)
 	}
 }
 
@@ -97,6 +99,63 @@ not json
 	// Imported rows land shared, so they round-trip back out.
 	if out := exportLines(t, s); len(out) != 1 {
 		t.Fatalf("exported %d rows, want 1", len(out))
+	}
+}
+
+func TestShare_ImportGrandfathersLegacyCombinedPayload(t *testing.T) {
+	s := newTestStore(t)
+	legacy := store.SharedMemory{
+		Kind:     "task_pattern",
+		TaskType: "legacy_pool",
+		Title:    strings.Repeat("t", 100),
+		What:     strings.Repeat("w", 2000),
+		Learned:  strings.Repeat("l", 4096),
+		Tags:     "legacy",
+	}
+	line, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("marshal legacy row: %v", err)
+	}
+
+	res, err := s.ImportShared(context.Background(), bytes.NewReader(append(line, '\n')))
+	if err != nil {
+		t.Fatalf("import legacy row: %v", err)
+	}
+	if res.Imported != 1 || res.Skipped != 0 || res.Failed != 0 {
+		t.Fatalf("legacy import = %+v, want imported=1", res)
+	}
+
+	rows := exportLines(t, s)
+	if len(rows) != 1 || rows[0].TaskType != legacy.TaskType {
+		t.Fatalf("legacy row did not round-trip: %+v", rows)
+	}
+	if rows[0].FormatVersion != 1 {
+		t.Errorf("legacy row format_version = %d, want 1", rows[0].FormatVersion)
+	}
+}
+
+func TestShare_ImportRejectsOversizedCurrentFormatPayload(t *testing.T) {
+	s := newTestStore(t)
+	current := store.SharedMemory{
+		FormatVersion: store.CurrentSharedFormatVersion,
+		Kind:          "task_pattern",
+		TaskType:      "current_pool",
+		Title:         strings.Repeat("t", 100),
+		What:          strings.Repeat("w", 2000),
+		Learned:       strings.Repeat("l", 4096),
+		Tags:          "current",
+	}
+	line, err := json.Marshal(current)
+	if err != nil {
+		t.Fatalf("marshal current row: %v", err)
+	}
+
+	res, err := s.ImportShared(context.Background(), bytes.NewReader(append(line, '\n')))
+	if err != nil {
+		t.Fatalf("import current row: %v", err)
+	}
+	if res.Imported != 0 || res.Skipped != 0 || res.Failed != 1 {
+		t.Fatalf("current import = %+v, want failed=1", res)
 	}
 }
 

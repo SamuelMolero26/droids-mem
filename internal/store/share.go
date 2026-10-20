@@ -10,6 +10,10 @@ import (
 	"io"
 )
 
+// CurrentSharedFormatVersion distinguishes new exports, which must honor the
+// combined payload cap, from pre-cap pools that need one compatibility pass.
+const CurrentSharedFormatVersion = 2
+
 // SharedMemory is the wire shape of one exported memory (ADR-0028). It carries
 // only the content needed to reconstruct a save on another machine — no id, no
 // author, no source. The pool is anonymous by design: identity is exactly what
@@ -18,12 +22,13 @@ import (
 // lesson's age stays observable instead of being erased by re-stamping
 // created_at to the import time.
 type SharedMemory struct {
-	Kind     string `json:"kind"`
-	TaskType string `json:"task_type"`
-	Title    string `json:"title"`
-	What     string `json:"what"`
-	Learned  string `json:"learned"`
-	Tags     string `json:"tags"`
+	FormatVersion int    `json:"format_version,omitempty"`
+	Kind          string `json:"kind"`
+	TaskType      string `json:"task_type"`
+	Title         string `json:"title"`
+	What          string `json:"what"`
+	Learned       string `json:"learned"`
+	Tags          string `json:"tags"`
 	// AuthoredAt is when the lesson was originally written, floored to the UTC
 	// day by ExportShared. Truncation is idempotent, so it survives a re-export
 	// unchanged and a re-exported pool stays byte-identical across peers. Still
@@ -64,6 +69,13 @@ func (s *Store) ExportShared(ctx context.Context, w io.Writer) error {
 		// undoing the attribution removal Scrub exists to enforce. Idempotent,
 		// so a re-exported pool stays byte-identical.
 		m.AuthoredAt -= m.AuthoredAt % 86400
+		m.FormatVersion = CurrentSharedFormatVersion
+		if sharedMemoryPayloadBytes(m) > MaxMemoryPayloadBytes {
+			// Only rows already present before the cap can reach this branch;
+			// marking them legacy preserves their next import without granting
+			// the bypass to new-format peers.
+			m.FormatVersion = 1
+		}
 		if err := enc.Encode(&m); err != nil {
 			return fmt.Errorf("export write: %w", err)
 		}
@@ -107,7 +119,8 @@ type ImportResult struct {
 // stream on a line over its 64KB token cap, which a crafted pool line could
 // trigger to defeat exactly that guarantee; Reader grows to any line length, so
 // an oversized row just fails its own Unmarshal. Only a genuine store failure
-// (write-lock, disk) aborts.
+// (write-lock, disk) aborts. Rows from wire formats before version 2 retain the
+// pre-cap import behavior; version 2 and later must satisfy the combined cap.
 func (s *Store) ImportShared(ctx context.Context, r io.Reader) (ImportResult, error) {
 	var res ImportResult
 	br := bufio.NewReader(r)
@@ -137,13 +150,14 @@ func (s *Store) importLine(ctx context.Context, line []byte, res *ImportResult) 
 		return nil   //nolint:nilerr // intentional: malformed row tallied in Failed
 	}
 	resp, err := s.Save(ctx, SaveRequest{
-		TaskType: m.TaskType,
-		Kind:     m.Kind,
-		Title:    m.Title,
-		What:     m.What,
-		Learned:  m.Learned,
-		Tags:     m.Tags,
-		Scope:    "shared",
+		TaskType:              m.TaskType,
+		Kind:                  m.Kind,
+		Title:                 m.Title,
+		What:                  m.What,
+		Learned:               m.Learned,
+		Tags:                  m.Tags,
+		Scope:                 "shared",
+		allowOversizedPayload: m.FormatVersion < CurrentSharedFormatVersion,
 		// Carry the peer's origin date so it stays observable across the
 		// import boundary. Save clamps it (the pool is a trust boundary) —
 		// see resolveAuthoredAt.
@@ -164,6 +178,10 @@ func (s *Store) importLine(ctx context.Context, line []byte, res *ImportResult) 
 		res.Imported++
 	}
 	return nil
+}
+
+func sharedMemoryPayloadBytes(memory SharedMemory) int {
+	return len(memory.Title) + len(memory.What) + len(memory.Learned) + len(memory.Tags)
 }
 
 // SetScope flips one memory's scope by id (the `share`/`unshare` grant,
