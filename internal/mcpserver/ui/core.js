@@ -133,7 +133,7 @@ DM.setBadges = function (f, o) {
     box.append(b);
   };
   if (o.syntactic) add('warn', 'approximate', 'Heuristic (syntactic) edges, not type-checked');
-  if (f.stale) add('warn', 'stale', 'Sources changed since the graph was built');
+  if (f.stale || f.changed_files_total) add('warn', f.stale ? 'stale' : 'changed', 'Sources changed since the graph was built');
   if (f.rebuilding) add('info', 'rebuilding');
   if (o.carried || f.stale_units_total) add('warn', 'carried', 'Some packages use edges carried from an earlier build');
   if (f.index_error) add('bad', 'index error', f.index_error);

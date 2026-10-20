@@ -129,7 +129,7 @@ func buildImportTestDB(t *testing.T, repo string) *sql.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+	if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: st}); err != nil {
 		t.Fatalf("buildIndex: %v", err)
 	}
 	conn, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")

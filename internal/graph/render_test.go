@@ -149,10 +149,8 @@ func TestRenderSymbol_StaleUnitsCappedWithHint(t *testing.T) {
 }
 
 // TestRenderSymbol_StaleWordingNotClaimedWithoutFailure pins task 6.8's
-// reword: a Stale freshness with NO IndexError (a benign in-flight rebuild,
-// which is what a successful partial build looks like mid-async-rebuild)
-// must not claim "no longer type-checks" — that phrase is reserved for a
-// genuine recorded build failure (IndexError present).
+// reword: a Stale freshness with NO IndexError must not claim "no longer
+// type-checks" — the render only quotes a reason it actually has.
 func TestRenderSymbol_StaleWordingNotClaimedWithoutFailure(t *testing.T) {
 	r := &SymbolResponse{Repo: "/repo", Freshness: Freshness{Stamp: "v1", Stale: true, Rebuilding: true}}
 	out := RenderSymbol(r)

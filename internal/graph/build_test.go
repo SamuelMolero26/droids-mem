@@ -170,6 +170,42 @@ func TestEnsureFresh_OtherGenerationRebuildsInsteadOfServingStale(t *testing.T) 
 	}
 }
 
+// freshnessNow is what a timed-out WaitBuild reports while the cold build that
+// replaces an other-generation graph is still running. That graph predates the
+// file_stamps census, so qualifying it flags every file as changed; it must
+// read as "no graph yet", the same as ensureFresh and openNoBuild treat it.
+func TestFreshnessNow_OtherGenerationReadsAsNoGraph(t *testing.T) {
+	repo := copyFixture(t)
+	m := managerFor(t)
+
+	if _, err := m.Index(context.Background(), repo); err != nil {
+		t.Fatal(err)
+	}
+	canon, err := canonicalRepo(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := sql.Open("sqlite", m.dbPath(canon))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(`DROP TABLE file_stamps;
+		UPDATE meta SET value = 'v00000000' || substr(value, instr(value, ':')) WHERE key = 'stamp'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh, upToDate, err := m.freshnessNow(canon)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upToDate || fresh.Stamp != "" || fresh.ChangedFilesTotal != 0 {
+		t.Fatalf("other-generation graph was qualified: upToDate=%v %+v", upToDate, fresh)
+	}
+}
+
 func TestEnsureFresh_HandleSurvivesRebuild(t *testing.T) {
 	repo := copyFixture(t)
 	m := managerFor(t)
@@ -188,8 +224,8 @@ func TestEnsureFresh_HandleSurvivesRebuild(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer release()
-	if !fresh.Stale {
-		t.Fatalf("expected a stale warm-serve, got %+v", fresh)
+	if !fresh.Rebuilding {
+		t.Fatalf("expected a rebuilding warm-serve, got %+v", fresh)
 	}
 
 	// Let the async rebuild finish while we still hold the handle.
@@ -257,7 +293,7 @@ func TestSupersededBuild_ClosesDone(t *testing.T) {
 	// next ensureFresh takes the supersede branch deterministically (no real
 	// build to race against).
 	bctx, bcancel := context.WithCancel(context.Background())
-	stuck := &buildState{ctx: bctx, cancel: bcancel, stamp: "STALE-STAMP", done: make(chan struct{})}
+	stuck := &buildState{ctx: bctx, cancel: bcancel, snap: snapshot{stamp: "STALE-STAMP"}, done: make(chan struct{})}
 	m.buildsMu.Lock()
 	m.builds[canon] = stuck
 	m.buildsMu.Unlock()
@@ -390,7 +426,7 @@ func TestWaitBuild_Timeout(t *testing.T) {
 	bctx, bcancel := context.WithCancel(context.Background())
 	defer bcancel()
 	m.buildsMu.Lock()
-	m.builds[canon] = &buildState{ctx: bctx, cancel: bcancel, stamp: current, done: make(chan struct{})}
+	m.builds[canon] = &buildState{ctx: bctx, cancel: bcancel, snap: snapshot{stamp: current}, done: make(chan struct{})}
 	m.buildsMu.Unlock()
 	defer func() {
 		m.buildsMu.Lock()
@@ -405,8 +441,10 @@ func TestWaitBuild_Timeout(t *testing.T) {
 	if resp.Completed {
 		t.Fatalf("want completed=false on timeout, got %+v", resp)
 	}
-	if !resp.Freshness.Stale || !resp.Freshness.Rebuilding {
-		t.Errorf("timeout must report stale+rebuilding, got %+v", resp.Freshness)
+	// Nothing failed, so not stale: the pending build shows as rebuilding plus
+	// the file it has yet to index.
+	if f := resp.Freshness; f.Stale || !f.Rebuilding || !slices.Equal(f.ChangedFiles, []string{"added.go"}) {
+		t.Errorf("timeout must report rebuilding + changed added.go, not stale; got %+v", f)
 	}
 	// D7: the timeout branch used to fabricate an empty Freshness, hiding the
 	// perfectly valid stamp of the graph still being served.
@@ -429,13 +467,14 @@ func TestBuildAsync_FailureServesStaleAndRecordsError(t *testing.T) {
 
 	breakMajority(t, repo)
 
-	// First query launches the doomed build and serves the old graph.
+	// First query launches the doomed build and serves the old graph. The
+	// build has not failed yet, so this is a pending rebuild, not stale.
 	resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"})
 	if err != nil {
 		t.Fatalf("degraded serve failed: %v", err)
 	}
-	if !resp.Freshness.Stale {
-		t.Errorf("want stale on a broken repo, got %+v", resp.Freshness)
+	if resp.Freshness.Stale || !resp.Freshness.Rebuilding {
+		t.Errorf("want rebuilding (not yet failed) on the first query, got %+v", resp.Freshness)
 	}
 	waitForBuild(t, m, repo, 30*time.Second)
 
@@ -449,8 +488,10 @@ func TestBuildAsync_FailureServesStaleAndRecordsError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("degraded serve failed after the build error: %v", err)
 	}
-	if resp.Freshness.IndexError == "" {
-		t.Error("IndexError should surface the type-check failure")
+	// Stale is reserved for this case: the source failed to build, so nothing
+	// is rebuilding and the breaking file is still named as changed.
+	if f := resp.Freshness; !f.Stale || f.IndexError == "" || f.Rebuilding || !slices.Contains(f.ChangedFiles, "broken.go") {
+		t.Errorf("a failed build must serve stale with IndexError, no rebuild, broken.go changed; got %+v", f)
 	}
 	if !strings.Contains(resp.Freshness.IndexError, "type-check") {
 		t.Errorf("unexpected IndexError: %q", resp.Freshness.IndexError)
@@ -463,7 +504,8 @@ func TestBuildAsync_FailureServesStaleAndRecordsError(t *testing.T) {
 // TestBuildIndex_MajorityBrokenServesPreviousGraph pins task 3.7/3.8 (spec
 // "Greater-than-50%-broken safety cap"): when more than half of the loaded
 // packages are broken, no fresh graph.db is written and the previously
-// persisted graph continues to be served with Freshness.Stale: true.
+// persisted graph continues to be served, with Freshness.Stale: true once the
+// build has failed.
 func TestBuildIndex_MajorityBrokenServesPreviousGraph(t *testing.T) {
 	repo := copyFixture(t)
 	m := managerFor(t)
@@ -476,17 +518,20 @@ func TestBuildIndex_MajorityBrokenServesPreviousGraph(t *testing.T) {
 
 	breakMajority(t, repo) // both of testmod's 2 packages: 100% > 50%
 
-	resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"})
-	if err != nil {
+	if _, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"}); err != nil {
 		t.Fatalf("degraded serve failed: %v", err)
-	}
-	if !resp.Freshness.Stale {
-		t.Errorf("want stale when a majority of packages are broken, got %+v", resp.Freshness)
 	}
 	waitForBuild(t, m, repo, 30*time.Second)
 
 	if after := graphChecksum(t, m, repo); after != before {
 		t.Error("a majority-broken build must not write a fresh graph.db")
+	}
+	resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"})
+	if err != nil {
+		t.Fatalf("degraded serve failed after the build error: %v", err)
+	}
+	if !resp.Freshness.Stale {
+		t.Errorf("want stale once the majority-broken build failed, got %+v", resp.Freshness)
 	}
 	if resp.Symbol == nil {
 		t.Error("the previous graph should still resolve symbols")
@@ -801,7 +846,7 @@ func TestBuildAsync_ForeignStateWithSameStampIsIgnored(t *testing.T) {
 	// The state the manager is actually tracking.
 	lctx, lcancel := context.WithCancel(context.Background())
 	defer lcancel()
-	live := &buildState{ctx: lctx, cancel: lcancel, stamp: current, done: make(chan struct{})}
+	live := &buildState{ctx: lctx, cancel: lcancel, snap: snapshot{stamp: current}, done: make(chan struct{})}
 	m.buildsMu.Lock()
 	m.builds[canon] = live
 	m.buildsMu.Unlock()
@@ -814,7 +859,7 @@ func TestBuildAsync_ForeignStateWithSameStampIsIgnored(t *testing.T) {
 	// A stale goroutine carrying the same stamp finishes and must touch nothing.
 	octx, ocancel := context.WithCancel(context.Background())
 	ocancel()
-	m.buildAsync(&buildState{ctx: octx, cancel: ocancel, stamp: current, done: make(chan struct{})}, canon, m.dbPath(canon))
+	m.buildAsync(&buildState{ctx: octx, cancel: ocancel, snap: snapshot{stamp: current}, done: make(chan struct{})}, canon, m.dbPath(canon))
 
 	select {
 	case <-live.done:
@@ -860,7 +905,7 @@ func TestCallEdges_MatchesCleanGoldenEdgeSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+	if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: st}); err != nil {
 		t.Fatalf("buildIndex: %v", err)
 	}
 	conn, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")

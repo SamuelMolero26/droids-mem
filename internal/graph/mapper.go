@@ -76,13 +76,14 @@ func mapperFiles(repo string) ([]mapperFile, mapperStats, error) {
 	var files []mapperFile
 	repoBase := filepath.Base(repo)
 
+	nested := nestedModuleSkipper(repo)
 	err := filepath.WalkDir(repo, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			stats.readErr++
 			return nil //nolint:nilerr // an unreadable entry (e.g. a ReadDir failure on a permission-denied dir) is skip-and-continue, not fatal
 		}
 		if d.IsDir() {
-			if p != repo && skipDir(d.Name()) {
+			if p != repo && (skipDir(d.Name()) || nested(p)) {
 				return fs.SkipDir
 			}
 			return nil

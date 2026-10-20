@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -115,6 +116,14 @@ CREATE TABLE navigations (
 -- search fallback). rowid == symbols.id, so a MATCH joins straight back.
 -- Populated wholesale in writeGraphDB — the graph never updates in place, so
 -- no sync triggers are needed (unlike mem.db).
+-- The census the graph was built from (stamp.go census): one row per input
+-- file, so a query can name which files changed since indexing instead of
+-- flagging the whole graph.
+CREATE TABLE file_stamps (
+  path  TEXT PRIMARY KEY,
+  size  INTEGER NOT NULL,
+  mtime INTEGER NOT NULL
+) WITHOUT ROWID;
 CREATE VIRTUAL TABLE symbols_fts USING fts5(
   qname, name, doc, signature, tokenize='porter unicode61'
 );
@@ -132,12 +141,17 @@ var ErrInvalidArgument = errors.New("invalid argument")
 // whole 5 KB response) — StaleUnitsTotal always carries the true count.
 const staleUnitsCap = 5
 
-// Freshness is attached to every response so the agent can tell a fresh graph
-// from a stale one (ADR-0020: go/packages needs compiling code, so a mid-edit
-// repo serves the last good graph, marked stale). Stale is reserved for
-// genuine build failures (I/O errors, corrupt cache, or a graph currently
-// being rebuilt) — a partial build that itself succeeded is not stale, even
-// though some of its units carry forward edges (StaleUnits/StaleUnitsTotal).
+// Freshness is attached to every response so the agent can tell which parts of
+// an answer may be out of date. After an edit the previous graph keeps being
+// served while it rebuilds, but it is still current for every file the edit
+// did not touch, so the signal is per file: ChangedFiles names what changed
+// since indexing, and each result row carries its own Changed flag.
+//
+// Stale is reserved for the current source failing to build (type errors past
+// the majority cap, I/O, corrupt cache): the last good graph is served because
+// it cannot be replaced, and IndexError says why. A pending rebuild is not
+// stale — it is Rebuilding. A partial build that itself succeeds is not stale
+// either, though some of its units carry forward edges (StaleUnits).
 type Freshness struct {
 	Stamp      string `json:"stamp"`
 	IndexedAt  string `json:"indexed_at"`
@@ -149,6 +163,11 @@ type Freshness struct {
 	// true count even when the list is capped.
 	StaleUnits      []string `json:"stale_units,omitempty"`
 	StaleUnitsTotal int      `json:"stale_units_total,omitempty"`
+	// ChangedFiles lists the first staleUnitsCap (sorted) repo-relative paths
+	// edited, added, or deleted since the served graph was indexed;
+	// ChangedFilesTotal is the true count.
+	ChangedFiles      []string `json:"changed_files,omitempty"`
+	ChangedFilesTotal int      `json:"changed_files_total,omitempty"`
 	// EmptyReason distinguishes two legitimate non-failure outcomes from a
 	// build failure, so neither is ever confused with Stale/IndexError:
 	// "no_indexable_symbols" (a successful build that still indexed zero
@@ -173,6 +192,11 @@ type Freshness struct {
 	// as much as package ones. Zero (JSON-omitted) means nothing was skipped,
 	// which is always the case on a pure Go repo.
 	TestsSkipped int `json:"tests_skipped,omitempty"`
+	// indexed is the census the served graph was built from (file_stamps);
+	// changed is the FULL changed-file set behind ChangedFiles and the
+	// per-row Changed flags. Both unexported, never serialized.
+	indexed map[string]fileStamp
+	changed map[string]bool
 	// carriedUnits is the FULL list (unexported, never serialized) backing the
 	// per-symbol Carried flag (query.go) — membership can fall outside the
 	// capped StaleUnits list above.
@@ -190,7 +214,7 @@ type Freshness struct {
 var stampTTL = 2 * time.Second
 
 type stampEntry struct {
-	stamp   string
+	snap    snapshot
 	expires time.Time
 }
 
@@ -203,7 +227,7 @@ type stampEntry struct {
 type buildState struct {
 	ctx    context.Context
 	cancel context.CancelFunc
-	stamp  string        // the stamp value this build targets
+	snap   snapshot      // the census this build targets; its files are stored with it
 	done   chan struct{} // closed when build finishes, fails, or is superseded
 }
 
@@ -218,6 +242,11 @@ type connEntry struct {
 	refs   int
 	dead   bool // retired from the map; close once refs drops to zero
 	closed bool
+
+	// files is the db's file_stamps, loaded once: a graph.db never changes
+	// after it is published, so one read serves every query on this handle.
+	filesOnce sync.Once
+	files     map[string]fileStamp
 }
 
 // retire marks e dead and closes it if nobody holds it. Caller holds Manager.mu.
@@ -256,11 +285,10 @@ type Manager struct {
 	buildsMu sync.Mutex
 	builds   map[string]*buildState // key: canonical repo path
 
-	// lastBuildErrors holds the most recent build error per repo so the
-	// warm-serve path can surface it via Freshness.IndexError. Protected by
-	// buildsMu. A successful build deletes the entry; a failing one overwrites
-	// it. It is deliberately NOT cleared when a build starts: an agent querying
-	// mid-rebuild deserves to know why the graph went stale in the first place.
+	// lastBuildErrors holds the most recent build error per repo so a Stale
+	// serve (the current stamp is in failedStamps) can surface it via
+	// Freshness.IndexError. Protected by buildsMu. A successful build deletes
+	// the entry; a failing one overwrites it.
 	lastBuildErrors map[string]string
 
 	// failedStamps records, per repo, the stamp whose build failed. While the
@@ -310,7 +338,7 @@ func (m *Manager) Close() {
 // superseded by a newer one (stamp changed during the build), the result is
 // discarded (ensureFresh already cancelled the old build's context).
 func (m *Manager) buildAsync(bs *buildState, repo, path string) {
-	buildErr := buildIndexLocked(bs.ctx, repo, path, bs.stamp)
+	buildErr := buildIndexLocked(bs.ctx, repo, path, bs.snap)
 
 	// Registered BEFORE the Unlock defer so LIFO runs it AFTER the unlock: the
 	// sweep walks the cache directory and must never hold buildsMu across that
@@ -341,7 +369,7 @@ func (m *Manager) buildAsync(bs *buildState, repo, path string) {
 		// remember which source failed so ensureFresh stops relaunching an
 		// identical doomed build on every subsequent query.
 		m.lastBuildErrors[repo] = buildErr.Error()
-		m.failedStamps[repo] = bs.stamp
+		m.failedStamps[repo] = bs.snap.stamp
 		delete(m.builds, repo)
 		close(bs.done)
 		bs.cancel()
@@ -542,13 +570,14 @@ func cacheDirName(repo string) string {
 // unopenable graph.db lands here too (open reports conn==nil), which silently
 // self-heals a corrupt file by rebuilding it.
 //
-// Warm-serve (stale graph exists): the rebuild launches asynchronously on a
-// background context — it outlives the request that noticed the staleness — and
-// the caller gets the stale graph back with Freshness.{Stale,Rebuilding} set.
+// Warm-serve (outdated graph exists): the rebuild launches asynchronously on a
+// background context — it outlives the request that noticed the change — and
+// the caller gets the previous graph back with Freshness.Rebuilding set and
+// ChangedFiles naming what it does not reflect yet.
 // The next query either finds the fresh graph or continues warm-serving. A
 // caller that wants to wait for the async build can call WaitBuild.
 //
-// A stamp whose build already failed is served stale WITHOUT relaunching: the
+// A stamp whose build already failed is served Stale WITHOUT relaunching: the
 // same source would fail the same way, and a broken tree is exactly when an
 // agent queries most.
 func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, func(), Freshness, error) {
@@ -561,11 +590,12 @@ func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, func()
 		return nil, noopRelease, Freshness{}, err
 	}
 
-	current, err := m.cachedStamp(repo)
+	cur, err := m.cachedSnapshot(repo)
 	if err != nil {
 		releaseLock(lock)
 		return nil, noopRelease, Freshness{}, err
 	}
+	current := cur.stamp
 	path := m.dbPath(repo)
 
 	conn, release, fresh, err := m.open(path)
@@ -604,7 +634,7 @@ func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, func()
 			return nil, noopRelease, Freshness{}, fmt.Errorf("index %s: %s", repo, why)
 		}
 		done := make(chan error, 1) // buffered: the build never blocks on a gone caller
-		go func() { done <- buildIndexLocked(context.WithoutCancel(ctx), repo, path, current) }()
+		go func() { done <- buildIndexLocked(context.WithoutCancel(ctx), repo, path, cur) }()
 
 		var buildErr error
 		select {
@@ -633,17 +663,16 @@ func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, func()
 		return conn, release, fresh, nil
 	}
 
-	// Warm-serve: graph exists but stamp mismatched
+	// Warm-serve: graph exists but stamp mismatched. It is still current for
+	// every file the census did not change, so name the changes rather than
+	// flagging the whole graph.
+	fresh.markChanged(cur.files)
 	m.buildsMu.Lock()
-	lastErr := m.lastBuildErrors[repo]
 	bs, building := m.builds[repo]
-	if building && bs.stamp == current {
-		// Same-stamp build already running — attach and return stale.
-		// If the previous build failed, surface the error even while retrying.
+	if building && bs.snap.stamp == current {
+		// Same-stamp build already running — attach and serve the previous graph.
 		m.buildsMu.Unlock()
-		fresh.Stale = true
 		fresh.Rebuilding = true
-		fresh.IndexError = lastErr
 		releaseLock(lock)
 		return conn, release, fresh, nil
 	}
@@ -658,12 +687,13 @@ func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, func()
 		close(bs.done)
 	}
 	if m.failedStamps[repo] == current {
-		// This exact source already failed to build. Serve stale with the
-		// reason and launch nothing — retrying burns a full go/packages load
-		// per query for a guaranteed-identical failure.
-		m.buildsMu.Unlock()
+		// This exact source already failed to build — the one case the served
+		// graph is Stale: it cannot be replaced until the source moves. Launch
+		// nothing — retrying burns a full go/packages load per query for a
+		// guaranteed-identical failure.
 		fresh.Stale = true
-		fresh.IndexError = lastErr
+		fresh.IndexError = m.lastBuildErrors[repo]
+		m.buildsMu.Unlock()
 		releaseLock(lock)
 		return conn, release, fresh, nil
 	}
@@ -673,21 +703,15 @@ func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, func()
 	launched := &buildState{
 		ctx:    bgCtx,
 		cancel: cancel,
-		stamp:  current,
+		snap:   cur,
 		done:   make(chan struct{}),
 	}
 	m.builds[repo] = launched
-	// Surface the last build error while a new build is in-flight if one
-	// exists — the agent deserves to know why the graph was stale before
-	// the retry. The error is cleared when the new build finishes (success
-	// deletes it; failure replaces it).
-	fresh.IndexError = lastErr
 	m.buildsMu.Unlock()
 	releaseLock(lock) // Release BEFORE goroutine — critical
 
 	go m.buildAsync(launched, repo, path)
 
-	fresh.Stale = true
 	fresh.Rebuilding = true
 	return conn, release, fresh, nil
 }
@@ -725,7 +749,7 @@ func (m *Manager) WaitBuild(ctx context.Context, repo string, timeout time.Durat
 	}
 	release()
 
-	if !fresh.Stale {
+	if !fresh.Stale && !fresh.Rebuilding { // ensureFresh found the graph current
 		return &BuildWaitResponse{Repo: repo, Completed: true, Rebuilt: true, Freshness: fresh}, nil
 	}
 
@@ -737,25 +761,25 @@ func (m *Manager) WaitBuild(ctx context.Context, repo string, timeout time.Durat
 		// suppressed as a known failure). Re-read rather than reusing the
 		// snapshot from before the trigger — do not relaunch, or a broken repo
 		// would rebuild on every wait.
-		settled, ferr := m.freshnessNow(repo)
+		settled, upToDate, ferr := m.freshnessNow(repo)
 		if ferr != nil {
 			return nil, ferr
 		}
-		return &BuildWaitResponse{Repo: repo, Completed: true, Rebuilt: !settled.Stale, Freshness: settled}, nil
+		return &BuildWaitResponse{Repo: repo, Completed: true, Rebuilt: upToDate, Freshness: settled}, nil
 	}
 
 	select {
 	case <-bs.done:
 		// Build finished (or was superseded). Read the resulting state without
 		// launching anything new.
-		settled, ferr := m.freshnessNow(repo)
+		settled, upToDate, ferr := m.freshnessNow(repo)
 		if ferr != nil {
 			return nil, ferr
 		}
 		return &BuildWaitResponse{
 			Repo:      repo,
 			Completed: true,
-			Rebuilt:   !settled.Stale,
+			Rebuilt:   upToDate,
 			Freshness: settled,
 		}, nil
 	case <-waitCtx.Done():
@@ -765,13 +789,14 @@ func (m *Manager) WaitBuild(ctx context.Context, repo string, timeout time.Durat
 
 // waitTimedOut reports a timeout against the graph currently on disk, so the
 // caller still sees the real stamp of what is being served rather than a
-// fabricated empty Freshness.
+// fabricated empty Freshness. A build is still running on both timeout paths
+// (cold builds are not tracked in builds), hence Rebuilding is forced; Stale is
+// not — nothing has failed.
 func (m *Manager) waitTimedOut(repo string) *BuildWaitResponse {
-	fresh, err := m.freshnessNow(repo)
+	fresh, _, err := m.freshnessNow(repo)
 	if err != nil {
 		fresh = Freshness{}
 	}
-	fresh.Stale = true
 	fresh.Rebuilding = true
 	return &BuildWaitResponse{Repo: repo, Completed: false, Freshness: fresh}
 }
@@ -779,26 +804,78 @@ func (m *Manager) waitTimedOut(repo string) *BuildWaitResponse {
 // freshnessNow reports repo's current freshness without ever launching a build.
 // It is the read-only counterpart to ensureFresh, used by WaitBuild after a
 // build settles — calling ensureFresh there would start yet another rebuild
-// whenever the one we just awaited had failed.
-func (m *Manager) freshnessNow(repo string) (Freshness, error) {
-	current, err := m.cachedStamp(repo)
+// whenever the one we just awaited had failed. upToDate reports whether the
+// graph on disk matches the working tree.
+func (m *Manager) freshnessNow(repo string) (Freshness, bool, error) {
+	cur, err := m.cachedSnapshot(repo)
 	if err != nil {
-		return Freshness{}, err
+		return Freshness{}, false, err
 	}
-	_, release, fresh, err := m.open(m.dbPath(repo))
+	conn, release, fresh, err := m.open(m.dbPath(repo))
 	if err != nil {
-		return Freshness{}, err
+		return Freshness{}, false, err
 	}
 	defer release()
+	// Another generation's graph is never served (see ensureFresh), so it is
+	// no graph yet: qualifying it would flag every file as changed.
+	if conn == nil || !strings.HasPrefix(fresh.Stamp, currentGen+":") {
+		return Freshness{}, false, nil // no graph yet: nothing to qualify
+	}
+	m.annotate(repo, &fresh, cur)
+	return fresh, fresh.Stamp == cur.stamp, nil
+}
 
+// annotate qualifies a served graph against the current census without ever
+// launching a build: nothing when the stamps match; otherwise the changed
+// files, whether a rebuild is in flight, and Stale only when cur is the exact
+// source that already failed to build. ensureFresh inlines the same rules
+// because it also manages the build under the same lock.
+func (m *Manager) annotate(repo string, fresh *Freshness, cur snapshot) {
+	if fresh.Stamp == cur.stamp {
+		return
+	}
+	fresh.markChanged(cur.files)
 	m.buildsMu.Lock()
-	fresh.IndexError = m.lastBuildErrors[repo]
-	_, building := m.builds[repo]
-	m.buildsMu.Unlock()
+	defer m.buildsMu.Unlock()
+	_, fresh.Rebuilding = m.builds[repo]
+	if m.failedStamps[repo] == cur.stamp {
+		fresh.Stale = true
+		fresh.IndexError = m.lastBuildErrors[repo]
+	}
+}
 
-	fresh.Stale = fresh.Stamp != current
-	fresh.Rebuilding = building
-	return fresh, nil
+// markChanged records which files differ between the served graph's indexed
+// census and cur: added, modified (size or mtime), or deleted.
+//
+// ponytail: O(files) diff per mismatched query; cache it keyed by (indexed
+// stamp, current stamp) only if it measurably matters.
+func (f *Freshness) markChanged(cur []fileStamp) {
+	var paths []string
+	seen := make(map[string]bool, len(cur))
+	for _, c := range cur {
+		seen[c.path] = true
+		if old, ok := f.indexed[c.path]; !ok || old != c {
+			paths = append(paths, c.path)
+		}
+	}
+	for p := range f.indexed {
+		if !seen[p] {
+			paths = append(paths, p)
+		}
+	}
+	slices.Sort(paths)
+	f.changed = make(map[string]bool, len(paths))
+	for _, p := range paths {
+		f.changed[p] = true
+	}
+	f.ChangedFilesTotal = len(paths)
+	f.ChangedFiles = paths[:min(len(paths), staleUnitsCap)]
+}
+
+// isChanged reports whether file (a symbol row's repo-relative path, which
+// the Go tier stores with OS separators) changed since indexing.
+func (f Freshness) isChanged(file string) bool {
+	return f.changed[filepath.ToSlash(file)]
 }
 
 // BuildWaitResponse reports the outcome of a WaitBuild call.
@@ -843,7 +920,8 @@ func (m *Manager) open(path string) (*sql.DB, func(), Freshness, error) {
 
 	release := func() { m.release(entry) }
 
-	var fresh Freshness
+	entry.filesOnce.Do(func() { entry.files = readFileStamps(entry.db) })
+	fresh := Freshness{indexed: entry.files}
 	// noctx exception: open() has no context and threading one in would ripple
 	// through freshnessNow and its callers for a two-row read off an
 	// already-cached local handle. The cancellation that matters is on the
@@ -896,6 +974,26 @@ func (m *Manager) open(path string) (*sql.DB, func(), Freshness, error) {
 	return entry.db, release, fresh, nil
 }
 
+// readFileStamps loads the census a graph was built from. Best-effort: a graph
+// from another generation lacks the table and is never served anyway, and an
+// unreadable table only means every file reads as changed.
+func readFileStamps(db *sql.DB) map[string]fileStamp {
+	out := map[string]fileStamp{}
+	rows, err := db.Query(`SELECT path, size, mtime FROM file_stamps`) //nolint:noctx // same as the meta read in open
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var f fileStamp
+		if rows.Scan(&f.path, &f.size, &f.mtime) == nil {
+			out[f.path] = f
+		}
+	}
+	_ = rows.Err() // partial read: the missing files read as changed
+	return out
+}
+
 // closeConn retires the cached handle for path so the next open() picks up a
 // newly renamed graph.db. The underlying *sql.DB is closed here only if nobody
 // holds it; otherwise the last release closes it.
@@ -908,29 +1006,31 @@ func (m *Manager) closeConn(path string) {
 	}
 }
 
-// cachedStamp returns the stamp for repo, caching the result so rapid-fire
+// cachedSnapshot returns the census for repo, caching the result so rapid-fire
 // queries during an agent session skip the file-tree walk. Returns a fresh
-// stamp from stamp() when the cache is empty or expired (stampTTL).
-func (m *Manager) cachedStamp(repo string) (string, error) {
+// census when the cache is empty or expired (stampTTL). The stamp and its
+// per-file rows are cached together, so a build always stores the file list
+// of the exact stamp it records.
+func (m *Manager) cachedSnapshot(repo string) (snapshot, error) {
 	if stampTTL <= 0 {
-		return stamp(repo)
+		return census(repo)
 	}
 	m.mu.Lock()
 	if e, ok := m.stampCache[repo]; ok && time.Now().Before(e.expires) {
 		m.mu.Unlock()
-		return e.stamp, nil
+		return e.snap, nil
 	}
 	m.mu.Unlock()
 
-	s, err := stamp(repo)
+	snap, err := census(repo)
 	if err != nil {
-		return "", err
+		return snapshot{}, err
 	}
 
 	m.mu.Lock()
-	m.stampCache[repo] = &stampEntry{stamp: s, expires: time.Now().Add(stampTTL)}
+	m.stampCache[repo] = &stampEntry{snap: snap, expires: time.Now().Add(stampTTL)}
 	m.mu.Unlock()
-	return s, nil
+	return snap, nil
 }
 
 // Index force-builds (or refreshes) the graph for repo and reports its size.
@@ -945,17 +1045,17 @@ func (m *Manager) Index(ctx context.Context, repo string) (*IndexResponse, error
 	}
 	defer releaseLock(lock)
 
-	current, err := m.cachedStamp(repo)
+	cur, err := m.cachedSnapshot(repo)
 	if err != nil {
 		return nil, err
 	}
 	path := m.dbPath(repo)
-	if err := buildIndexLocked(ctx, repo, path, current); err != nil {
+	if err := buildIndexLocked(ctx, repo, path, cur); err != nil {
 		return nil, fmt.Errorf("index %s: %w", repo, err)
 	}
 	// A forced build that succeeded clears whatever any earlier failure recorded
 	// and retires the old handle so the next open() sees the new file.
-	m.finishColdBuild(repo, path, current, nil)
+	m.finishColdBuild(repo, path, cur.stamp, nil)
 	conn, release, fresh, err := m.open(path)
 	if err != nil {
 		return nil, err

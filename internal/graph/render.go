@@ -59,6 +59,9 @@ func RenderSymbol(r *SymbolResponse) string {
 	if r.Carried {
 		b.WriteString("carried: true\n")
 	}
+	if r.Changed {
+		b.WriteString("changed: true\n")
+	}
 
 	// True neighbor counts behind a capped list. Set only on truncation
 	// (query.go), so a zero here means "not truncated" and stays unprinted —
@@ -140,7 +143,7 @@ func RenderPackage(r *PackageResponse) string {
 		keys := []string{"qname", "kind", "signature", "doc", "loc"}
 		b.WriteString(header("symbols", len(r.Symbols), keys))
 		for _, s := range r.Symbols {
-			b.WriteString(row(s.QName, s.Kind, s.Signature, s.Doc, loc(s.File, s.Line)))
+			b.WriteString(row(s.QName, s.Kind, s.Signature, s.Doc, rowLoc(s.File, s.Line, s.Changed)))
 		}
 	} else {
 		b.WriteString("symbols: none\n")
@@ -164,22 +167,24 @@ func RenderPackage(r *PackageResponse) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// writeFreshness emits a freshness line only when the graph is stale, being
-// rebuilt, or carrying forward units — absence means fully fresh, so the
-// common path costs zero tokens.
+// writeFreshness emits a freshness line only when the graph is stale, has
+// changed files, is being rebuilt, or carries forward units — absence means
+// fully fresh, so the common path costs zero tokens.
 //
-// The STALE message only claims a type-check failure when IndexError is
-// actually present — a partial build that itself succeeds is never Stale
-// (graph.go's Freshness doc), and Stale can also mean "serving the previous
-// graph while a benign async rebuild is in flight", which is not a failure
-// at all. Claiming "no longer type-checks" in that case would be false.
+// STALE means the current source failed to build (graph.go's Freshness doc);
+// a benign pending rebuild is only changed_files + REBUILDING.
 func writeFreshness(b *strings.Builder, f Freshness) {
 	var msgs []string
-	switch {
-	case f.Stale && f.IndexError != "":
-		msgs = append(msgs, "STALE (repo no longer type-checks; serving last good index: "+f.IndexError+")")
-	case f.Stale:
-		msgs = append(msgs, "STALE (serving the previous graph while an update is pending)")
+	if f.Stale {
+		msg := "STALE (current source failed to build; serving last good index"
+		if f.IndexError != "" {
+			msg += ": " + f.IndexError
+		}
+		msgs = append(msgs, msg+")")
+	}
+	if len(f.ChangedFiles) > 0 {
+		msgs = append(msgs, fmt.Sprintf("changed_files[%d of %d]: %s",
+			len(f.ChangedFiles), f.ChangedFilesTotal, strings.Join(f.ChangedFiles, ", ")))
 	}
 	if f.Rebuilding {
 		msgs = append(msgs, "REBUILDING (async rebuild in progress)")
@@ -229,7 +234,7 @@ func writeNeighbors(b *strings.Builder, name string, ns []Neighbor) {
 	keys := []string{"qname", "signature", "loc", "depth"}
 	b.WriteString(header(name, len(ns), keys))
 	for _, n := range ns {
-		b.WriteString(row(n.QName, n.Signature, loc(n.File, n.Line), strconv.Itoa(n.Depth)))
+		b.WriteString(row(n.QName, n.Signature, rowLoc(n.File, n.Line, n.Changed), strconv.Itoa(n.Depth)))
 	}
 }
 
@@ -257,6 +262,15 @@ func quote(s string) string {
 
 func loc(file string, line int) string {
 	return file + ":" + strconv.Itoa(line)
+}
+
+// rowLoc is loc plus a marker on a row whose file changed since indexing —
+// a marker, not a column, so unchanged rows cost nothing.
+func rowLoc(file string, line int, changed bool) string {
+	if changed {
+		return loc(file, line) + " (changed)"
+	}
+	return loc(file, line)
 }
 
 // fenceTag names the code-fence language for a symbol's source file, reusing

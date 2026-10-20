@@ -28,7 +28,7 @@ func TestBuildIndexLocked_SkipsBuildWhenAnotherLanded(t *testing.T) {
 
 	// First arrival builds.
 	before := buildStarts.Load()
-	if err := buildIndexLocked(context.Background(), repo, dbPath, want); err != nil {
+	if err := buildIndexLocked(context.Background(), repo, dbPath, snapshot{stamp: want}); err != nil {
 		t.Fatalf("first build: %v", err)
 	}
 	if got := buildStarts.Load() - before; got != 1 {
@@ -37,7 +37,7 @@ func TestBuildIndexLocked_SkipsBuildWhenAnotherLanded(t *testing.T) {
 
 	// Second arrival, same stamp: the graph on disk already satisfies it.
 	before = buildStarts.Load()
-	if err := buildIndexLocked(context.Background(), repo, dbPath, want); err != nil {
+	if err := buildIndexLocked(context.Background(), repo, dbPath, snapshot{stamp: want}); err != nil {
 		t.Fatalf("second build: %v", err)
 	}
 	if got := buildStarts.Load() - before; got != 0 {
@@ -54,11 +54,11 @@ func TestBuildIndexLocked_BuildsWhenStampDiffers(t *testing.T) {
 	}
 	dbPath := filepath.Join(t.TempDir(), "graph.db")
 
-	if err := buildIndexLocked(context.Background(), repo, dbPath, "stamp-one"); err != nil {
+	if err := buildIndexLocked(context.Background(), repo, dbPath, snapshot{stamp: "stamp-one"}); err != nil {
 		t.Fatalf("seed build: %v", err)
 	}
 	before := buildStarts.Load()
-	if err := buildIndexLocked(context.Background(), repo, dbPath, "stamp-two"); err != nil {
+	if err := buildIndexLocked(context.Background(), repo, dbPath, snapshot{stamp: "stamp-two"}); err != nil {
 		t.Fatalf("second build: %v", err)
 	}
 	if got := buildStarts.Load() - before; got != 1 {

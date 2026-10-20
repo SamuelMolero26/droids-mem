@@ -113,23 +113,23 @@ func graphPackageHandler(gm *graph.Manager) func(context.Context, mcp.CallToolRe
 
 // Bounds for graph_build_wait, mirrored in the tool schema below.
 const (
-	defaultBuildWait = 10 * time.Second
+	defaultBuildWait = 30 * time.Second
 	maxBuildWait     = 60 * time.Second
 )
 
 type graphBuildWaitArgs struct {
 	Repo    string  `json:"repo"`
-	Timeout float64 `json:"timeout,omitempty"` // seconds, default 10
+	Timeout float64 `json:"timeout,omitempty"` // seconds, default 30
 }
 
 func graphBuildWaitToolDef() mcp.Tool {
 	return mcp.NewTool("graph_build_wait",
-		mcp.WithDescription("Bring the repo's graph up to date, blocking until done or timeout. Attaches to an in-flight rebuild, or starts one if the graph is stale. Returns final freshness; completed: false means the timeout expired, not a failure. Use after graph_symbol returns rebuilding: true."),
+		mcp.WithDescription("Bring the repo's graph up to date, blocking until done or timeout. Attaches to an in-flight rebuild, or starts one if sources changed. Returns final freshness; completed: false means the timeout expired, not a failure. Use after a graph result is marked changed: true."),
 		mcp.WithString("repo", mcp.Required(),
 			mcp.Description("Absolute path to the project root.")),
 		mcp.WithInteger("timeout",
-			mcp.Description("Max seconds to wait (default 10, max 60)."),
-			mcp.DefaultNumber(10), mcp.Min(1), mcp.Max(60),
+			mcp.Description("Max seconds to wait (default 30, max 60)."),
+			mcp.DefaultNumber(30), mcp.Min(1), mcp.Max(60),
 		),
 	)
 }

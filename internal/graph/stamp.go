@@ -87,16 +87,34 @@ var currentGen = stampGen(schema, indexedExtensions(), indexerGen)
 // skipDir reports whether a directory is excluded from the source walk.
 // Dotdirs cover .git/.venv; the rest are build output and dependency trees,
 // which are not source: walking them moves the stamp on every build, and once
-// the index covers more than .go it would index generated code.
+// the index covers more than .go it would index generated code. testdata is
+// fixtures, which packages.Load("./...") never loads either.
 func skipDir(name string) bool {
 	if strings.HasPrefix(name, ".") {
 		return true
 	}
 	switch name {
-	case "vendor", "node_modules", "dist", "build", "target", "__pycache__", "out":
+	case "vendor", "node_modules", "dist", "build", "target", "__pycache__", "out", "testdata":
 		return true
 	}
 	return false
+}
+
+// nestedModuleSkipper returns the per-directory check for a nested Go module.
+// packages.Load("./...") never loads one, so its files must not move the stamp
+// or reach the mapper. That holds only when repo is itself a module without a
+// go.work: under a workspace, or a non-Go root anchored at .git, a nested
+// go.mod dir is in-scope source.
+func nestedModuleSkipper(repo string) func(dir string) bool {
+	if !fileExists(filepath.Join(repo, "go.mod")) || fileExists(filepath.Join(repo, "go.work")) {
+		return func(string) bool { return false }
+	}
+	return func(dir string) bool { return fileExists(filepath.Join(dir, "go.mod")) }
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }
 
 // stamp fingerprints the repo's indexed source state: count, total size, and
@@ -122,31 +140,60 @@ func skipDir(name string) bool {
 // This detects path renames and add/delete swaps without reading source bytes
 // on the query hot path.
 //
-// Inputs are hashed as they are visited, so memory stays O(1) in the number
-// of files. WalkDir visits in lexical order, which makes the digest
-// deterministic for a given tree without collecting and sorting the census.
+// Inputs are hashed as they are visited. WalkDir visits in lexical order, which
+// makes the digest deterministic for a given tree without sorting the census.
+// census also keeps the per-file rows (O(files) memory) so a build can store
+// them and a later query can name which files changed.
 func stamp(repo string) (string, error) {
+	snap, err := census(repo)
+	return snap.stamp, err
+}
+
+// fileStamp is one census input: its repo-relative slash path (alias configs
+// above the repo keep their "../" prefix), size, and mtime in nanoseconds.
+type fileStamp struct {
+	path  string
+	size  int64
+	mtime int64
+}
+
+// snapshot is one census of the working tree: the stamp plus the per-file rows
+// it was hashed from. They travel together so a build stores the file list
+// from the very walk that produced its stamp, and the changed-file diff can
+// never compare against a different moment than the stamp did.
+type snapshot struct {
+	stamp string
+	files []fileStamp
+}
+
+// census walks the repo once, producing the stamp (see stamp) and the
+// per-file rows behind it.
+func census(repo string) (snapshot, error) {
 	exts := indexedExtensions()
 	h := sha256.New()
 	var count int
 	var size, maxMtime int64
+	var files []fileStamp
 	add := func(name string, info fs.FileInfo) {
 		rel, err := filepath.Rel(repo, name)
 		if err != nil {
 			rel = name
 		}
+		rel = filepath.ToSlash(rel)
 		mtime := info.ModTime().UnixNano()
 		count++
 		size += info.Size()
 		maxMtime = max(maxMtime, mtime)
-		fmt.Fprintf(h, "%s\x00%d\x00%d\x00", filepath.ToSlash(rel), info.Size(), mtime)
+		files = append(files, fileStamp{path: rel, size: info.Size(), mtime: mtime})
+		fmt.Fprintf(h, "%s\x00%d\x00%d\x00", rel, info.Size(), mtime)
 	}
+	nested := nestedModuleSkipper(repo)
 	err := filepath.WalkDir(repo, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil //nolint:nilerr // unreadable entries don't invalidate the walk
 		}
 		if d.IsDir() {
-			if p != repo && skipDir(d.Name()) {
+			if p != repo && (skipDir(d.Name()) || nested(p)) {
 				return fs.SkipDir
 			}
 			return nil
@@ -163,7 +210,7 @@ func stamp(repo string) (string, error) {
 		return nil
 	})
 	if err != nil {
-		return "", fmt.Errorf("stamp %s: %w", repo, err)
+		return snapshot{}, fmt.Errorf("stamp %s: %w", repo, err)
 	}
 	// Alias configs are .json, so the census walk above can never have counted
 	// one — but aliasConfigFiles may name the same path twice (a config that
@@ -177,7 +224,10 @@ func stamp(repo string) (string, error) {
 		add(p, info)
 	}
 	digest := hex.EncodeToString(h.Sum(nil)[:8])
-	return fmt.Sprintf("%s:%d:%d:%d:%s", currentGen, count, size, maxMtime, digest), nil
+	return snapshot{
+		stamp: fmt.Sprintf("%s:%d:%d:%d:%s", currentGen, count, size, maxMtime, digest),
+		files: files,
+	}, nil
 }
 
 // isModuleFile reports whether name is a Go module manifest whose changes can

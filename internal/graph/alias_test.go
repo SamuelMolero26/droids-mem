@@ -242,7 +242,7 @@ func TestBuildIndex_Rung2a_AliasResolvesToSpecificFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+	if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: st}); err != nil {
 		t.Fatalf("buildIndex: %v", err)
 	}
 	conn, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
@@ -287,7 +287,7 @@ func TestBuildIndex_AliasFallbackWithoutConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+	if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: st}); err != nil {
 		t.Fatalf("buildIndex: %v", err)
 	}
 	conn, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
@@ -421,7 +421,7 @@ func TestBuildIndex_ExtendsInheritedAliasOrigin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := buildIndex(context.Background(), repo, dbPath, st); err != nil {
+	if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: st}); err != nil {
 		t.Fatalf("buildIndex: %v", err)
 	}
 	conn, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")

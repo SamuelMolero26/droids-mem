@@ -268,7 +268,9 @@ func refreshGraph(t *testing.T, m *Manager, repo string) {
 	if err != nil {
 		t.Fatalf("trigger refresh: %v", err)
 	}
-	if !resp.Freshness.Stale || !resp.Freshness.Rebuilding {
+	// A config edit is a benign change: rebuilding, never stale (stale is
+	// reserved for a failed build).
+	if resp.Freshness.Stale || !resp.Freshness.Rebuilding {
 		t.Fatalf("config edit did not trigger Manager rebuild: freshness = %+v", resp.Freshness)
 	}
 	wait, err := m.WaitBuild(context.Background(), repo, 60*time.Second)

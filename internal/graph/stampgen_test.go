@@ -122,6 +122,62 @@ func TestStamp_SkipsBuildOutputDirs(t *testing.T) {
 	}
 }
 
+// The stamp and mapper walks must cover exactly what packages.Load("./...")
+// loads: testdata and a nested module are out of scope only when the root is
+// itself a module (a go.work workspace or a non-Go root makes a nested go.mod
+// dir real source). Both walks are checked per case — an edit one walk sees
+// and the other ignores is either a pointless rebuild or silently stale rows.
+func TestWalkScope_TestdataAndNestedModules(t *testing.T) {
+	cases := []struct {
+		name    string
+		root    []string // root-level files besides app.py
+		dir     string   // directory receiving the edit
+		nested  bool     // the edited dir holds its own go.mod
+		counted bool
+	}{
+		{name: "testdata under module", root: []string{"go.mod"}, dir: "testdata"},
+		{name: "nested module under module", root: []string{"go.mod"}, dir: "tools", nested: true},
+		{name: "nested module without root go.mod", dir: "tools", nested: true, counted: true},
+		{name: "nested module under go.work", root: []string{"go.mod", "go.work"}, dir: "tools", nested: true, counted: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := t.TempDir()
+			writeFile(t, repo, "app.py", "def app(): pass\n")
+			for _, f := range tc.root {
+				writeFile(t, repo, f, "module x\n")
+			}
+			before, err := stamp(repo)
+			if err != nil {
+				t.Fatalf("stamp: %v", err)
+			}
+
+			if tc.nested {
+				writeFile(t, filepath.Join(repo, tc.dir), "go.mod", "module tools\n")
+			}
+			writeFile(t, filepath.Join(repo, tc.dir), "gen.py", "def gen(): pass\n")
+			after, err := stamp(repo)
+			if err != nil {
+				t.Fatalf("stamp: %v", err)
+			}
+			if moved := before != after; moved != tc.counted {
+				t.Errorf("stamp moved = %v, want %v", moved, tc.counted)
+			}
+
+			files, _, err := mapperFiles(repo)
+			if err != nil {
+				t.Fatalf("mapperFiles: %v", err)
+			}
+			mapped := slices.ContainsFunc(files, func(f mapperFile) bool {
+				return filepath.ToSlash(f.rel) == tc.dir+"/gen.py"
+			})
+			if mapped != tc.counted {
+				t.Errorf("mapper indexed %s/gen.py = %v, want %v", tc.dir, mapped, tc.counted)
+			}
+		})
+	}
+}
+
 // canonicalRepo keys the on-disk cache. moduleRoot anchors on go.mod, which a
 // non-Go repo does not have, so a subdirectory keys a SECOND cache — the exact
 // split-cache bug moduleRoot was introduced to close for Go. A checkout is a

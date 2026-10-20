@@ -21,7 +21,7 @@ func TestBuildIndex_GraphDBIsOwnerOnly(t *testing.T) {
 	}
 	dbPath := filepath.Join(t.TempDir(), "graphs", "abc123", "graph.db")
 
-	if err := buildIndex(context.Background(), repo, dbPath, "stamp-perms"); err != nil {
+	if err := buildIndex(context.Background(), repo, dbPath, snapshot{stamp: "stamp-perms"}); err != nil {
 		t.Fatalf("buildIndex: %v", err)
 	}
 
@@ -68,7 +68,7 @@ func TestBuildIndex_CacheDirIsNotWorldReadable(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := filepath.Join(t.TempDir(), "graphs", "def456")
-	if err := buildIndex(context.Background(), repo, filepath.Join(dir, "graph.db"), "stamp-dir"); err != nil {
+	if err := buildIndex(context.Background(), repo, filepath.Join(dir, "graph.db"), snapshot{stamp: "stamp-dir"}); err != nil {
 		t.Fatalf("buildIndex: %v", err)
 	}
 	fi, err := os.Stat(dir)
