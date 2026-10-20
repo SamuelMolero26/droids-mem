@@ -227,8 +227,7 @@ type stampEntry struct {
 type buildState struct {
 	ctx    context.Context
 	cancel context.CancelFunc
-	stamp  string        // the stamp value this build targets
-	files  []fileStamp   // the census behind stamp, stored by the build
+	snap   snapshot      // the census this build targets; its files are stored with it
 	done   chan struct{} // closed when build finishes, fails, or is superseded
 }
 
@@ -339,7 +338,7 @@ func (m *Manager) Close() {
 // superseded by a newer one (stamp changed during the build), the result is
 // discarded (ensureFresh already cancelled the old build's context).
 func (m *Manager) buildAsync(bs *buildState, repo, path string) {
-	buildErr := buildIndexLocked(bs.ctx, repo, path, snapshot{stamp: bs.stamp, files: bs.files})
+	buildErr := buildIndexLocked(bs.ctx, repo, path, bs.snap)
 
 	// Registered BEFORE the Unlock defer so LIFO runs it AFTER the unlock: the
 	// sweep walks the cache directory and must never hold buildsMu across that
@@ -370,7 +369,7 @@ func (m *Manager) buildAsync(bs *buildState, repo, path string) {
 		// remember which source failed so ensureFresh stops relaunching an
 		// identical doomed build on every subsequent query.
 		m.lastBuildErrors[repo] = buildErr.Error()
-		m.failedStamps[repo] = bs.stamp
+		m.failedStamps[repo] = bs.snap.stamp
 		delete(m.builds, repo)
 		close(bs.done)
 		bs.cancel()
@@ -670,7 +669,7 @@ func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, func()
 	fresh.markChanged(cur.files)
 	m.buildsMu.Lock()
 	bs, building := m.builds[repo]
-	if building && bs.stamp == current {
+	if building && bs.snap.stamp == current {
 		// Same-stamp build already running — attach and serve the previous graph.
 		m.buildsMu.Unlock()
 		fresh.Rebuilding = true
@@ -704,8 +703,7 @@ func (m *Manager) ensureFresh(ctx context.Context, repo string) (*sql.DB, func()
 	launched := &buildState{
 		ctx:    bgCtx,
 		cancel: cancel,
-		stamp:  current,
-		files:  cur.files,
+		snap:   cur,
 		done:   make(chan struct{}),
 	}
 	m.builds[repo] = launched

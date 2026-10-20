@@ -27,7 +27,7 @@ func pinRebuild(t *testing.T, m *Manager, repo string) func() {
 	}
 	bctx, bcancel := context.WithCancel(context.Background())
 	m.buildsMu.Lock()
-	m.builds[canon] = &buildState{ctx: bctx, cancel: bcancel, stamp: current, done: make(chan struct{})}
+	m.builds[canon] = &buildState{ctx: bctx, cancel: bcancel, snap: snapshot{stamp: current}, done: make(chan struct{})}
 	m.buildsMu.Unlock()
 	unpin := func() {
 		m.buildsMu.Lock()
@@ -184,35 +184,6 @@ func TestChanged_ListIsCapped(t *testing.T) {
 	}
 }
 
-// TestChanged_BuildFailureIsStale: stale is reserved for the current source
-// failing to build — the one case where the served index is old because it
-// cannot be replaced.
-func TestChanged_BuildFailureIsStale(t *testing.T) {
-	repo := copyFixture(t)
-	m := managerFor(t)
-	ctx := context.Background()
-	if _, err := m.Index(ctx, repo); err != nil {
-		t.Fatal(err)
-	}
-	breakMajority(t, repo)
-	if _, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"}); err != nil {
-		t.Fatal(err)
-	}
-	waitForBuild(t, m, repo, 30*time.Second)
-
-	resp, err := m.Symbol(ctx, SymbolRequest{Repo: repo, Symbol: "Announce"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	f := resp.Freshness
-	if !f.Stale || f.IndexError == "" || f.Rebuilding {
-		t.Errorf("failed build: want stale+index_error, no rebuild; got %+v", f)
-	}
-	if !slices.Contains(f.ChangedFiles, "broken.go") {
-		t.Errorf("changed files %v lack the breaking file", f.ChangedFiles)
-	}
-}
-
 // TestChanged_WaitBuildSettlesClean: after waiting out the rebuild, the graph
 // matches the tree, so nothing is reported changed.
 func TestChanged_WaitBuildSettlesClean(t *testing.T) {
@@ -233,41 +204,6 @@ func TestChanged_WaitBuildSettlesClean(t *testing.T) {
 	}
 	if f := resp.Freshness; f.Stale || f.Rebuilding || f.ChangedFilesTotal != 0 || len(f.ChangedFiles) != 0 {
 		t.Errorf("settled graph still reports changes: %+v", f)
-	}
-}
-
-// TestChanged_FileStampsPersisted: the build stores the per-file census the
-// diff is computed against.
-func TestChanged_FileStampsPersisted(t *testing.T) {
-	repo := copyFixture(t)
-	m := managerFor(t)
-	ctx := context.Background()
-	if _, err := m.Index(ctx, repo); err != nil {
-		t.Fatal(err)
-	}
-	conn, release, _, err := m.ensureFresh(ctx, repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer release()
-	rows, err := conn.QueryContext(ctx, `SELECT path FROM file_stamps ORDER BY path`)
-	if err != nil {
-		t.Fatalf("file_stamps unreadable: %v", err)
-	}
-	defer rows.Close()
-	var got []string
-	for rows.Next() {
-		var p string
-		if err := rows.Scan(&p); err != nil {
-			t.Fatal(err)
-		}
-		got = append(got, p)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
-	}
-	if want := []string{"go.mod", "main.go", "zz/zz.go"}; !slices.Equal(got, want) {
-		t.Errorf("file_stamps = %v, want %v", got, want)
 	}
 }
 

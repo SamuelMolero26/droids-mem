@@ -293,7 +293,7 @@ func TestSupersededBuild_ClosesDone(t *testing.T) {
 	// next ensureFresh takes the supersede branch deterministically (no real
 	// build to race against).
 	bctx, bcancel := context.WithCancel(context.Background())
-	stuck := &buildState{ctx: bctx, cancel: bcancel, stamp: "STALE-STAMP", done: make(chan struct{})}
+	stuck := &buildState{ctx: bctx, cancel: bcancel, snap: snapshot{stamp: "STALE-STAMP"}, done: make(chan struct{})}
 	m.buildsMu.Lock()
 	m.builds[canon] = stuck
 	m.buildsMu.Unlock()
@@ -426,7 +426,7 @@ func TestWaitBuild_Timeout(t *testing.T) {
 	bctx, bcancel := context.WithCancel(context.Background())
 	defer bcancel()
 	m.buildsMu.Lock()
-	m.builds[canon] = &buildState{ctx: bctx, cancel: bcancel, stamp: current, done: make(chan struct{})}
+	m.builds[canon] = &buildState{ctx: bctx, cancel: bcancel, snap: snapshot{stamp: current}, done: make(chan struct{})}
 	m.buildsMu.Unlock()
 	defer func() {
 		m.buildsMu.Lock()
@@ -488,8 +488,10 @@ func TestBuildAsync_FailureServesStaleAndRecordsError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("degraded serve failed after the build error: %v", err)
 	}
-	if !resp.Freshness.Stale || resp.Freshness.IndexError == "" {
-		t.Errorf("a failed build must serve stale with IndexError, got %+v", resp.Freshness)
+	// Stale is reserved for this case: the source failed to build, so nothing
+	// is rebuilding and the breaking file is still named as changed.
+	if f := resp.Freshness; !f.Stale || f.IndexError == "" || f.Rebuilding || !slices.Contains(f.ChangedFiles, "broken.go") {
+		t.Errorf("a failed build must serve stale with IndexError, no rebuild, broken.go changed; got %+v", f)
 	}
 	if !strings.Contains(resp.Freshness.IndexError, "type-check") {
 		t.Errorf("unexpected IndexError: %q", resp.Freshness.IndexError)
@@ -844,7 +846,7 @@ func TestBuildAsync_ForeignStateWithSameStampIsIgnored(t *testing.T) {
 	// The state the manager is actually tracking.
 	lctx, lcancel := context.WithCancel(context.Background())
 	defer lcancel()
-	live := &buildState{ctx: lctx, cancel: lcancel, stamp: current, done: make(chan struct{})}
+	live := &buildState{ctx: lctx, cancel: lcancel, snap: snapshot{stamp: current}, done: make(chan struct{})}
 	m.buildsMu.Lock()
 	m.builds[canon] = live
 	m.buildsMu.Unlock()
@@ -857,7 +859,7 @@ func TestBuildAsync_ForeignStateWithSameStampIsIgnored(t *testing.T) {
 	// A stale goroutine carrying the same stamp finishes and must touch nothing.
 	octx, ocancel := context.WithCancel(context.Background())
 	ocancel()
-	m.buildAsync(&buildState{ctx: octx, cancel: ocancel, stamp: current, done: make(chan struct{})}, canon, m.dbPath(canon))
+	m.buildAsync(&buildState{ctx: octx, cancel: ocancel, snap: snapshot{stamp: current}, done: make(chan struct{})}, canon, m.dbPath(canon))
 
 	select {
 	case <-live.done:
