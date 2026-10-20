@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,6 +45,18 @@ func stageRun(t *testing.T, home, db, ccID, title string) {
 		"--what", "did meaningful work on "+title,
 		"--learned", "remember the approach for "+title,
 	)
+}
+
+func runSessionExpectExit(t *testing.T, home, dbPath string, wantExit int, args ...string) []byte {
+	t.Helper()
+	cmd := exec.Command(binaryPath, args...)
+	cmd.Env = append(os.Environ(), "DROIDS_MEM_DB="+dbPath, "DROIDS_MEM_HOME="+home)
+	_, err := cmd.Output()
+	ee, ok := errors.AsType[*exec.ExitError](err)
+	if !ok || ee.ExitCode() != wantExit {
+		t.Fatalf("session %v exit = %v, want %d", args, err, wantExit)
+	}
+	return ee.Stderr
 }
 
 // Happy path: stage + threshold changes (intake gate met) → flush persists an
@@ -98,6 +111,75 @@ func TestE2E_SessionFlushBelowThreshold(t *testing.T) {
 	mustParseJSON(t, sess(t, home, db, "recent-sessions"), &rs)
 	if rs.Total != 0 {
 		t.Errorf("quiet session must not persist: total=%d", rs.Total)
+	}
+}
+
+func TestE2E_SessionStageRejectsOversizedReplacement(t *testing.T) {
+	home := t.TempDir()
+	db := filepath.Join(t.TempDir(), "mem.db")
+	stageRun(t, home, db, "cc-stage-cap", "valid checkpoint")
+
+	stderr := runSessionExpectExit(t, home, db, 2,
+		"session", "stage",
+		"--session", "cc-stage-cap",
+		"--title", strings.Repeat("t", 100),
+		"--what", strings.Repeat("w", 2000),
+		"--learned", strings.Repeat("l", 4096),
+	)
+	if !strings.Contains(string(stderr), "memory_payload_too_large") {
+		t.Fatalf("stage error = %s, want memory_payload_too_large", stderr)
+	}
+
+	t.Setenv("DROIDS_MEM_HOME", home)
+	staged, err := state.ReadStaged("cc-stage-cap")
+	if err != nil {
+		t.Fatalf("read staged summary: %v", err)
+	}
+	if staged == nil || staged.Title != "valid checkpoint" {
+		t.Fatalf("failed replacement changed prior stage: %+v", staged)
+	}
+}
+
+func TestE2E_SessionStageStoresScrubbedPayload(t *testing.T) {
+	home := t.TempDir()
+	db := filepath.Join(t.TempDir(), "mem.db")
+	sess(t, home, db, "session", "stage",
+		"--session", "cc-stage-scrub",
+		"--title", "scrubbed checkpoint",
+		"--what", "contact alice@example.com was present",
+		"--learned", "describe the pattern without personal data",
+	)
+
+	t.Setenv("DROIDS_MEM_HOME", home)
+	staged, err := state.ReadStaged("cc-stage-scrub")
+	if err != nil {
+		t.Fatalf("read staged summary: %v", err)
+	}
+	if staged == nil || strings.Contains(staged.What, "alice@example.com") {
+		t.Fatalf("staged payload retained raw secret: %+v", staged)
+	}
+}
+
+func TestE2E_SessionFlushRetainsLegacyStageOnSaveFailure(t *testing.T) {
+	home := t.TempDir()
+	db := filepath.Join(t.TempDir(), "mem.db")
+	t.Setenv("DROIDS_MEM_HOME", home)
+	if err := state.StageSummary("cc-legacy-cap", state.StagedSummary{
+		TaskType: "claude_session",
+		Kind:     "session_summary",
+		Title:    strings.Repeat("t", 100),
+		What:     strings.Repeat("w", 2000),
+		Learned:  strings.Repeat("l", 4096),
+	}); err != nil {
+		t.Fatalf("write legacy stage: %v", err)
+	}
+	for range state.IntakeThreshold {
+		sess(t, home, db, "session", "mark-change", "--session", "cc-legacy-cap")
+	}
+
+	runSessionExpectExit(t, home, db, 1, "session", "flush", "--session", "cc-legacy-cap")
+	if _, err := os.Stat(filepath.Join(home, "sessions", "cc-legacy-cap.staged")); err != nil {
+		t.Fatalf("failed flush removed recoverable stage: %v", err)
 	}
 }
 

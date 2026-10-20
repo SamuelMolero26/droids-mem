@@ -184,3 +184,24 @@ func TestE2E_HookSessionEndFlushes(t *testing.T) {
 		t.Fatalf("SessionEnd hook should have flushed the summary, got %+v", rs)
 	}
 }
+
+func TestE2E_HookSessionEndRetainsStageOnSaveFailure(t *testing.T) {
+	home := t.TempDir()
+	db := filepath.Join(t.TempDir(), "mem.db")
+	t.Setenv("DROIDS_MEM_HOME", home)
+	if err := state.StageSummary("cc-hook-cap", state.StagedSummary{
+		TaskType: "claude_session",
+		Kind:     "session_summary",
+		Title:    strings.Repeat("t", 100),
+		What:     strings.Repeat("w", 2000),
+		Learned:  strings.Repeat("l", 4096),
+	}); err != nil {
+		t.Fatalf("write legacy stage: %v", err)
+	}
+	bumpChanges(t, home, db, "cc-hook-cap", state.IntakeThreshold)
+
+	sessStdin(t, home, db, `{"hook_event_name":"SessionEnd","session_id":"cc-hook-cap"}`, "session", "hook")
+	if _, err := os.Stat(filepath.Join(home, "sessions", "cc-hook-cap.staged")); err != nil {
+		t.Fatalf("SessionEnd removed stage after failed save: %v", err)
+	}
+}
