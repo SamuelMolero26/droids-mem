@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 )
 
@@ -31,11 +30,6 @@ type contextCandidate struct {
 	memory      ContextMemory
 	destination contextDestination
 	bodyMode    contextBodyMode
-}
-
-type selectedContextCandidate struct {
-	candidate contextCandidate
-	index     int
 }
 
 func buildContextResponseConn(
@@ -66,43 +60,48 @@ func buildContextResponseConn(
 	}
 	resp.UserRulesTotal = rulesTotal
 
-	selected := make([]selectedContextCandidate, 0, len(candidates))
+	selected := candidates
 	selectedByKind := map[string]int{}
-	for _, candidate := range candidates {
-		index := appendContextCandidate(resp, candidate)
+	for i, candidate := range candidates {
+		appendContextCandidate(resp, candidate)
 		resp.StubbedCount++
-		fits, err := contextFits(resp, contextSelectionBytes)
-		if err != nil {
-			return nil, err
-		}
-		if !fits {
+		if !contextFits(resp, contextSelectionBytes) {
 			removeContextCandidate(resp, candidate.destination)
 			resp.StubbedCount--
+			selected = candidates[:i]
 			break
 		}
-		selected = append(selected, selectedContextCandidate{
-			candidate: candidate,
-			index:     index,
-		})
 		selectedByKind[candidate.memory.Kind]++
 	}
 
 	setContextOmissions(resp, expected, selectedByKind)
 	budgetConstrained := resp.OmittedCount > 0
-	for i := range selected {
-		candidate := &selected[i]
-		if candidate.candidate.bodyMode == contextBodyNone {
+	// Selected candidates were appended in order, so each destination's
+	// response slice lines up with its candidates by position.
+	rules, browse := 0, 0
+	for _, candidate := range selected {
+		var memory *ContextMemory
+		switch candidate.destination {
+		case contextLastSession:
+			memory = resp.LastSession
+		case contextUserRules:
+			memory = &resp.UserRules[rules]
+			rules++
+		default:
+			memory = &resp.Browse[browse]
+			browse++
+		}
+		if candidate.bodyMode == contextBodyNone {
 			continue
 		}
 
-		what, learned, err := fetchContextBodyConn(ctx, conn, candidate.candidate.memory.ID)
+		what, learned, err := fetchContextBodyConn(ctx, conn, candidate.memory.ID)
 		if err != nil {
 			return nil, err
 		}
-		memory := selectedContextMemory(resp, *candidate)
 		old := *memory
 		oldStubbed := resp.StubbedCount
-		switch candidate.candidate.bodyMode {
+		switch candidate.bodyMode {
 		case contextBodyLearned:
 			memory.Learned = learned
 			resp.StubbedCount--
@@ -114,11 +113,7 @@ func buildContextResponseConn(
 			resp.StubbedCount--
 		}
 
-		fits, err := contextFits(resp, MaxContextPayloadBytes)
-		if err != nil {
-			return nil, err
-		}
-		if !fits {
+		if !contextFits(resp, MaxContextPayloadBytes) {
 			*memory = old
 			resp.StubbedCount = oldStubbed
 			budgetConstrained = true
@@ -129,9 +124,7 @@ func buildContextResponseConn(
 	if !budgetConstrained {
 		resp.Reason = ""
 	}
-	if fits, err := contextFits(resp, MaxContextPayloadBytes); err != nil {
-		return nil, err
-	} else if !fits {
+	if !contextFits(resp, MaxContextPayloadBytes) {
 		return nil, fmt.Errorf("context response exceeds internal %d-byte budget", MaxContextPayloadBytes)
 	}
 	return resp, nil
@@ -147,13 +140,13 @@ func fetchContextCandidatesConn(
 	candidates := make([]contextCandidate, 0, contextRuleCandidateCap+browseErrorLimit+browseTaskLimit+1)
 	expected := map[string]int{}
 
-	last, err := fetchLastSessionMetadataConn(ctx, conn, taskType)
+	last, err := fetchContextMetadataConn(ctx, conn, "", taskType, "session_summary", 1, "always")
 	if err != nil {
 		return nil, nil, 0, err
 	}
-	if last != nil {
+	if len(last) > 0 {
 		candidates = append(candidates, contextCandidate{
-			memory:      *last,
+			memory:      last[0],
 			destination: contextLastSession,
 			bodyMode:    contextBodyLearned,
 		})
@@ -171,7 +164,7 @@ func fetchContextCandidatesConn(
 	} else {
 		expected["user_rule"] = rulesTotal
 	}
-	rules, err := fetchUserRuleMetadataConn(ctx, conn, taskType, ruleLimit)
+	rules, err := fetchContextMetadataConn(ctx, conn, "", taskType, "user_rule", ruleLimit, "always")
 	if err != nil {
 		return nil, nil, 0, err
 	}
@@ -200,11 +193,11 @@ func fetchContextCandidatesConn(
 		errorLimit, taskLimit = deepErrorLimit, deepTaskLimit
 		bodyMode = contextBodyFull
 	}
-	errorsMetadata, err := fetchBrowseMetadataConn(ctx, conn, ftsQuery, taskType, "error_resolution", errorLimit)
+	errorsMetadata, err := fetchContextMetadataConn(ctx, conn, ftsQuery, taskType, "error_resolution", errorLimit, "browse")
 	if err != nil {
 		return nil, nil, 0, err
 	}
-	patternsMetadata, err := fetchBrowseMetadataConn(ctx, conn, ftsQuery, taskType, "task_pattern", taskLimit)
+	patternsMetadata, err := fetchContextMetadataConn(ctx, conn, ftsQuery, taskType, "task_pattern", taskLimit, "browse")
 	if err != nil {
 		return nil, nil, 0, err
 	}
@@ -220,17 +213,14 @@ func fetchContextCandidatesConn(
 	return candidates, expected, rulesTotal, nil
 }
 
-func appendContextCandidate(resp *ContextResponse, candidate contextCandidate) int {
+func appendContextCandidate(resp *ContextResponse, candidate contextCandidate) {
 	switch candidate.destination {
 	case contextLastSession:
 		resp.LastSession = &candidate.memory
-		return 0
 	case contextUserRules:
 		resp.UserRules = append(resp.UserRules, candidate.memory)
-		return len(resp.UserRules) - 1
 	default:
 		resp.Browse = append(resp.Browse, candidate.memory)
-		return len(resp.Browse) - 1
 	}
 }
 
@@ -242,17 +232,6 @@ func removeContextCandidate(resp *ContextResponse, destination contextDestinatio
 		resp.UserRules = resp.UserRules[:len(resp.UserRules)-1]
 	default:
 		resp.Browse = resp.Browse[:len(resp.Browse)-1]
-	}
-}
-
-func selectedContextMemory(resp *ContextResponse, selected selectedContextCandidate) *ContextMemory {
-	switch selected.candidate.destination {
-	case contextLastSession:
-		return resp.LastSession
-	case contextUserRules:
-		return &resp.UserRules[selected.index]
-	default:
-		return &resp.Browse[selected.index]
 	}
 }
 
@@ -270,40 +249,11 @@ func setContextOmissions(resp *ContextResponse, expected, selected map[string]in
 	}
 }
 
-func contextFits(resp *ContextResponse, maxBytes int) (bool, error) {
-	encoded, err := json.Marshal(resp)
-	if err != nil {
-		return false, fmt.Errorf("marshal context response: %w", err)
-	}
-	return len(encoded) <= maxBytes, nil
-}
-
-func fetchLastSessionMetadataConn(ctx context.Context, conn *sql.Conn, taskType string) (*ContextMemory, error) {
-	var memory ContextMemory
-	err := conn.QueryRowContext(ctx, `
-		SELECT id, kind, title, created_at, authored_at,
-		       expand_count, COALESCE(last_expanded_at, 0)
-		FROM memories
-		WHERE task_type = ? AND kind = 'session_summary'
-		ORDER BY created_at DESC, id DESC
-		LIMIT 1
-	`, taskType).Scan(
-		&memory.ID,
-		&memory.Kind,
-		&memory.Title,
-		&memory.CreatedAt,
-		&memory.AuthoredAt,
-		&memory.ExpandCount,
-		&memory.LastExpandedAt,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("fetch last session metadata: %w", err)
-	}
-	memory.Tier = "always"
-	return &memory, nil
+// contextFits ignores the marshal error: ContextResponse holds only strings,
+// ints and maps of them, which json.Marshal always encodes.
+func contextFits(resp *ContextResponse, maxBytes int) bool {
+	encoded, _ := json.Marshal(resp)
+	return len(encoded) <= maxBytes
 }
 
 func countUserRulesConn(ctx context.Context, conn *sql.Conn, taskType string) (int, error) {
@@ -318,49 +268,16 @@ func countUserRulesConn(ctx context.Context, conn *sql.Conn, taskType string) (i
 	return total, nil
 }
 
-func fetchUserRuleMetadataConn(ctx context.Context, conn *sql.Conn, taskType string, limit int) ([]ContextMemory, error) {
-	rows, err := conn.QueryContext(ctx, `
-		SELECT id, kind, title, created_at, authored_at,
-		       expand_count, COALESCE(last_expanded_at, 0)
-		FROM memories
-		WHERE task_type = ? AND kind = 'user_rule'
-		ORDER BY created_at DESC, id DESC
-		LIMIT ?
-	`, taskType, limit)
-	if err != nil {
-		return nil, fmt.Errorf("fetch user rule metadata: %w", err)
-	}
-	defer rows.Close()
-	out := []ContextMemory{}
-	for rows.Next() {
-		var memory ContextMemory
-		if err := rows.Scan(
-			&memory.ID,
-			&memory.Kind,
-			&memory.Title,
-			&memory.CreatedAt,
-			&memory.AuthoredAt,
-			&memory.ExpandCount,
-			&memory.LastExpandedAt,
-		); err != nil {
-			return nil, fmt.Errorf("scan user rule metadata: %w", err)
-		}
-		memory.Tier = "always"
-		out = append(out, memory)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate user rule metadata: %w", err)
-	}
-	return out, nil
-}
-
-func fetchBrowseMetadataConn(
+// fetchContextMetadataConn returns body-less rows for one kind, newest first
+// (or BM25-ranked when ftsQuery is set), stamped with the given tier.
+func fetchContextMetadataConn(
 	ctx context.Context,
 	conn *sql.Conn,
 	ftsQuery string,
 	taskType string,
 	kind string,
 	limit int,
+	tier string,
 ) ([]ContextMemory, error) {
 	const columns = `m.id, m.kind, m.title, m.created_at, m.authored_at,
 		m.expand_count, COALESCE(m.last_expanded_at, 0)`
@@ -388,7 +305,7 @@ func fetchBrowseMetadataConn(
 		`, ftsQuery, taskType, kind, limit)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("fetch browse metadata (%s): %w", kind, err)
+		return nil, fmt.Errorf("fetch context metadata (%s): %w", kind, err)
 	}
 	defer rows.Close()
 	out := []ContextMemory{}
@@ -403,13 +320,13 @@ func fetchBrowseMetadataConn(
 			&memory.ExpandCount,
 			&memory.LastExpandedAt,
 		); err != nil {
-			return nil, fmt.Errorf("scan browse metadata (%s): %w", kind, err)
+			return nil, fmt.Errorf("scan context metadata (%s): %w", kind, err)
 		}
-		memory.Tier = "browse"
+		memory.Tier = tier
 		out = append(out, memory)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate browse metadata (%s): %w", kind, err)
+		return nil, fmt.Errorf("iterate context metadata (%s): %w", kind, err)
 	}
 	return out, nil
 }

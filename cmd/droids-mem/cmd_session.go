@@ -225,7 +225,6 @@ func newSessionStageCmd() *cobra.Command {
 				What:      what,
 				Learned:   learned,
 				Tags:      tags,
-				Origin:    "auto",
 			}
 			prepared, err := store.PrepareSaveRequest(req)
 			if err != nil {

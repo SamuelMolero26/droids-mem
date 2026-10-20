@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 
 	"github.com/samuelmolero26/droids-mem/internal/store"
@@ -18,21 +19,16 @@ const (
 )
 
 func writeJSON(v any) {
+	writeBoundedJSON(v, math.MaxInt)
+}
+
+func writeBoundedJSON(v any, maxBytes int) {
 	b, err := json.Marshal(v)
 	if err != nil {
 		// Every command's contract is JSON on stdout. Printing nothing and
 		// exiting 0 would read to a consumer as a successful empty result,
 		// which is the worst possible shape for a machine-facing CLI — so an
 		// encoding failure has to be loud.
-		writeError("encode_failed", "cannot encode response: "+err.Error(), false)
-		exitWith(ExitError)
-	}
-	fmt.Fprintln(os.Stdout, string(b))
-}
-
-func writeBoundedJSON(v any, maxBytes int) {
-	b, err := json.Marshal(v)
-	if err != nil {
 		writeError("encode_failed", "cannot encode response: "+err.Error(), false)
 		exitWith(ExitError)
 	}

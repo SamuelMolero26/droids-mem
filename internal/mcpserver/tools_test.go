@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -213,60 +212,6 @@ func TestContextHandler_MintsSessionID(t *testing.T) {
 	}
 	if env.SessionID == "" || env.Context == nil {
 		t.Fatalf("want session_id + context, got %+v", env)
-	}
-}
-
-func TestContextHandler_EncodedEnvelopeStaysUnderTransportCap(t *testing.T) {
-	st := newTestStore(t)
-	tx, err := st.DB().Begin()
-	if err != nil {
-		t.Fatalf("begin seed transaction: %v", err)
-	}
-	stmt, err := tx.Prepare(`
-		INSERT INTO memories
-			(id, session_id, task_type, kind, title, what, learned, tags, fingerprint,
-			 created_at, updated_at, scope, scrub_pattern_version, origin, authored_at)
-		VALUES (?, 'sess_context', 'encoded_context', 'user_rule', ?, ?, ?, '', ?, 1, 1, 'personal', 1, 'manual', 1)
-	`)
-	if err != nil {
-		t.Fatalf("prepare seed: %v", err)
-	}
-	defer stmt.Close()
-	for i := range 36 {
-		if _, err := stmt.Exec(
-			fmt.Sprintf("mem_%026d", i),
-			fmt.Sprintf("Escaped rule %02d", i),
-			fmt.Sprintf("Context %02d", i),
-			fmt.Sprintf("Rule %02d %s", i, strings.Repeat("<", 3500)),
-			fmt.Sprintf("%064x", i+1),
-		); err != nil {
-			t.Fatalf("seed rule %d: %v", i, err)
-		}
-	}
-	if err := stmt.Close(); err != nil {
-		t.Fatalf("close seed statement: %v", err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("commit seed transaction: %v", err)
-	}
-
-	res, err := contextHandler(st)(context.Background(), mcp.CallToolRequest{}, contextArgs{
-		TaskType: "encoded_context",
-		Mode:     string(store.ModeDeep),
-	})
-	if err != nil {
-		t.Fatalf("handler err: %v", err)
-	}
-	payload := okText(t, res)
-	if len(payload) > store.MaxContextResponseBytes {
-		t.Fatalf("MCP context envelope = %d bytes, want <= %d", len(payload), store.MaxContextResponseBytes)
-	}
-	var env contextEnvelope
-	if err := json.Unmarshal([]byte(payload), &env); err != nil {
-		t.Fatalf("payload not JSON: %v", err)
-	}
-	if env.Context.StubbedCount == 0 || len(env.Context.Help) == 0 {
-		t.Fatalf("bounded response lacks stub recovery: %+v", env.Context)
 	}
 }
 

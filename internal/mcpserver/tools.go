@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -316,11 +317,7 @@ func corpusHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, c
 // ---------- helpers ----------
 
 func toolJSON(v any) (*mcp.CallToolResult, error) {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return nil, fmt.Errorf("marshal response: %w", err)
-	}
-	return mcp.NewToolResultText(string(b)), nil
+	return toolJSONBounded(v, math.MaxInt)
 }
 
 func toolJSONBounded(v any, maxBytes int) (*mcp.CallToolResult, error) {
