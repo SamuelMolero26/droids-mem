@@ -2,16 +2,14 @@ package store
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 	"strings"
 )
 
-// Tier sizes for the browse tier. Always-tier returns latest session_summary
-// + the newest maxAlwaysTierUserRules user_rules in full; older rules surface
-// as browse-tier title stubs (ADR-0011) so no rule is ever invisible. Browse
-// tier returns titles + short snippets for shallow scanning.
+// Tier sizes for the browse tier. Always-tier prioritizes the latest
+// session_summary + newest user_rules; older rules surface as browse-tier title
+// stubs until the encoded response budget is full. Explicit omission metadata
+// keeps overflow discoverable through search instead of hiding it silently.
 const (
 	browseErrorLimit   = 10
 	browseTaskLimit    = 10
@@ -21,6 +19,14 @@ const (
 	// budget it exists to spend wisely (ADR-0012).
 	deepErrorLimit = 5
 	deepTaskLimit  = 5
+
+	// MaxContextResponseBytes is the encoded transport ceiling for one
+	// mem_context result. Store.Context stays below MaxContextPayloadBytes so
+	// transport-specific session/help metadata can be added safely.
+	MaxContextResponseBytes = 40_000
+	MaxContextPayloadBytes  = 38_000
+	contextSelectionBytes   = 37_500
+	contextRuleCandidateCap = 512
 )
 
 // ContextMode selects retrieval depth for a Context bundle (ADR-0012).
@@ -28,7 +34,7 @@ type ContextMode string
 
 const (
 	ModeOrient  ContextMode = "orient"  // default: always tier + browse snippets
-	ModeDeep    ContextMode = "deep"    // always tier (all rules full) + browse full bodies
+	ModeDeep    ContextMode = "deep"    // prioritize full bodies, then disclose stubs/omissions at the byte ceiling
 	ModeRefresh ContextMode = "refresh" // always tier only — cheap mid-run re-anchor
 )
 
@@ -38,9 +44,8 @@ type ContextRequest struct {
 	Mode     ContextMode `json:"mode,omitempty"` // optional — defaults to orient
 }
 
-// ContextMemory represents either an always-tier memory (full Learned body)
-// or a browse-tier memory (Snippet truncated from What). Tier field tells
-// the agent which it is.
+// ContextMemory represents a full memory, a snippet, or a title-only stub. Tier
+// identifies priority; the body fields identify how much detail fit.
 type ContextMemory struct {
 	ID             string `json:"id"`
 	Kind           string `json:"kind"`
@@ -59,21 +64,42 @@ type ContextResponse struct {
 	TaskType    string          `json:"task_type"`
 	LastSession *ContextMemory  `json:"last_session,omitempty"`
 	UserRules   []ContextMemory `json:"user_rules"`
-	// UserRulesTotal counts all user_rule rows for the task_type. When it
-	// exceeds len(UserRules), the overflow appears in Browse as title stubs.
+	// UserRulesTotal counts every user_rule row for the task_type. Returned rules
+	// may be full, stubbed, or included in OmittedByKind when the budget fills.
 	UserRulesTotal int             `json:"user_rules_total"`
 	Browse         []ContextMemory `json:"browse"`
+	// StubbedCount counts returned memories without a complete body. Omitted
+	// counts memories the selected mode would otherwise return but the encoded
+	// response budget could not carry.
+	StubbedCount  int            `json:"stubbed_count,omitempty"`
+	OmittedCount  int            `json:"omitted_count,omitempty"`
+	OmittedByKind map[string]int `json:"omitted_by_kind,omitempty"`
+	Reason        string         `json:"reason,omitempty"`
 	// Help carries contextual-disclosure hints (AXI §9) pointing at the
 	// full-detail escape hatch for stub IDs. Never set by Store.Context
-	// itself — the CLI/MCP boundary sets it when Browse is non-empty, with
-	// transport-appropriate syntax, so this stays neutral here.
+	// itself — the CLI/MCP boundary sets it when stubs or omissions need a
+	// transport-appropriate recovery path, so this stays neutral here.
 	Help []string `json:"help,omitempty"`
 }
 
 func (s *Store) Context(ctx context.Context, req ContextRequest) (*ContextResponse, error) {
 	taskType := strings.ToLower(strings.TrimSpace(req.TaskType))
 	if taskType == "" {
-		return nil, &ValidationError{Field: "task_type", Message: "required"}
+		return nil, &ValidationError{Field: "task_type", Message: "required", Retryable: true}
+	}
+	if !reTaskType.MatchString(taskType) {
+		return nil, &ValidationError{
+			Field:      "task_type",
+			Message:    "must be a lowercase slug ^[a-z0-9][a-z0-9._-]*$ — no spaces, slashes, or '..'",
+			Retryable:  true,
+			Suggestion: "use the git repo or top-level dir name, e.g. 'droids-mem'",
+		}
+	}
+	if err := enforceFieldCap("task_type", taskType, MaxTaskTypeLen, "use a short workflow slug, e.g. 'crm_upload'"); err != nil {
+		return nil, err
+	}
+	if err := checkIdentifierForSecrets("task_type", taskType); err != nil {
+		return nil, err
 	}
 
 	mode := ContextMode(strings.ToLower(strings.TrimSpace(string(req.Mode))))
@@ -114,17 +140,12 @@ func (s *Store) Context(ctx context.Context, req ContextRequest) (*ContextRespon
 		ftsQuery = phraseFTSQuery(strings.TrimSpace(req.Query))
 	}
 
-	resp := &ContextResponse{
-		TaskType:  taskType,
-		UserRules: []ContextMemory{},
-		Browse:    []ContextMemory{},
-	}
-
-	// All four reads run inside a single BEGIN DEFERRED on a dedicated
-	// connection so the returned bundle is a consistent snapshot. Without
-	// this, a concurrent writer could commit between fetchLastSession and
-	// fetchBrowseTier, producing a bundle that mixes pre- and post-write
-	// state (e.g. retention prune deleted the old session_summary, new one
+	// Metadata selection and selected-body hydration run inside a single BEGIN
+	// DEFERRED on a dedicated connection so the returned bundle is a consistent
+	// snapshot. Without
+	// this, a concurrent writer could commit between phases, producing a bundle
+	// that mixes pre- and post-write state (e.g. retention prune deleted the old
+	// session_summary, new one
 	// not yet committed → LastSession is stale or missing while browse-tier
 	// rows reference the new session_id).
 	conn, err := s.db.Conn(ctx)
@@ -132,50 +153,11 @@ func (s *Store) Context(ctx context.Context, req ContextRequest) (*ContextRespon
 		return nil, fmt.Errorf("acquire conn: %w", err)
 	}
 	defer conn.Close()
+	var resp *ContextResponse
 	err = withTx(ctx, conn, "DEFERRED", "context", func() error {
-		last, err := fetchLastSessionConn(ctx, conn, taskType)
-		if err != nil {
-			return err
-		}
-		if last != nil {
-			resp.LastSession = last
-		}
-
-		// deep expands every overflow user_rule to full body (fullCap < 0 → no
-		// stubs); orient/refresh keep the always-tier cap and surface the rest as
-		// stubs (which refresh then discards).
-		fullCap := maxAlwaysTierUserRules
-		if mode == ModeDeep {
-			fullCap = -1
-		}
-		rules, ruleStubs, rulesTotal, err := fetchUserRulesConn(ctx, conn, taskType, fullCap)
-		if err != nil {
-			return err
-		}
-		resp.UserRules = rules
-		resp.UserRulesTotal = rulesTotal
-
-		switch mode {
-		case ModeRefresh:
-			// Always tier only — no browse, no rule stubs. Cheap re-anchor.
-		case ModeDeep:
-			// Full bodies, tighter limits; rules are already all full above, so no
-			// stubs lead the browse tier.
-			browse, err := fetchBrowseTierConn(ctx, conn, ftsQuery, taskType, true, deepErrorLimit, deepTaskLimit)
-			if err != nil {
-				return err
-			}
-			resp.Browse = browse
-		default: // ModeOrient
-			browse, err := fetchBrowseTierConn(ctx, conn, ftsQuery, taskType, false, browseErrorLimit, browseTaskLimit)
-			if err != nil {
-				return err
-			}
-			// Rule stubs lead the browse tier: rules are critical state, so their
-			// titles must be seen before the BM25-ranked errors/patterns (ADR-0011).
-			resp.Browse = append(ruleStubs, browse...)
-		}
-		return nil
+		var buildErr error
+		resp, buildErr = buildContextResponseConn(ctx, conn, taskType, ftsQuery, mode)
+		return buildErr
 	})
 	if err != nil {
 		return nil, err
@@ -183,149 +165,11 @@ func (s *Store) Context(ctx context.Context, req ContextRequest) (*ContextRespon
 	return resp, nil
 }
 
-func fetchLastSessionConn(ctx context.Context, conn *sql.Conn, taskType string) (*ContextMemory, error) {
-	var m ContextMemory
-	err := conn.QueryRowContext(ctx, `
-		SELECT id, kind, title, learned, created_at, authored_at,
-		       expand_count, COALESCE(last_expanded_at, 0)
-		FROM memories
-		WHERE task_type = ? AND kind = 'session_summary'
-		ORDER BY created_at DESC, id DESC
-		LIMIT 1
-	`, taskType).Scan(&m.ID, &m.Kind, &m.Title, &m.Learned, &m.CreatedAt, &m.AuthoredAt, &m.ExpandCount, &m.LastExpandedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("fetch last session: %w", err)
-	}
-	m.Tier = "always"
-	return &m, nil
-}
-
 // maxAlwaysTierUserRules bounds the always-tier user_rule slice so the
 // context bundle payload stays within the PRD §3.2 budget. Locked decision
 // #20, amended by ADR-0011: older rules are not silently dropped — they come
 // back as browse-tier title stubs the agent can expand via mem_get.
 const maxAlwaysTierUserRules = 5
-
-// fetchUserRulesConn returns the newest rules in full body (always tier) up to
-// fullCap, the remainder as browse-tier title stubs, and the total rule count
-// for the task_type. A negative fullCap means "no cap" — every rule comes back
-// as a full-body always-tier item and stubs is empty (deep mode, ADR-0012).
-func fetchUserRulesConn(ctx context.Context, conn *sql.Conn, taskType string, fullCap int) (rules, stubs []ContextMemory, total int, err error) {
-	rows, err := conn.QueryContext(ctx, `
-		SELECT id, kind, title, learned, created_at, authored_at,
-		       expand_count, COALESCE(last_expanded_at, 0)
-		FROM memories
-		WHERE task_type = ? AND kind = 'user_rule'
-		ORDER BY created_at DESC, id DESC
-	`, taskType)
-	if err != nil {
-		return nil, nil, 0, fmt.Errorf("fetch user rules: %w", err)
-	}
-	defer rows.Close()
-	rules = []ContextMemory{}
-	stubs = []ContextMemory{}
-	for rows.Next() {
-		var m ContextMemory
-		var learned string
-		if err := rows.Scan(&m.ID, &m.Kind, &m.Title, &learned, &m.CreatedAt, &m.AuthoredAt, &m.ExpandCount, &m.LastExpandedAt); err != nil {
-			return nil, nil, 0, fmt.Errorf("scan user rule: %w", err)
-		}
-		total++
-		if fullCap < 0 || len(rules) < fullCap {
-			m.Tier = "always"
-			m.Learned = learned
-			rules = append(rules, m)
-		} else {
-			m.Tier = "browse"
-			stubs = append(stubs, m)
-		}
-	}
-	return rules, stubs, total, rows.Err()
-}
-
-// fetchBrowseTierConn returns top-N error_resolution and task_pattern memories
-// ranked by BM25. When full is false (orient) each item carries a snippet of
-// `what`; when true (deep) each carries the full `what`+`learned` body instead.
-func fetchBrowseTierConn(ctx context.Context, conn *sql.Conn, ftsQuery, taskType string, full bool, errLimit, taskLimit int) ([]ContextMemory, error) {
-	errs, err := fetchBrowseKindConn(ctx, conn, ftsQuery, taskType, "error_resolution", errLimit, full)
-	if err != nil {
-		return nil, err
-	}
-	patterns, err := fetchBrowseKindConn(ctx, conn, ftsQuery, taskType, "task_pattern", taskLimit, full)
-	if err != nil {
-		return nil, err
-	}
-	// The two kinds are disjoint, so no row can appear in both lists.
-	return append(errs, patterns...), nil
-}
-
-func fetchBrowseKindConn(ctx context.Context, conn *sql.Conn, ftsQuery, taskType, kind string, limit int, full bool) ([]ContextMemory, error) {
-	// Orient discards `learned` (it only renders a snippet of `what`), so the
-	// column is substituted with an empty literal rather than read — a browse
-	// tier of 20 rows would otherwise pull 20 full bodies off overflow pages on
-	// every session-start call just to throw them away.
-	learnedCol := `''`
-	if full {
-		learnedCol = `m.learned`
-	}
-	browseCols := `m.id, m.kind, m.title, m.what, ` + learnedCol + `, m.created_at, m.authored_at,
-		       m.expand_count, COALESCE(m.last_expanded_at, 0)`
-
-	var (
-		rows *sql.Rows
-		err  error
-	)
-	if ftsQuery == "" {
-		// No query, no relevance signal: rank by recency. The FTS join is
-		// dropped rather than matched against a placeholder — task_type and
-		// kind already scope the rows, and bm25() is only legal alongside a
-		// MATCH. id DESC only breaks created_at ties (routine: a session-end
-		// rollup saves several memories in one second) so the sort is total.
-		rows, err = conn.QueryContext(ctx, `
-			SELECT `+browseCols+`
-			FROM memories m
-			WHERE m.task_type = ?
-			AND m.kind = ?
-			ORDER BY m.created_at DESC, m.id DESC
-			LIMIT ?
-		`, taskType, kind, limit)
-	} else {
-		rows, err = conn.QueryContext(ctx, `
-			SELECT `+browseCols+`
-			FROM memories_fts fts
-			JOIN memories m ON m.rowid = fts.rowid
-			WHERE memories_fts MATCH ?
-			AND m.task_type = ?
-			AND m.kind = ?
-			ORDER BY bm25(memories_fts, 3, 1, 2, 1)
-			LIMIT ?
-		`, ftsQuery, taskType, kind, limit)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("fetch browse (%s): %w", kind, err)
-	}
-	defer rows.Close()
-	out := []ContextMemory{}
-	for rows.Next() {
-		var m ContextMemory
-		var what, learned string
-		if err := rows.Scan(&m.ID, &m.Kind, &m.Title, &what, &learned, &m.CreatedAt, &m.AuthoredAt, &m.ExpandCount, &m.LastExpandedAt); err != nil {
-			return nil, fmt.Errorf("scan browse (%s): %w", kind, err)
-		}
-		m.Tier = "browse"
-		if full {
-			m.What = what
-			m.Learned = learned
-		} else {
-			m.Snippet = snippet(what, browseSnippetChars)
-		}
-		out = append(out, m)
-	}
-	return out, rows.Err()
-}
 
 // snippet truncates s to at most n runes (NOT bytes) so multi-byte UTF-8
 // (CJK, emoji, accented Latin) is never cut mid-rune. CONTEXT.md defines
