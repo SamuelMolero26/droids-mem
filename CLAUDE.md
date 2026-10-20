@@ -111,8 +111,10 @@ Both layers run inside a `BEGIN IMMEDIATE` transaction to close the dedupe race.
 
 The persisted authored payload (`title + what + learned + tags`) is capped at
 6 KiB after trimming and scrubbing. New writes reject over-cap content with a
-retryable structured error; shared-pool rows from pre-cap wire formats remain
-importable, while current-format imports obey the cap.
+retryable structured error. Shared-pool imports are accepted regardless and
+bounded only by per-field caps — nothing on the wire can prove a row predates
+the cap. `doctor` warns about oversized rows; a `supersedes`/`force` save
+replaces one and goes through the cap.
 
 ## Context bundle
 

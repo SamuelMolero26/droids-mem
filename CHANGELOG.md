@@ -13,6 +13,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   keeps encoded responses under 40,000 bytes through deterministic stubs and
   categorized omissions with `mem_get` / `mem_search` recovery paths. Context
   loading selects bounded metadata before fetching only the bodies that fit.
+  Shared-pool imports stay bounded by per-field caps only, so pre-cap memories
+  survive import; `doctor` counts rows over the cap, and a `--supersedes` save
+  shortens them.
 
 ### Changed
 - **Session start routes to `mem_context` with a query.** The core loop sent

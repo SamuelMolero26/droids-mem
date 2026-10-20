@@ -79,6 +79,22 @@ func (s *Store) Doctor(ctx context.Context, dbPath string) (*DoctorReport, error
 
 	rep.Warnings = growthWarnings(rep.BytesAfter, rep.TotalRows)
 
+	// Rows over the combined cap predate it or arrived via import. length() on
+	// TEXT counts characters, so cast to BLOB to measure bytes like Save does.
+	var oversized int64
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM memories
+		WHERE length(CAST(title AS BLOB)) + length(CAST(what AS BLOB))
+		    + length(CAST(learned AS BLOB)) + length(CAST(tags AS BLOB)) > ?
+	`, MaxMemoryPayloadBytes).Scan(&oversized); err != nil {
+		return nil, fmt.Errorf("count oversized memories: %w", err)
+	}
+	if oversized > 0 {
+		rep.Warnings = append(rep.Warnings, fmt.Sprintf(
+			"%d memories exceed the %d-byte payload cap; shorten each with `mem_save --supersedes <id>`",
+			oversized, MaxMemoryPayloadBytes))
+	}
+
 	return rep, nil
 }
 

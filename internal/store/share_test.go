@@ -62,8 +62,6 @@ func TestShare_ExportOnlyShared(t *testing.T) {
 	}
 	if got := exportLines(t, s); len(got) != 1 || got[0].Title != "Shared lesson" {
 		t.Fatalf("export = %+v, want the one shared row", got)
-	} else if got[0].FormatVersion != store.CurrentSharedFormatVersion {
-		t.Errorf("format_version = %d, want %d", got[0].FormatVersion, store.CurrentSharedFormatVersion)
 	}
 }
 
@@ -102,9 +100,13 @@ not json
 	}
 }
 
-func TestShare_ImportGrandfathersLegacyCombinedPayload(t *testing.T) {
+// TestShare_ImportAcceptsOversizedCombinedPayload pins the legacy-row policy:
+// an imported row over the combined cap (but within per-field caps) lands,
+// while a local Save of the same content is still rejected by the cap.
+func TestShare_ImportAcceptsOversizedCombinedPayload(t *testing.T) {
 	s := newTestStore(t)
-	legacy := store.SharedMemory{
+	ctx := context.Background()
+	row := store.SharedMemory{
 		Kind:     "task_pattern",
 		TaskType: "legacy_pool",
 		Title:    strings.Repeat("t", 100),
@@ -112,50 +114,32 @@ func TestShare_ImportGrandfathersLegacyCombinedPayload(t *testing.T) {
 		Learned:  strings.Repeat("l", 4096),
 		Tags:     "legacy",
 	}
-	line, err := json.Marshal(legacy)
+	line, err := json.Marshal(row)
 	if err != nil {
-		t.Fatalf("marshal legacy row: %v", err)
+		t.Fatalf("marshal row: %v", err)
 	}
 
-	res, err := s.ImportShared(context.Background(), bytes.NewReader(append(line, '\n')))
+	res, err := s.ImportShared(ctx, bytes.NewReader(append(line, '\n')))
 	if err != nil {
-		t.Fatalf("import legacy row: %v", err)
+		t.Fatalf("import row: %v", err)
 	}
 	if res.Imported != 1 || res.Skipped != 0 || res.Failed != 0 {
-		t.Fatalf("legacy import = %+v, want imported=1", res)
+		t.Fatalf("import = %+v, want imported=1", res)
+	}
+	if rows := exportLines(t, s); len(rows) != 1 || rows[0].TaskType != row.TaskType {
+		t.Fatalf("imported row did not round-trip: %+v", rows)
 	}
 
-	rows := exportLines(t, s)
-	if len(rows) != 1 || rows[0].TaskType != legacy.TaskType {
-		t.Fatalf("legacy row did not round-trip: %+v", rows)
-	}
-	if rows[0].FormatVersion != 1 {
-		t.Errorf("legacy row format_version = %d, want 1", rows[0].FormatVersion)
-	}
-}
-
-func TestShare_ImportRejectsOversizedCurrentFormatPayload(t *testing.T) {
-	s := newTestStore(t)
-	current := store.SharedMemory{
-		FormatVersion: store.CurrentSharedFormatVersion,
-		Kind:          "task_pattern",
-		TaskType:      "current_pool",
-		Title:         strings.Repeat("t", 100),
-		What:          strings.Repeat("w", 2000),
-		Learned:       strings.Repeat("l", 4096),
-		Tags:          "current",
-	}
-	line, err := json.Marshal(current)
-	if err != nil {
-		t.Fatalf("marshal current row: %v", err)
-	}
-
-	res, err := s.ImportShared(context.Background(), bytes.NewReader(append(line, '\n')))
-	if err != nil {
-		t.Fatalf("import current row: %v", err)
-	}
-	if res.Imported != 0 || res.Skipped != 0 || res.Failed != 1 {
-		t.Fatalf("current import = %+v, want failed=1", res)
+	_, err = s.Save(ctx, store.SaveRequest{
+		TaskType: row.TaskType,
+		Kind:     row.Kind,
+		Title:    row.Title,
+		What:     row.What,
+		Learned:  row.Learned,
+		Tags:     row.Tags,
+	})
+	if ve := mustValidationError(t, err); ve.Code != "memory_payload_too_large" {
+		t.Fatalf("local save code = %q, want memory_payload_too_large", ve.Code)
 	}
 }
 

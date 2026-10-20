@@ -118,9 +118,10 @@ type SaveRequest struct {
 	// independent of created_at (which always means "entered this store").
 	// Pure provenance: it is never an ordering key.
 	AuthoredAt int64 `json:"authored_at,omitempty"`
-	// allowOversizedPayload is reserved for ImportShared rows from wire formats
-	// that predate the combined cap. Individual caps, scrubbing, and every other
-	// validation rule still apply.
+	// allowOversizedPayload is reserved for ImportShared rows: imports are
+	// bounded by per-field caps only, because the importer cannot verify any
+	// peer-supplied provenance that would mark a row as pre-cap. Scrubbing and
+	// every other validation rule still apply.
 	allowOversizedPayload bool
 }
 
