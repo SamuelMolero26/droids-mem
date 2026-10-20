@@ -129,7 +129,7 @@ func graphBuildWaitToolDef() mcp.Tool {
 			mcp.Description("Absolute path to the project root.")),
 		mcp.WithInteger("timeout",
 			mcp.Description("Max seconds to wait (default 30, max 60)."),
-			mcp.DefaultNumber(10), mcp.Min(1), mcp.Max(60),
+			mcp.DefaultNumber(30), mcp.Min(1), mcp.Max(60),
 		),
 	)
 }
