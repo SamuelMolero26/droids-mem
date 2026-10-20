@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -40,7 +41,7 @@ type saveArgs struct {
 
 func saveToolDef() mcp.Tool {
 	return mcp.NewTool("mem_save",
-		mcp.WithDescription("Save a reusable lesson, unprompted: a fix that worked, a repeatable approach, a user correction. Returns the saved or matched id, the session_id, and a scrub block if sensitive content was redacted."),
+		mcp.WithDescription("Save a reusable lesson, unprompted: a fix that worked, a repeatable approach, a user correction. Combined title + what + learned + tags: max 6144 bytes. Returns the saved or matched id, the session_id, and a scrub block if sensitive content was redacted."),
 		mcp.WithString("kind", mcp.Required(),
 			mcp.Description("Memory kind."),
 			mcp.Enum("error_resolution", "task_pattern", "user_rule", "session_summary"),
@@ -170,13 +171,13 @@ type contextEnvelope struct {
 
 func contextToolDef() mcp.Tool {
 	return mcp.NewTool("mem_context",
-		mcp.WithDescription("Load the orientation bundle for a task_type. Call first at every task start: task_type = the git repo name (same string every session), query = a short task description. Returns always-tier memories (full body), browse-tier titles/snippets, and a session_id for later mem_save calls."),
+		mcp.WithDescription("Load the byte-bounded orientation bundle for a task_type. Call first at every task start: task_type = the git repo name, query = a short task description. Bodies that do not fit become stubs or categorized omissions; use mem_get for stubs and mem_search then mem_get for omissions. Returns a session_id for later mem_save calls."),
 		mcp.WithString("task_type", mcp.Required(),
 			mcp.Description("Workflow tag scoping the bundle.")),
 		mcp.WithString("query",
 			mcp.Description("Short task description; ranks the browse tier by relevance. Absent or punctuation-only ranks by recency, missing older lessons. Invalid with mode=refresh.")),
 		mcp.WithString("mode",
-			mcp.Description("orient (default: always tier + browse snippets), deep (all rules and browse bodies in full), refresh (always tier only; cheap mid-run re-anchor).")),
+			mcp.Description("orient (default: prioritized bodies + browse snippets/stubs), deep (more full bodies within the same byte budget), refresh (always tier only).")),
 		mcp.WithString("session_id",
 			mcp.Description("Omit only on a Run's first call (mints one). On later calls (topic pivot, mode=refresh) pass it back, or the Run's memories split across two ids.")),
 	)
@@ -184,6 +185,9 @@ func contextToolDef() mcp.Tool {
 
 func contextHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, contextArgs) (*mcp.CallToolResult, error) {
 	return func(ctx context.Context, _ mcp.CallToolRequest, a contextArgs) (*mcp.CallToolResult, error) {
+		if err := store.ValidateSessionID(a.SessionID); err != nil {
+			return toolErr(err), nil
+		}
 		resp, err := st.Context(ctx, store.ContextRequest{
 			TaskType: a.TaskType,
 			Query:    a.Query,
@@ -196,12 +200,16 @@ func contextHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, 
 		if sid == "" {
 			sid = "sess_" + ulid.Make().String()
 		}
-		if len(resp.Browse) > 0 {
-			// Contextual disclosure (AXI §9): stub IDs are expandable via
-			// mem_get. Omitted when Browse is empty (omit-when-self-contained).
-			resp.Help = []string{"Call mem_get with a browse-tier id to read the full body"}
+		if resp.StubbedCount > 0 {
+			resp.Help = []string{"Call mem_get with a returned stub id to read the full body"}
 		}
-		return toolJSON(contextEnvelope{SessionID: sid, Context: resp})
+		if resp.OmittedCount > 0 {
+			resp.Help = append(resp.Help, "Call mem_search for omitted memories, then mem_get with a result id")
+		}
+		return toolJSONBounded(
+			contextEnvelope{SessionID: sid, Context: resp},
+			store.MaxContextResponseBytes,
+		)
 	}
 }
 
@@ -213,7 +221,7 @@ type getArgs struct {
 
 func getToolDef() mcp.Tool {
 	return mcp.NewTool("mem_get",
-		mcp.WithDescription("Fetch one memory's full body by id (a mem_context browse id or mem_search result id). Expand a stub before relying on it; list responses carry only previews."),
+		mcp.WithDescription("Fetch one memory's full body by id (a mem_context stub id or mem_search result id). Expand a stub before relying on it; list responses carry only previews."),
 		mcp.WithString("id", mcp.Required(),
 			mcp.Description("Memory id, e.g. 'mem_01J...'.")),
 	)
@@ -309,9 +317,16 @@ func corpusHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, c
 // ---------- helpers ----------
 
 func toolJSON(v any) (*mcp.CallToolResult, error) {
+	return toolJSONBounded(v, math.MaxInt)
+}
+
+func toolJSONBounded(v any, maxBytes int) (*mcp.CallToolResult, error) {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return nil, fmt.Errorf("marshal response: %w", err)
+	}
+	if len(b) > maxBytes {
+		return toolErr(fmt.Errorf("encoded response exceeds %d-byte transport budget", maxBytes)), nil
 	}
 	return mcp.NewToolResultText(string(b)), nil
 }

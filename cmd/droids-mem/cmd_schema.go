@@ -1,11 +1,18 @@
 package main
 
-import "github.com/spf13/cobra"
+import (
+	"github.com/samuelmolero26/droids-mem/internal/store"
+	"github.com/spf13/cobra"
+)
 
 var schemaDefinitions = map[string]any{
 	"save": map[string]any{
 		"command":     "save",
 		"description": "Save a structured memory",
+		"constraints": map[string]any{
+			"combined_payload_max_bytes": store.MaxMemoryPayloadBytes,
+			"combined_payload_fields":    []string{"title", "what", "learned", "tags"},
+		},
 		"flags": []map[string]any{
 			{"name": "task-type", "type": "string", "required": true, "description": "Task type identifier, e.g. crm_upload"},
 			{"name": "kind", "type": "enum", "required": true, "values": []string{"error_resolution", "task_pattern", "user_rule", "session_summary"}},
@@ -35,14 +42,19 @@ var schemaDefinitions = map[string]any{
 		"flags": []map[string]any{
 			{"name": "task-type", "type": "string", "required": true, "description": "Task type to load context for"},
 			{"name": "query", "type": "string", "required": false, "description": "FTS query for browse-tier ranking; absent or punctuation-only ranks the tier by recency instead; invalid with --mode refresh"},
-			{"name": "mode", "type": "enum", "required": false, "values": []string{"orient", "deep", "refresh"}, "default": "orient", "description": "Retrieval depth: orient = always tier + browse snippets; deep = always tier (all rules full) + browse full bodies; refresh = always tier only"},
+			{"name": "mode", "type": "enum", "required": false, "values": []string{"orient", "deep", "refresh"}, "default": "orient", "description": "Retrieval depth: orient = prioritized full bodies + browse snippets/stubs; deep = prioritize more full bodies within the same byte budget; refresh = always tier only"},
 		},
+		"encoded_response_max_bytes": store.MaxContextResponseBytes,
 		"response": map[string]any{
 			"task_type":        "string",
-			"last_session":     "ContextMemory? (always tier — full body)",
-			"user_rules":       "[]ContextMemory (always tier — full body; capped at 5 in orient/refresh, all rules in deep)",
+			"last_session":     "ContextMemory? (always tier; full body or recoverable stub)",
+			"user_rules":       "[]ContextMemory (always tier; full bodies prioritized, then stubs)",
 			"user_rules_total": "int (count of all user_rule rows for task_type)",
-			"browse":           "[]ContextMemory (orient: title + 120-char snippet of `what`; deep: full `what`+`learned`; refresh: empty)",
+			"browse":           "[]ContextMemory (orient: rule stubs + ranked snippets; deep: ranked full bodies or stubs; refresh: empty)",
+			"stubbed_count":    "int? (returned memories without complete bodies)",
+			"omitted_count":    "int? (mode-eligible memories excluded by the encoded byte budget)",
+			"omitted_by_kind":  "object? (omitted counts keyed by memory kind)",
+			"reason":           "string? (encoded_response_budget when budget changed the result)",
 		},
 	},
 	"list": map[string]any{

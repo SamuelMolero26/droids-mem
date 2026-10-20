@@ -53,10 +53,11 @@ const defaultOrigin = "manual"
 // distilled lessons; without them the worst-case storage budget (PRD §3.2)
 // blows past the 25 MB target.
 const (
-	MaxTitleLen   = 200
-	MaxWhatLen    = 8192
-	MaxLearnedLen = 4096
-	MaxTagsLen    = 500
+	MaxTitleLen           = 200
+	MaxWhatLen            = 8192
+	MaxLearnedLen         = 4096
+	MaxTagsLen            = 500
+	MaxMemoryPayloadBytes = 6 * 1024
 	// MaxTaskTypeLen / MaxSessionIDLen bound the two free-form identifier
 	// fields. Without caps they bypass the storage budget entirely (every
 	// other field is capped) and bloat the FTS index via task_type. Real
@@ -117,6 +118,11 @@ type SaveRequest struct {
 	// independent of created_at (which always means "entered this store").
 	// Pure provenance: it is never an ordering key.
 	AuthoredAt int64 `json:"authored_at,omitempty"`
+	// allowOversizedPayload is reserved for ImportShared rows: imports are
+	// bounded by per-field caps only, because the importer cannot verify any
+	// peer-supplied provenance that would mark a row as pre-cap. Scrubbing and
+	// every other validation rule still apply.
+	allowOversizedPayload bool
 }
 
 // resolveAuthoredAt clamps an out-of-range stamp to now: authored_at crosses
@@ -160,7 +166,7 @@ type ValidationError struct {
 	Message    string `json:"message"`
 	Retryable  bool   `json:"retryable"`
 	Suggestion string `json:"suggestion,omitempty"`
-	// Limit/Actual are set only on field_too_large, both in bytes.
+	// Limit/Actual are set on byte-budget errors.
 	Limit           int                `json:"limit,omitempty"`
 	Actual          int                `json:"actual,omitempty"`
 	OffendingTags   []string           `json:"offending_tags,omitempty"`
@@ -734,7 +740,7 @@ func validate(req *SaveRequest) (*scrub.ScrubReport, error) {
 	if err := enforceFieldCap("task_type", req.TaskType, MaxTaskTypeLen, "use a short workflow slug, e.g. 'crm_upload'"); err != nil {
 		return nil, err
 	}
-	if err := enforceFieldCap("session_id", req.SessionID, MaxSessionIDLen, "pass the session_id minted by mem_context, or omit it"); err != nil {
+	if err := ValidateSessionID(req.SessionID); err != nil {
 		return nil, err
 	}
 	if err := enforceFieldCap("title", req.Title, MaxTitleLen, "shorten the title to under the cap"); err != nil {
@@ -757,9 +763,6 @@ func validate(req *SaveRequest) (*scrub.ScrubReport, error) {
 	// in FTS + context bundles, so a secret in them is as bad as one in tags.
 	// Same strict-reject policy: the agent rewrites, nothing is auto-stripped.
 	if err := checkIdentifierForSecrets("task_type", req.TaskType); err != nil {
-		return nil, err
-	}
-	if err := checkIdentifierForSecrets("session_id", req.SessionID); err != nil {
 		return nil, err
 	}
 
@@ -789,8 +792,43 @@ func validate(req *SaveRequest) (*scrub.ScrubReport, error) {
 			Scrub:      &agg,
 		}
 	}
+	if !req.allowOversizedPayload {
+		actual := memoryPayloadBytes(*req)
+		if actual > MaxMemoryPayloadBytes {
+			return nil, &ValidationError{
+				Code:       "memory_payload_too_large",
+				Field:      "memory",
+				Message:    fmt.Sprintf("title + what + learned + tags must be at most %d bytes (got %d)", MaxMemoryPayloadBytes, actual),
+				Limit:      MaxMemoryPayloadBytes,
+				Actual:     actual,
+				Retryable:  true,
+				Suggestion: "condense the memory to its essential context and reusable lesson",
+			}
+		}
+	}
 
 	return &agg, nil
+}
+
+// PrepareSaveRequest applies the complete save validation and scrub policy
+// without touching the database. The returned copy is normalized and safe to
+// stage without retaining raw secrets that the eventual Save would redact.
+func PrepareSaveRequest(req SaveRequest) (SaveRequest, error) {
+	_, err := validate(&req)
+	return req, err
+}
+
+// ValidateSessionID applies the same persisted-identifier policy used by Save.
+// Empty is valid because both save and context mint an id when one is omitted.
+func ValidateSessionID(sessionID string) error {
+	if err := enforceFieldCap("session_id", sessionID, MaxSessionIDLen, "pass the session_id minted by mem_context, or omit it"); err != nil {
+		return err
+	}
+	return checkIdentifierForSecrets("session_id", sessionID)
+}
+
+func memoryPayloadBytes(req SaveRequest) int {
+	return len(req.Title) + len(req.What) + len(req.Learned) + len(req.Tags)
 }
 
 // enforceFieldCap measures bytes, not runes — caps protect the byte-denominated

@@ -215,6 +215,54 @@ func TestContextHandler_MintsSessionID(t *testing.T) {
 	}
 }
 
+func TestContextHandler_StubbedSessionDisclosesGetWithoutBrowse(t *testing.T) {
+	st := newTestStore(t)
+	if _, err := st.DB().Exec(`
+		INSERT INTO memories
+			(id, session_id, task_type, kind, title, what, learned, tags, fingerprint,
+			 created_at, updated_at, scope, scrub_pattern_version, origin, authored_at)
+		VALUES (?, 'sess_legacy', 'legacy_session', 'session_summary', 'Legacy summary',
+		        'legacy context', ?, '', ?, 1, 1, 'personal', 1, 'manual', 1)
+	`, "mem_00000000000000000000000001", strings.Repeat("<", 7000), strings.Repeat("f", 64)); err != nil {
+		t.Fatalf("seed legacy session: %v", err)
+	}
+
+	res, err := contextHandler(st)(context.Background(), mcp.CallToolRequest{}, contextArgs{
+		TaskType: "legacy_session",
+		Mode:     string(store.ModeRefresh),
+	})
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	var env contextEnvelope
+	if err := json.Unmarshal([]byte(okText(t, res)), &env); err != nil {
+		t.Fatalf("payload not JSON: %v", err)
+	}
+	if len(env.Context.Browse) != 0 || env.Context.LastSession == nil {
+		t.Fatalf("unexpected refresh shape: %+v", env.Context)
+	}
+	if env.Context.LastSession.Learned != "" || env.Context.StubbedCount != 1 {
+		t.Fatalf("legacy session was not stubbed: %+v", env.Context.LastSession)
+	}
+	if len(env.Context.Help) != 1 || !strings.Contains(env.Context.Help[0], "mem_get") {
+		t.Fatalf("stubbed session help = %v, want mem_get disclosure", env.Context.Help)
+	}
+}
+
+func TestContextHandler_RejectsOversizedSessionID(t *testing.T) {
+	st := newTestStore(t)
+	res, err := contextHandler(st)(context.Background(), mcp.CallToolRequest{}, contextArgs{
+		TaskType:  "handlertest",
+		SessionID: strings.Repeat("s", store.MaxSessionIDLen+1),
+	})
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	if !res.IsError || !strings.Contains(errText(t, res), "session_id") {
+		t.Fatalf("oversized session_id was not rejected: %+v", res)
+	}
+}
+
 func TestGetHandler_NotFound(t *testing.T) {
 	st := newTestStore(t)
 	res, err := getHandler(st)(context.Background(), mcp.CallToolRequest{}, getArgs{ID: "mem_DOESNOTEXIST"})

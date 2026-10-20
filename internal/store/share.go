@@ -107,7 +107,8 @@ type ImportResult struct {
 // stream on a line over its 64KB token cap, which a crafted pool line could
 // trigger to defeat exactly that guarantee; Reader grows to any line length, so
 // an oversized row just fails its own Unmarshal. Only a genuine store failure
-// (write-lock, disk) aborts.
+// (write-lock, disk) aborts. Imported rows skip the combined payload cap — see
+// importLine.
 func (s *Store) ImportShared(ctx context.Context, r io.Reader) (ImportResult, error) {
 	var res ImportResult
 	br := bufio.NewReader(r)
@@ -144,6 +145,10 @@ func (s *Store) importLine(ctx context.Context, line []byte, res *ImportResult) 
 		Learned:  m.Learned,
 		Tags:     m.Tags,
 		Scope:    "shared",
+		// Pools predate the combined cap and nothing on the wire can prove a
+		// row is legacy, so imports are bounded by per-field caps only. Doctor
+		// reports oversized rows; a supersedes/force save of one is capped.
+		allowOversizedPayload: true,
 		// Carry the peer's origin date so it stays observable across the
 		// import boundary. Save clamps it (the pool is a trust boundary) —
 		// see resolveAuthoredAt.

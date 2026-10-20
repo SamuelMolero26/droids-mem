@@ -94,7 +94,7 @@ The always tier returns the task_type's newest 5 rules regardless of the query. 
 | protocol | calls | topical | rule | mean bytes |
 |---|---|---|---|---|
 | old, core loop only: `mem_search` unscoped, default limit | 1 | 91% | 6% | 1458 |
-| old, full text: + `mem_context` without query | 2 | 91% | 100% | 7171 |
-| new: `mem_context` with query | 1 | 100% | 100% | 5500 |
+| old, full text: + `mem_context` without query | 2 | 91% | 100% | 7190 |
+| new: `mem_context` with query | 1 | 100% | 100% | 5520 |
 
 An agent that reads only the old core loop gets the cheapest response but almost never sees a standing rule, and an unscoped top 5 lets other projects' memories crowd out the target. The old full text recovers the rules only with a second call whose recency-ranked bundle adds no topical hits. One `mem_context` call with a query returns both the target and the rules, in fewer bytes than the old two-call protocol.

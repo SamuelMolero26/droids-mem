@@ -7,6 +7,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Memory writes and context delivery now have explicit attention budgets.**
+  New saves cap the combined authored payload at 6 KiB, while `mem_context`
+  keeps encoded responses under 40,000 bytes through deterministic stubs and
+  categorized omissions with `mem_get` / `mem_search` recovery paths. Context
+  loading selects bounded metadata before fetching only the bodies that fit.
+  Shared-pool imports stay bounded by per-field caps only, so pre-cap memories
+  survive import; `doctor` counts rows over the cap, and a `--supersedes` save
+  shortens them.
+
 ### Changed
 - **Graph freshness is per file, not per repo.** Editing one file used to mark
   every graph answer `stale` until a 3-4 s whole-module rebuild landed, even
@@ -47,6 +57,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `save --scope` help, `droids-mem schema` and the invalid-scope suggestion
   still said `shared`, so agents skipped `scope` expecting to share and the
   memory never reached the share pool. Runtime behavior is unchanged (#210).
+- **Failed session-summary flushes no longer delete staged recovery state.**
+  Staging validates and scrubs before replacing an earlier checkpoint; legacy
+  over-cap shared rows remain importable and are surfaced by `doctor`.
 - **`task_type_hint` no longer redirects the established slug to a stray.**
   Saving under the majority spelling (`droids-mem`, hundreds of rows) while a
   stray variant existed (`droids_mem`, a handful) told the agent to switch to

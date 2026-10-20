@@ -109,20 +109,34 @@ Two layers, both must pass before insert:
 
 Both layers run inside a `BEGIN IMMEDIATE` transaction to close the dedupe race.
 
+The persisted authored payload (`title + what + learned + tags`) is capped at
+6 KiB after trimming and scrubbing. New writes reject over-cap content with a
+retryable structured error. Shared-pool imports are accepted regardless and
+bounded only by per-field caps — nothing on the wire can prove a row predates
+the cap. `doctor` warns about oversized rows; a `supersedes`/`force` save
+replaces one and goes through the cap.
+
 ## Context bundle
 
-Two-tier model. No `--limit` flag; tier sizes are hardcoded constants.
+Two-tier model. No `--limit` flag; retrieval priorities are hardcoded and the
+final encoded transport response never exceeds 40,000 bytes.
 
-**Always tier** (full `learned` body):
-- `last_session` — 1× latest `session_summary` for `task_type` (optional)
-- `user_rules[]` — newest 5 `user_rule` rows for `task_type` (decision #20)
+**Always tier**:
+- `last_session` — latest `session_summary` for `task_type` (optional)
+- `user_rules[]` — newest rules first; orient/refresh prioritize the newest 5
 
-**Browse tier** (title + 120-rune snippet from `what`):
+**Browse tier**:
 - rule stubs — `user_rule` rows beyond the always-tier 5, title-only, listed first
-- ≤10 `error_resolution` by BM25 rank
-- ≤10 `task_pattern` by BM25 rank
+- ranked `error_resolution` and `task_pattern` memories (orient: ≤10 each with
+  snippets; deep: ≤5 each with full bodies when they fit)
 
-Response shape: `{ task_type, last_session?, user_rules[], user_rules_total, browse[] }`. Each item has `tier: "always"|"browse"`. All reads are wrapped in `BEGIN DEFERRED` for a consistent snapshot.
+Selection is two-phase inside one `BEGIN DEFERRED`: bounded metadata/stubs first,
+then bodies only for selected IDs. Bodies are upgraded in priority order using
+the final encoded JSON size, so escaping cannot bypass the limit. A body that
+does not fit remains a stub; candidates that do not fit at all are counted in
+`omitted_count` and `omitted_by_kind`. `stubbed_count` and `reason` disclose
+budget effects. Recover stubs with `mem_get`; recover omissions with
+`mem_search` then `mem_get`.
 
 Session retention: on `session_summary` save, delete oldest if > 5 for that `task_type`.
 

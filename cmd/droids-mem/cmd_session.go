@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -216,7 +217,7 @@ func newSessionStageCmd() *cobra.Command {
 			if kind == "" {
 				kind = "session_summary"
 			}
-			if err := state.StageSummary(ccID, state.StagedSummary{
+			req := store.SaveRequest{
 				SessionID: sessionID,
 				TaskType:  taskType,
 				Kind:      kind,
@@ -224,6 +225,23 @@ func newSessionStageCmd() *cobra.Command {
 				What:      what,
 				Learned:   learned,
 				Tags:      tags,
+			}
+			prepared, err := store.PrepareSaveRequest(req)
+			if err != nil {
+				if ve, ok := errors.AsType[*store.ValidationError](err); ok {
+					failValidation(ve, "shorten the staged summary")
+				}
+				writeError("stage_failed", err.Error(), true)
+				exitWith(ExitError)
+			}
+			if err := state.StageSummary(ccID, state.StagedSummary{
+				SessionID: prepared.SessionID,
+				TaskType:  prepared.TaskType,
+				Kind:      prepared.Kind,
+				Title:     prepared.Title,
+				What:      prepared.What,
+				Learned:   prepared.Learned,
+				Tags:      prepared.Tags,
 			}); err != nil {
 				writeError("stage_failed", err.Error(), true)
 				exitWith(ExitError)
@@ -300,13 +318,11 @@ func newSessionFlushCmd(a *app) *cobra.Command {
 				return err
 			}
 			res := flushSession(cmd.Context(), s, ccID)
-			// SessionEnd always clears: a passing flush persisted the summary; a
-			// failing one means the Run was low-value, so discard the sentinels.
-			_ = state.ClearSession(ccID)
 			if res.err != nil {
 				writeError("flush_failed", res.err.Error(), true)
 				exitWith(ExitError)
 			}
+			_ = state.ClearSession(ccID)
 			writeJSON(res.json())
 			return nil
 		},
@@ -354,6 +370,9 @@ func recoverOrphans(ctx context.Context, s *store.Store) (recovered, swept []str
 			continue
 		}
 		res := flushSession(ctx, s, id)
+		if res.err != nil {
+			continue
+		}
 		_ = state.ClearSession(id)
 		if res.flushed {
 			recovered = append(recovered, id)
@@ -386,7 +405,8 @@ func (r flushResult) json() map[string]any {
 
 // flushSession applies the intake gate and, if it passes, saves the staged
 // summary as an origin='auto' session_summary (ADR-0016). It does NOT clear the
-// sentinels — callers decide that (SessionEnd always clears; recovery clears).
+// sentinels — callers clear only after a non-error outcome so a rejected or
+// transiently failed save remains recoverable.
 func flushSession(ctx context.Context, s *store.Store, ccID string) flushResult {
 	staged, err := state.ReadStaged(ccID)
 	if err != nil {

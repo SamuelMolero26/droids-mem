@@ -27,6 +27,7 @@ func newSaveCmd(a *app) *cobra.Command {
 		Use:   "save",
 		Short: "Save a structured memory",
 		Args:  cobra.NoArgs,
+		Long:  "Save a structured memory. The combined title, what, learned, and tags payload must fit within 6144 bytes after trimming and scrubbing.",
 		Example: `  droids-mem save --task-type crm_upload --kind error_resolution \
     --title "HubSpot phone field" --what "field was phone_number" \
     --learned "map to phone, not phone_number" --tags "hubspot phone"

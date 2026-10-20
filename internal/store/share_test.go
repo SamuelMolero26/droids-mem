@@ -100,6 +100,49 @@ not json
 	}
 }
 
+// TestShare_ImportAcceptsOversizedCombinedPayload pins the legacy-row policy:
+// an imported row over the combined cap (but within per-field caps) lands,
+// while a local Save of the same content is still rejected by the cap.
+func TestShare_ImportAcceptsOversizedCombinedPayload(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	row := store.SharedMemory{
+		Kind:     "task_pattern",
+		TaskType: "legacy_pool",
+		Title:    strings.Repeat("t", 100),
+		What:     strings.Repeat("w", 2000),
+		Learned:  strings.Repeat("l", 4096),
+		Tags:     "legacy",
+	}
+	line, err := json.Marshal(row)
+	if err != nil {
+		t.Fatalf("marshal row: %v", err)
+	}
+
+	res, err := s.ImportShared(ctx, bytes.NewReader(append(line, '\n')))
+	if err != nil {
+		t.Fatalf("import row: %v", err)
+	}
+	if res.Imported != 1 || res.Skipped != 0 || res.Failed != 0 {
+		t.Fatalf("import = %+v, want imported=1", res)
+	}
+	if rows := exportLines(t, s); len(rows) != 1 || rows[0].TaskType != row.TaskType {
+		t.Fatalf("imported row did not round-trip: %+v", rows)
+	}
+
+	_, err = s.Save(ctx, store.SaveRequest{
+		TaskType: row.TaskType,
+		Kind:     row.Kind,
+		Title:    row.Title,
+		What:     row.What,
+		Learned:  row.Learned,
+		Tags:     row.Tags,
+	})
+	if ve := mustValidationError(t, err); ve.Code != "memory_payload_too_large" {
+		t.Fatalf("local save code = %q, want memory_payload_too_large", ve.Code)
+	}
+}
+
 // TestShare_ExportOrderIsContentStable proves export bytes depend only on
 // content, not insert order or a per-machine clock — the property that keeps a
 // git-tracked pool file diff-clean across teammates. Two stores get the same two

@@ -18,12 +18,12 @@ func newContextCmd(a *app) *cobra.Command {
 		Use:   "context",
 		Short: "Load start-of-run context bundle for a task type",
 		Args:  cobra.NoArgs,
-		Long: `Returns a two-tier bundle:
-  - always tier: latest session_summary + ALL user_rules (full body)
-  - browse tier: top error_resolution + task_pattern (title + snippet)
+		Long: `Returns a byte-bounded two-tier bundle:
+  - always tier: latest session_summary + highest-priority user_rules
+  - browse tier: rule stubs + top error_resolution/task_pattern memories
 
 Agent should call 'droids-mem get --id ...' or 'droids-mem search ...' to
-deep-read any browse-tier item.`,
+recover stubbed or omitted detail.`,
 		Example: `  droids-mem context --task-type crm_upload
   droids-mem context --task-type crm_upload --query "hubspot phone field mapping"`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -43,13 +43,13 @@ deep-read any browse-tier item.`,
 				writeError("context_failed", err.Error(), true)
 				exitWith(ExitError)
 			}
-			if len(resp.Browse) > 0 {
-				// Contextual disclosure (AXI §9): stub IDs are expandable via
-				// get. Omitted when Browse is empty — nothing to expand, so
-				// the hint would be noise (omit-when-self-contained).
-				resp.Help = []string{"Run 'droids-mem get --id <id>' to read a browse-tier memory in full"}
+			if resp.StubbedCount > 0 {
+				resp.Help = []string{"Run 'droids-mem get --id <id>' to read a returned stub in full"}
 			}
-			writeJSON(resp)
+			if resp.OmittedCount > 0 {
+				resp.Help = append(resp.Help, "Run 'droids-mem search --query <terms>', then 'droids-mem get --id <id>' to recover omitted memories")
+			}
+			writeBoundedJSON(resp, store.MaxContextResponseBytes)
 			return nil
 		},
 	}

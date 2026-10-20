@@ -140,6 +140,48 @@ func TestSave_FieldTooLarge_Tags(t *testing.T) {
 	}
 }
 
+func TestSave_CombinedPayloadCap(t *testing.T) {
+	tests := []struct {
+		name    string
+		tagSize int
+		wantErr bool
+	}{
+		{name: "exact cap", tagSize: 44},
+		{name: "one byte over", tagSize: 45, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestStore(t)
+			req := validReq()
+			req.Title = strings.Repeat("t", 100)
+			req.What = strings.Repeat("w", 2000)
+			req.Learned = strings.Repeat("l", 4000)
+			req.Tags = strings.Repeat("z", tt.tagSize)
+
+			_, err := s.Save(context.Background(), req)
+			if !tt.wantErr {
+				if err != nil {
+					t.Fatalf("Save at exact combined cap: %v", err)
+				}
+				return
+			}
+
+			ve := mustValidationError(t, err)
+			if ve.Code != "memory_payload_too_large" || ve.Field != "memory" {
+				t.Fatalf("code/field = %q/%q, want memory_payload_too_large/memory", ve.Code, ve.Field)
+			}
+			if ve.Limit != store.MaxMemoryPayloadBytes || ve.Actual != store.MaxMemoryPayloadBytes+1 {
+				t.Errorf("limit/actual = %d/%d, want %d/%d",
+					ve.Limit, ve.Actual, store.MaxMemoryPayloadBytes, store.MaxMemoryPayloadBytes+1)
+			}
+			if !ve.Retryable || ve.Suggestion == "" {
+				t.Error("combined payload rejection must be retryable and actionable")
+			}
+		})
+	}
+}
+
 // ---------- tag pre-scrub ----------
 
 func TestSave_TagContainsSecret_EmailTag(t *testing.T) {

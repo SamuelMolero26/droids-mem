@@ -96,8 +96,10 @@ func newSessionHookCmd(a *app) *cobra.Command {
 			case "sessionend":
 				if in.SessionID != "" {
 					if s, err := a.store(); err == nil {
-						_ = flushSession(cmd.Context(), s, in.SessionID)
-						_ = state.ClearSession(in.SessionID)
+						res := flushSession(cmd.Context(), s, in.SessionID)
+						if res.err == nil {
+							_ = state.ClearSession(in.SessionID)
+						}
 					}
 				}
 			case "sessionstart":
