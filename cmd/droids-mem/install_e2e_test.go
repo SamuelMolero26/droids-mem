@@ -47,14 +47,14 @@ func TestE2E_InstallWiresHooksIdempotently(t *testing.T) {
 
 	var r1 installResp
 	mustParseJSON(t, runInstall(t, home, "install"), &r1)
-	if r1.Status != "installed" || len(r1.EventsAdded) != 5 {
-		t.Fatalf("first install should add 5 events, got %+v", r1)
+	if r1.Status != "installed" || len(r1.EventsAdded) != 6 {
+		t.Fatalf("first install should add 6 events, got %+v", r1)
 	}
 	if !strings.Contains(r1.Command, "session hook") {
 		t.Errorf("hook command = %q, want it to invoke `session hook`", r1.Command)
 	}
 
-	// settings.json now has all five events, each pointing at the binary.
+	// settings.json now has all six events, each pointing at the binary.
 	b, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
 	if err != nil {
 		t.Fatalf("read settings: %v", err)
@@ -71,7 +71,7 @@ func TestE2E_InstallWiresHooksIdempotently(t *testing.T) {
 	if err := json.Unmarshal(b, &settings); err != nil {
 		t.Fatalf("parse settings: %v", err)
 	}
-	for _, ev := range []string{"PostToolUse", "Stop", "SessionEnd", "SessionStart", "UserPromptSubmit"} {
+	for _, ev := range []string{"PostToolUse", "Stop", "SessionEnd", "SessionStart", "SubagentStart", "UserPromptSubmit"} {
 		entries, ok := settings.Hooks[ev]
 		if !ok || len(entries) == 0 || len(entries[0].Hooks) == 0 {
 			t.Fatalf("event %s not wired: %+v", ev, settings.Hooks[ev])
@@ -96,7 +96,7 @@ func TestE2E_InstallPreservesExistingSettings(t *testing.T) {
 	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	existing := `{"model":"opus","hooks":{"Stop":[{"hooks":[{"type":"command","command":"my-own-hook"}]}]}}`
+	existing := `{"model":"opus","hooks":{"Stop":[{"hooks":[{"type":"command","command":"my-own-hook"}]}],"SubagentStart":[{"hooks":[{"type":"command","command":"my-subagent-hook"}]}]}}`
 	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(existing), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -122,6 +122,10 @@ func TestE2E_InstallPreservesExistingSettings(t *testing.T) {
 	stop := settings.Hooks["Stop"]
 	if len(stop) != 2 {
 		t.Fatalf("Stop should have 2 entries (user + ours), got %d", len(stop))
+	}
+	subagentStart := settings.Hooks["SubagentStart"]
+	if len(subagentStart) != 2 {
+		t.Fatalf("SubagentStart should have 2 entries (user + ours), got %d", len(subagentStart))
 	}
 }
 

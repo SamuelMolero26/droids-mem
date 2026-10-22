@@ -8,6 +8,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Claude Code sessions and built-in subagents now receive graph-first
+  lifecycle context.** Install manages a `SubagentStart` hook alongside
+  `SessionStart`; both emit the same embedded guidance to select hidden or
+  pending graph tools with `ToolSearch`, wait for graph rebuilds, verify
+  degraded results against source, and fall back safely when graph access
+  fails. Session-start orphan recovery is unchanged.
 - **Memory writes and context delivery now have explicit attention budgets.**
   New saves cap the combined authored payload at 6 KiB, while `mem_context`
   keeps encoded responses under 40,000 bytes through deterministic stubs and

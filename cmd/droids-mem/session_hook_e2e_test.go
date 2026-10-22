@@ -1,6 +1,7 @@
 package main_test
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,47 @@ import (
 
 	"github.com/samuelmolero26/droids-mem/internal/state"
 )
+
+func TestE2E_HookGraphContext(t *testing.T) {
+	home := t.TempDir()
+	db := filepath.Join(t.TempDir(), "mem.db")
+	events := []string{"SessionStart", "SubagentStart"}
+	var sharedContext string
+
+	for _, event := range events {
+		t.Run(event, func(t *testing.T) {
+			out := sessStdin(t, home, db,
+				`{"hook_event_name":"`+event+`","session_id":"graph-context"}`,
+				"session", "hook")
+			var response struct {
+				HookSpecificOutput struct {
+					HookEventName     string `json:"hookEventName"`
+					AdditionalContext string `json:"additionalContext"`
+				} `json:"hookSpecificOutput"`
+			}
+			if err := json.Unmarshal(out, &response); err != nil {
+				t.Fatalf("parse hook output: %v\nraw: %s", err, out)
+			}
+			got := response.HookSpecificOutput
+			if got.HookEventName != event {
+				t.Errorf("hookEventName = %q, want %q", got.HookEventName, event)
+			}
+			if got.AdditionalContext == "" {
+				t.Fatal("additionalContext is empty")
+			}
+			if sharedContext == "" {
+				sharedContext = got.AdditionalContext
+			} else if got.AdditionalContext != sharedContext {
+				t.Errorf("additionalContext differs between lifecycle events")
+			}
+			for _, want := range []string{"graph_package", "graph_symbol", "ToolSearch", "graph_build_wait"} {
+				if !strings.Contains(got.AdditionalContext, want) {
+					t.Errorf("additionalContext missing %q", want)
+				}
+			}
+		})
+	}
+}
 
 // bumpChanges sends n meaningful PostToolUse events for the session.
 func bumpChanges(t *testing.T, home, db, ccID string, n int) {

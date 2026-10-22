@@ -26,12 +26,19 @@ dispatches on `hook_event_name`:
 | `PostToolUse` (Edit/Write/Bash/…) | bump the meaningful-change counter (intake gate, DB-free) |
 | `Stop` | block once + ask the model to stage when work is unstaged (checkpoint) |
 | `SessionEnd` | flush the staged summary if the gate passes; clear sentinels |
-| `SessionStart` | flush orphaned summaries from crashed runs; sweep stale |
+| `SessionStart` | flush orphaned summaries from crashed runs, then inject graph-first context |
+| `SubagentStart` | inject the same graph-first context into built-in subagents |
 | `UserPromptSubmit` | inject relevant prior memories above a floor, deduped |
 
 Composition (the model-judgment half of the intake gate) lives in
 [`session-memory.md`](./session-memory.md) — added to your `CLAUDE.md` by the
 install step above.
+
+The lifecycle context comes from the single embedded
+[`graph_snippet.md`](../cmd/droids-mem/graph_snippet.md). It directs supported
+Go, Python, TypeScript, and JavaScript structural work through droids-mem before
+source search, including lazy `ToolSearch` discovery, rebuild waits, degraded
+result verification, and fail-open fallback when graph tooling is unavailable.
 
 ## Verify (manual — hooks run only in the Claude Code runtime)
 1. Start a session; make ≥3 edits; end it.
