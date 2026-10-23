@@ -39,8 +39,8 @@ func TestE2E_UninstallHooksRoundTrip(t *testing.T) {
 
 	var r uninstallResp
 	mustParseJSON(t, runInstall(t, home, "uninstall"), &r)
-	if r.Status != "uninstalled" || len(r.EventsRemoved) != 5 {
-		t.Fatalf("uninstall should remove 5 events, got %+v", r)
+	if r.Status != "uninstalled" || len(r.EventsRemoved) != 6 {
+		t.Fatalf("uninstall should remove 6 events, got %+v", r)
 	}
 
 	got, err := os.ReadFile(settingsPath)

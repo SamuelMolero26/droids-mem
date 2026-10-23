@@ -8,6 +8,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Claude Code sessions and built-in subagents now receive graph-first
+  lifecycle context.** Install manages a `SubagentStart` hook alongside
+  `SessionStart`; both emit the same embedded guidance to select hidden or
+  pending graph tools with `ToolSearch`, wait for graph rebuilds, verify
+  degraded results against source, and fall back safely when graph access
+  fails. Session-start orphan recovery is unchanged.
 - **Memory writes and context delivery now have explicit attention budgets.**
   New saves cap the combined authored payload at 6 KiB, while `mem_context`
   keeps encoded responses under 40,000 bytes through deterministic stubs and
@@ -38,6 +44,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and output semantics. Graph degradation (`stale`, `carried`, `stale_units`)
   is no longer explained up front: responses already carry a hint when it
   happens, and the `stale_units` line now states its consequence.
+
+### Removed
+- **Threshold-tuning log.** `DROIDS_MEM_TUNING_LOG` and its `tuning.jsonl`
+  append log are gone; it was an internal-only diagnostic. An existing
+  `tuning.jsonl` in the state dir is left untouched.
 
 ### Fixed
 - **A timed-out `graph_build_wait` no longer lists every file as changed

@@ -29,6 +29,15 @@ type hookInput struct {
 	StopHookActive bool `json:"stop_hook_active"`
 }
 
+type hookOutput struct {
+	HookSpecificOutput hookSpecificOutput `json:"hookSpecificOutput"`
+}
+
+type hookSpecificOutput struct {
+	HookEventName     string `json:"hookEventName"`
+	AdditionalContext string `json:"additionalContext"`
+}
+
 // meaningfulTools are the PostToolUse tools that count toward the intake gate
 // (ADR-0016 pt 5) — file edits only. Bash is deliberately excluded: trivial
 // shell commands (ls, git status, go test) tripped the Stop gate on read-only
@@ -110,6 +119,9 @@ func newSessionHookCmd(a *app) *cobra.Command {
 				if s, err := a.store(); err == nil {
 					recoverOrphans(cmd.Context(), s)
 				}
+				emitGraphContext(cmd.OutOrStdout(), "SessionStart")
+			case "subagentstart":
+				emitGraphContext(cmd.OutOrStdout(), "SubagentStart")
 			case "userpromptsubmit":
 				if in.SessionID != "" && strings.TrimSpace(in.Prompt) != "" {
 					if s, err := a.store(); err == nil {
@@ -120,6 +132,16 @@ func newSessionHookCmd(a *app) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func emitGraphContext(w io.Writer, event string) {
+	output := hookOutput{
+		HookSpecificOutput: hookSpecificOutput{
+			HookEventName:     event,
+			AdditionalContext: graphSnippet,
+		},
+	}
+	_ = json.NewEncoder(w).Encode(output) // fail open: a hook must never break the user's session
 }
 
 // normalizeEvent canonicalizes a hook event name to a lowercase, separator-free

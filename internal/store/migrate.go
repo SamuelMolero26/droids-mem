@@ -10,19 +10,6 @@ import (
 	"github.com/samuelmolero26/droids-mem/internal/scrub"
 )
 
-// MigrateOptions controls the scrub-baseline migration. Exactly one mode is
-// expected at this layer — the CLI is responsible for rejecting ambiguous
-// flag combos before calling.
-type MigrateOptions struct {
-	// Rescrub rewrites every memory row with the current scrub patterns,
-	// refreshing its fingerprint + scrub_counts. The tokenizer flip (porter
-	// stemmer) is owned by the db ladder's rung 7→8, applied automatically at
-	// boot — Migrate never touches the index. When false, Migrate runs the
-	// lighter `--no-rescrub` path: it stamps the scrub-baseline sentinel
-	// without touching row bodies.
-	Rescrub bool
-}
-
 // MigrateSummary is the structured result the CLI emits. Counts cover what
 // the operator actually paid for so output sizes can be sanity-checked.
 type MigrateSummary struct {
@@ -87,12 +74,18 @@ func (e *FingerprintCollisionError) Error() string {
 // gives up must be able to stop it. Cancelling aborts inside BEGIN IMMEDIATE,
 // so the database rolls back to its pre-migrate shape with no sentinel — the
 // gate stays closed and the operator can retry.
-func Migrate(ctx context.Context, s *Store, opts MigrateOptions) (*MigrateSummary, error) {
+//
+// rescrub rewrites every memory row with the current scrub patterns,
+// refreshing its fingerprint + scrub_counts. When false, Migrate runs the
+// lighter `--no-rescrub` path: it stamps the scrub-baseline sentinel without
+// touching row bodies. The tokenizer flip (porter stemmer) is owned by the db
+// ladder's rung 7→8 — Migrate never touches the index.
+func Migrate(ctx context.Context, s *Store, rescrub bool) (*MigrateSummary, error) {
 	summary := &MigrateSummary{
 		Mode:           "no-rescrub",
 		PatternVersion: scrub.Version,
 	}
-	if opts.Rescrub {
+	if rescrub {
 		summary.Mode = "rescrub"
 	}
 
@@ -113,7 +106,7 @@ func Migrate(ctx context.Context, s *Store, opts MigrateOptions) (*MigrateSummar
 	}
 
 	err = withTx(ctx, conn, "IMMEDIATE", "migrate", func() error {
-		if opts.Rescrub {
+		if rescrub {
 			if err := rewriteAllRows(ctx, conn, summary); err != nil {
 				return fmt.Errorf("rescrub rows: %w", err)
 			}

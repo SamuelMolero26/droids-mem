@@ -109,10 +109,6 @@ func (s *Store) List(ctx context.Context, req ListRequest) (*ListResponse, error
 	return &ListResponse{Memories: memories, Total: len(memories)}, nil
 }
 
-type RecentSessionsRequest struct {
-	Limit int
-}
-
 type RecentSessionsResponse struct {
 	Sessions []Memory `json:"sessions"`
 	Total    int      `json:"total"`
@@ -123,14 +119,14 @@ type RecentSessionsResponse struct {
 // human/operator "what did I do lately across Claude Code runs" view — keyed on
 // origin, the cross-cutting axis, served by idx_memories_origin_created, never
 // touching FTS.
-func (s *Store) RecentSessions(ctx context.Context, req RecentSessionsRequest) (*RecentSessionsResponse, error) {
-	return s.recent(ctx, "origin = 'auto'", req.Limit)
+func (s *Store) RecentSessions(ctx context.Context, limit int) (*RecentSessionsResponse, error) {
+	return s.recent(ctx, "origin = 'auto'", limit)
 }
 
 // RecentSummaries returns the newest session_summary rows of any origin —
 // the agent-facing timeline behind mem_corpus.
-func (s *Store) RecentSummaries(ctx context.Context, req RecentSessionsRequest) (*RecentSessionsResponse, error) {
-	return s.recent(ctx, "kind = 'session_summary'", req.Limit)
+func (s *Store) RecentSummaries(ctx context.Context, limit int) (*RecentSessionsResponse, error) {
+	return s.recent(ctx, "kind = 'session_summary'", limit)
 }
 
 // recent runs the shared newest-first query; where is a constant, never input.

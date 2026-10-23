@@ -44,6 +44,7 @@ var claudeHookEvents = []hookEvent{
 	{"Stop", ""},
 	{"SessionEnd", ""},
 	{"SessionStart", ""},
+	{"SubagentStart", ""},
 	{"UserPromptSubmit", ""},
 }
 

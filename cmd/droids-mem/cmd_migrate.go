@@ -55,7 +55,7 @@ migrate only rewrites rows (--rescrub) and stamps the sentinel.`,
 			// cmd.Context() is cobra's signal-aware context, so Ctrl-C during a
 			// long rescrub aborts the rewrite and rolls back instead of running
 			// the whole corpus out.
-			summary, err := store.Migrate(cmd.Context(), s, store.MigrateOptions{Rescrub: rescrub})
+			summary, err := store.Migrate(cmd.Context(), s, rescrub)
 			if err != nil {
 				// A re-fingerprint collision is an operator decision, not a
 				// retryable runtime failure: exit 5 (conflict/duplicate class).

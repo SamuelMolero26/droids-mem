@@ -156,7 +156,21 @@ func TestAppendGraphBlock(t *testing.T) {
 	if n := strings.Count(got, graphSnippetMarker); n != 1 {
 		t.Errorf("graph marker appears %d times, want 1", n)
 	}
-	if !strings.Contains(got, "graph_symbol") || !strings.Contains(got, "graph_package") {
-		t.Errorf("block does not name the graph tools: %q", got)
+	for _, want := range []string{
+		"Go, Python, TypeScript, or JavaScript",
+		"graph_package",
+		"graph_symbol",
+		"ToolSearch",
+		"graph_build_wait",
+		"grep, glob, reading files, or shell search",
+		"stale",
+		"changed",
+		"carried",
+		"stale_units",
+		"only when graph tooling is unavailable or returns an error",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("block missing %q: %q", want, got)
+		}
 	}
 }

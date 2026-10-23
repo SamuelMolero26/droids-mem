@@ -180,7 +180,7 @@ func TestRecentSessions_ReturnsAutoNewestFirst(t *testing.T) {
 	seedSummary(t, conn, "auto_mid", "auto", "claude_session", 200, 0)
 	seedSummary(t, conn, "manual_x", "manual", "crm_upload", 250, 0) // must be excluded
 
-	resp, err := s.RecentSessions(context.Background(), store.RecentSessionsRequest{Limit: 10})
+	resp, err := s.RecentSessions(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("RecentSessions: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestRecentSessions_RespectsLimit(t *testing.T) {
 	for i := range 3 {
 		seedSummary(t, conn, fmt.Sprintf("auto_%d", i), "auto", "claude_session", int64(100+i), 0)
 	}
-	resp, err := s.RecentSessions(context.Background(), store.RecentSessionsRequest{Limit: 2})
+	resp, err := s.RecentSessions(context.Background(), 2)
 	if err != nil {
 		t.Fatalf("RecentSessions: %v", err)
 	}
