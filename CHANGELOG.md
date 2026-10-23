@@ -45,6 +45,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is no longer explained up front: responses already carry a hint when it
   happens, and the `stale_units` line now states its consequence.
 
+### Removed
+- **Threshold-tuning log.** `DROIDS_MEM_TUNING_LOG` and its `tuning.jsonl`
+  append log are gone; it was an internal-only diagnostic. An existing
+  `tuning.jsonl` in the state dir is left untouched.
+
 ### Fixed
 - **A timed-out `graph_build_wait` no longer lists every file as changed
   after an upgrade.** While the cold build replacing a graph from an older

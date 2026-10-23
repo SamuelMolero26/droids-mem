@@ -55,7 +55,7 @@ func TestMigrate_RejectsNonCurrentVersion(t *testing.T) {
 	conn := loadFixtureStore(t, "schema_v7.sql")
 	s := store.New(conn)
 
-	_, err := store.Migrate(t.Context(), s, store.MigrateOptions{Rescrub: true})
+	_, err := store.Migrate(t.Context(), s, true)
 	var svErr *store.SchemaVersionError
 	if !errors.As(err, &svErr) {
 		t.Fatalf("Migrate on a v7 DB: want *store.SchemaVersionError, got %v", err)
@@ -107,7 +107,7 @@ func TestMigrate_RescrubCollisionFailsLoud(t *testing.T) {
 	}
 
 	s := store.New(conn)
-	_, err := store.Migrate(t.Context(), s, store.MigrateOptions{Rescrub: true})
+	_, err := store.Migrate(t.Context(), s, true)
 	var fpc *store.FingerprintCollisionError
 	if !errors.As(err, &fpc) {
 		t.Fatalf("Migrate --rescrub on colliding rows: want *store.FingerprintCollisionError, got %v", err)
@@ -168,7 +168,7 @@ func TestMigrate_HonorsContextCancellation(t *testing.T) {
 	cancel() // caller already gave up before the first statement runs
 
 	s := store.New(conn)
-	_, err := store.Migrate(ctx, s, store.MigrateOptions{Rescrub: true})
+	_, err := store.Migrate(ctx, s, true)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Migrate with a cancelled context: want context.Canceled, got %v", err)
 	}
@@ -214,7 +214,7 @@ func TestMigrate_LadderNeverWritesSentinel(t *testing.T) {
 
 		// Completion: store.Migrate (either mode) stamps '1' and the gate opens.
 		s := store.New(conn)
-		if _, err := store.Migrate(t.Context(), s, store.MigrateOptions{Rescrub: false}); err != nil {
+		if _, err := store.Migrate(t.Context(), s, false); err != nil {
 			t.Fatalf("store.Migrate: %v", err)
 		}
 		if err := db.AssertBootReady(conn); err != nil {
@@ -247,7 +247,7 @@ func TestMigrate_LadderNeverWritesSentinel(t *testing.T) {
 		}
 
 		s := store.New(conn)
-		if _, err := store.Migrate(t.Context(), s, store.MigrateOptions{Rescrub: false}); err != nil {
+		if _, err := store.Migrate(t.Context(), s, false); err != nil {
 			t.Fatalf("store.Migrate: %v", err)
 		}
 		if err := db.AssertBootReady(conn); err != nil {

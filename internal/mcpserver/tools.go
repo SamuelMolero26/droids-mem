@@ -294,7 +294,7 @@ func corpusHandler(st *store.Store) func(context.Context, mcp.CallToolRequest, c
 			return toolErr(err), nil
 		}
 
-		sessions, err := st.RecentSummaries(ctx, store.RecentSessionsRequest{Limit: limit})
+		sessions, err := st.RecentSummaries(ctx, limit)
 		if err != nil {
 			return toolErr(err), nil
 		}

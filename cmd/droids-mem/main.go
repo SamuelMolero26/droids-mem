@@ -104,7 +104,7 @@ start of each run — all via a local binary with zero external dependencies.`,
 			// ponytail: concurrent cold-start (hook → ensure-server → serve) can
 			// race here; Migrate's BEGIN IMMEDIATE serializes them and losers
 			// re-rescrub idempotently. Add coordination only if that waste bites.
-			summary, merr := store.Migrate(cmd.Context(), s, store.MigrateOptions{Rescrub: true})
+			summary, merr := store.Migrate(cmd.Context(), s, true)
 			if merr != nil {
 				// Fail closed: return the gate error so the manual remediation
 				// string still shows; log merr since the gate error omits it.

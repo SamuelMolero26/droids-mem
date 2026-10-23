@@ -1,9 +1,6 @@
 package main
 
-import (
-	"github.com/samuelmolero26/droids-mem/internal/store"
-	"github.com/spf13/cobra"
-)
+import "github.com/spf13/cobra"
 
 // newRecentSessionsCmd is the human/operator recency view over auto-session
 // summaries (ADR-0016 pt 7). Intentionally CLI-only — not exposed over MCP. The
@@ -22,9 +19,7 @@ func newRecentSessionsCmd(a *app) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			resp, err := s.RecentSessions(cmd.Context(), store.RecentSessionsRequest{
-				Limit: limit,
-			})
+			resp, err := s.RecentSessions(cmd.Context(), limit)
 			if err != nil {
 				writeError("recent_sessions_failed", err.Error(), true)
 				exitWith(ExitError)
