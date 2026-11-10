@@ -38,7 +38,9 @@ type mapperFileCalls struct {
 // off the caller's own buffer, never arena memory. No *gts.Node escapes.
 func callsFromMapperTree(eng *mapperEngine, f mapperFile, src []byte, tree *gts.Tree, stats *mapperStats) []gts.CallRef {
 	var refs []gts.CallRef
-	if eng.calls != nil {
+	if eng.callQuery != nil {
+		refs = queryCallRefs(eng.callQuery, tree, f.entry.Name, src)
+	} else if eng.calls != nil {
 		refs = eng.calls.Extract(tree).Calls
 	} else {
 		stats.outlineDecline++ // FactProgram failed to compile for this language
@@ -49,6 +51,51 @@ func callsFromMapperTree(eng *mapperEngine, f mapperFile, src []byte, tree *gts.
 		}
 	}
 	return refs
+}
+
+// swiftCallsQuery matches a bare call (helper()) and a navigation call
+// (self.load(), a.b.c()); @call is the whole call_expression, @name the called
+// identifier.
+const swiftCallsQuery = `
+(call_expression (simple_identifier) @name) @call
+(call_expression (navigation_expression suffix: (navigation_suffix suffix: (simple_identifier) @name))) @call
+`
+
+// queryCallRefs turns q's @call/@name matches into the CallRefs FactCalls
+// would have produced, so attribution and the ladder run unchanged. Receiver
+// is the call text before the name, minus its trailing "." and any optional
+// chaining ("cache?.flush()" -> "cache"); "" for a bare call. Release-safe
+// like FactCalls: only byte offsets and source copies leave the tree.
+func queryCallRefs(q *gts.Query, tree *gts.Tree, langName string, src []byte) []gts.CallRef {
+	var out []gts.CallRef
+	for _, m := range q.Execute(tree) {
+		var call, name *gts.Node
+		for _, c := range m.Captures {
+			switch c.Name {
+			case "call":
+				call = c.Node
+			case "name":
+				name = c.Node
+			}
+		}
+		if call == nil || name == nil || name.StartByte() < call.StartByte() {
+			continue
+		}
+		// The cut set includes whitespace: a chain may break the line before ".".
+		receiver := strings.TrimSpace(strings.TrimRight(string(src[call.StartByte():name.StartByte()]), ".?! \t\r\n"))
+		out = append(out, gts.CallRef{
+			Lang:          langName,
+			Kind:          "call",
+			Name:          name.Text(src),
+			Receiver:      receiver,
+			NodeType:      "call_expression",
+			StartByte:     call.StartByte(),
+			EndByte:       call.EndByte(),
+			NameStartByte: name.StartByte(),
+			NameEndByte:   name.EndByte(),
+		})
+	}
+	return out
 }
 
 // jsxCapableLanguages is the subset of jsFamilyLanguages whose grammar can

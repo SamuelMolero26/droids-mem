@@ -36,7 +36,7 @@ install step above.
 
 The lifecycle context comes from the single embedded
 [`graph_snippet.md`](../cmd/droids-mem/graph_snippet.md). It directs supported
-Go, Python, TypeScript, and JavaScript structural work through droids-mem before
+Go, Python, TypeScript, JavaScript, and Swift structural work through droids-mem before
 source search, including lazy `ToolSearch` discovery, rebuild waits, degraded
 result verification, and fail-open fallback when graph tooling is unavailable.
 

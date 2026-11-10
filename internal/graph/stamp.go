@@ -15,7 +15,7 @@ import (
 // input to the stamp generation, so widening it invalidates every cached
 // graph — a graph built before the set grew was built from fewer files.
 func indexedExtensions() []string {
-	return []string{".go", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cts", ".mts", ".py"}
+	return []string{".go", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cts", ".mts", ".py", ".swift"}
 }
 
 // indexerGen is the third stampGen input: a build-semantics generation that
@@ -94,7 +94,8 @@ func skipDir(name string) bool {
 		return true
 	}
 	switch name {
-	case "vendor", "node_modules", "dist", "build", "target", "__pycache__", "out", "testdata":
+	case "vendor", "node_modules", "dist", "build", "target", "__pycache__", "out", "testdata",
+		"Pods", "Carthage", "DerivedData": // CocoaPods, Carthage, Xcode build output
 		return true
 	}
 	return false

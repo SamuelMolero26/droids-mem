@@ -230,7 +230,7 @@ func TestCanonicalRepo_ModuleRootBeatsGitRoot(t *testing.T) {
 // Pinning the exact set protects the stamp contract: widening it again is a
 // deliberate decision, because it auto-invalidates every cached graph.
 func TestIndexedExtensions_IncludesMapperLanguages(t *testing.T) {
-	want := []string{".go", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cts", ".mts", ".py"}
+	want := []string{".go", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cts", ".mts", ".py", ".swift"}
 	got := indexedExtensions()
 	if !slices.Equal(got, want) {
 		t.Errorf("indexedExtensions() = %v, want %v", got, want)

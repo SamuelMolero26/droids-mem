@@ -101,7 +101,7 @@ droids-mem graph symbol Store.Save --repo "$PWD" --direction up --depth 3
 | Languages | Precision | Meaning |
 |---|---|---|
 | Go | `resolved` | Type-checked call edges and resolved interface dispatch |
-| Python, TypeScript, JavaScript | `syntactic` | Tree-sitter name resolution; callers and callees are approximate |
+| Python, TypeScript, JavaScript, Swift | `syntactic` | Tree-sitter name resolution; callers and callees are approximate |
 
 Read each response's `precision`, `hint`, and `freshness` before relying on it.
 Mapper test files and notebooks are not indexed, so `transitive_callers` can

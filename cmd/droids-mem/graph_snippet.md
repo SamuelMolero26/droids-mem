@@ -1,6 +1,6 @@
 ## droids-mem code graph
 
-For structural code work in supported Go, Python, TypeScript, or JavaScript
+For structural code work in supported Go, Python, TypeScript, JavaScript, or Swift
 repositories, use droids-mem before grep, glob, reading files, or shell search.
 Pass this project's absolute root as `repo`.
 

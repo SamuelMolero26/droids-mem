@@ -124,9 +124,19 @@ func TestIsMapperTestFile(t *testing.T) {
 		{"latest.ts", "typescript", false},
 		{"manifest.js", "javascript", false},
 		{"fastest.py", "python", false},
+		// Swift: SwiftPM's capitalized Tests/ dir and the XCTest stem
+		// convention (FooTests.swift, FooTest.swift).
+		{"Tests/AppTests/FooTests.swift", "swift", true},
+		{"Tests/Support/Helpers.swift", "swift", true},
+		{"Sources/App/FooTests.swift", "swift", true},
+		{"Sources/App/FooTest.swift", "swift", true},
+		{"Sources/App/Latest.swift", "swift", false},
+		{"Sources/App/Contest.swift", "swift", false},
+		{"Sources/App/Tests.swift", "swift", true},
 		// Ordinary source files are never test files.
 		{"src/util/helpers.ts", "typescript", false},
 		{"pkg/sub/mod.py", "python", false},
+		{"Sources/App/Foo.swift", "swift", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.rel+"/"+tt.lang, func(t *testing.T) {
@@ -234,5 +244,32 @@ func TestMapperFiles_SkipsOversizeFile(t *testing.T) {
 	}
 	if stats.skippedSize != 1 {
 		t.Errorf("skippedSize = %d, want exactly 1 — the cap is inclusive, so atcap.js must be kept", stats.skippedSize)
+	}
+}
+
+// TestMapperFiles_SwiftDiscovery pins Swift's mapper-tier wiring: .swift
+// sources are discovered, while SwiftPM tests and the CocoaPods/Carthage/Xcode
+// dependency and build trees never reach the mapper.
+func TestMapperFiles_SwiftDiscovery(t *testing.T) {
+	repo := t.TempDir()
+	writeFile(t, filepath.Join(repo, "Sources", "App"), "Keep.swift", "func keep() {}\n")
+	writeFile(t, filepath.Join(repo, "Sources", "App"), "KeepTests.swift", "func t() {}\n")
+	writeFile(t, filepath.Join(repo, "Tests", "AppTests"), "Case.swift", "func t() {}\n")
+	writeFile(t, filepath.Join(repo, "Pods", "Lib"), "Dep.swift", "func dep() {}\n")
+	writeFile(t, filepath.Join(repo, "Carthage", "Checkouts"), "Dep.swift", "func dep() {}\n")
+	writeFile(t, filepath.Join(repo, "DerivedData", "App"), "Gen.swift", "func gen() {}\n")
+
+	files, _, err := mapperFiles(repo)
+	if err != nil {
+		t.Fatalf("mapperFiles: %v", err)
+	}
+	if len(files) != 1 || files[0].rel != "Sources/App/Keep.swift" {
+		t.Fatalf("got %+v, want exactly Sources/App/Keep.swift", files)
+	}
+	if got := files[0].modulePath; got != "Sources/App/Keep" {
+		t.Errorf("modulePath = %q, want Sources/App/Keep", got)
+	}
+	if got := symbolPrecision(files[0].rel); got != precisionSyntactic {
+		t.Errorf("symbolPrecision(%q) = %q, want %q", files[0].rel, got, precisionSyntactic)
 	}
 }
