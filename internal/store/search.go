@@ -98,9 +98,10 @@ func (s *Store) Search(ctx context.Context, req SearchRequest) (*SearchResponse,
 	conditions := []string{"memories_fts MATCH ?"}
 	args := []any{ftsQuery}
 
-	if !req.AllProjects && req.TaskType != "" {
+	// Same trim/lowercase policy as save, or a caller's own spelling misses its rows.
+	if taskType := strings.ToLower(strings.TrimSpace(req.TaskType)); !req.AllProjects && taskType != "" {
 		conditions = append(conditions, "m.task_type = ?")
-		args = append(args, req.TaskType)
+		args = append(args, taskType)
 	}
 	if req.Kind != "" {
 		conditions = append(conditions, "m.kind = ?")
