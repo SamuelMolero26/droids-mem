@@ -249,7 +249,7 @@ func escapeLike(s string) string {
 // grammar name — the only lookup Precision derivation needs. Any extension
 // outside this set (in practice, only ".go") is the resolved tier.
 var mapperFileExtensions = map[string]bool{
-	".ts": true, ".tsx": true, ".js": true, ".jsx": true, ".mjs": true, ".cjs": true, ".cts": true, ".mts": true, ".py": true,
+	".ts": true, ".tsx": true, ".js": true, ".jsx": true, ".mjs": true, ".cjs": true, ".cts": true, ".mts": true, ".py": true, ".swift": true,
 }
 
 // symbolPrecision derives a symbol's precision class from its OWN file

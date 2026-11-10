@@ -157,7 +157,7 @@ func TestAppendGraphBlock(t *testing.T) {
 		t.Errorf("graph marker appears %d times, want 1", n)
 	}
 	for _, want := range []string{
-		"Go, Python, TypeScript, or JavaScript",
+		"Go, Python, TypeScript, JavaScript, or Swift",
 		"graph_package",
 		"graph_symbol",
 		"ToolSearch",

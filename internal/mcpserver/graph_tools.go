@@ -38,7 +38,7 @@ type graphSymbolArgs struct {
 
 func graphSymbolToolDef() mcp.Tool {
 	return mcp.NewTool("graph_symbol",
-		mcp.WithDescription(`Code graph around one symbol in a Go (type-resolved) or Python/TS/JS (syntactic; see hint) repo; use instead of grep or reading files. Returns its source, callers/callees as one-line stubs (interface dispatch resolved), and transitive_callers, the count of transitive callers (funcs/methods only; for a type/const/var the hint says how to gauge dependents). An interface lists 'implementers' (+ implementers_total), the set a method-signature change must update; a concrete type lists the interfaces it 'satisfies'. Re-query a stub's qname for its body. An unresolved 'symbol' is treated as a task phrase and returns a ranked 'matches' menu of qnames. Rebuilds automatically when the repo changes. A call into a closure is not an edge (a callback is never a caller of the function receiving it); a call inside a closure belongs to the enclosing declaration.
+		mcp.WithDescription(`Code graph around one symbol in a Go (type-resolved) or Python/TS/JS/Swift (syntactic; see hint) repo; use instead of grep or reading files. Returns its source, callers/callees as one-line stubs (interface dispatch resolved), and transitive_callers, the count of transitive callers (funcs/methods only; for a type/const/var the hint says how to gauge dependents). An interface lists 'implementers' (+ implementers_total), the set a method-signature change must update; a concrete type lists the interfaces it 'satisfies'. Re-query a stub's qname for its body. An unresolved 'symbol' is treated as a task phrase and returns a ranked 'matches' menu of qnames. Rebuilds automatically when the repo changes. A call into a closure is not an edge (a callback is never a caller of the function receiving it); a call inside a closure belongs to the enclosing declaration.
 
 Before editing: direction=up depth=3; transitive_callers > 10 means add a layer or keep backward compat. Before reading: direction=down depth=1, then drill callees.`),
 		mcp.WithString("repo", mcp.Required(),
@@ -90,7 +90,7 @@ type graphPackageArgs struct {
 
 func graphPackageToolDef() mcp.Tool {
 	return mcp.NewTool("graph_package",
-		mcp.WithDescription(`Public surface of one Go/Python/TS/JS package: exported symbols as one-line signatures with first doc line, no bodies. Use to orient before graph_symbol. unexported_count = internal symbols, queryable by name via graph_symbol.`),
+		mcp.WithDescription(`Public surface of one Go/Python/TS/JS/Swift package: exported symbols as one-line signatures with first doc line, no bodies. Use to orient before graph_symbol. unexported_count = internal symbols, queryable by name via graph_symbol.`),
 		mcp.WithString("repo", mcp.Required(),
 			mcp.Description("Absolute path to the project root.")),
 		mcp.WithString("package", mcp.Required(),

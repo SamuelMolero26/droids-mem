@@ -168,6 +168,10 @@ func scanMapperFile(eng *mapperEngine, f mapperFile, src []byte, res *mapperScan
 		return false // unparsable file is skip-and-continue, not fatal
 	}
 	defer tree.Release()
+	if tree.ParseStopReason() == gts.ParseStopTimeout {
+		res.stats.parseErr++
+		return false // partial tree past mapperParseTimeoutMicros: skip, like a parse error
+	}
 	if f.entry != nil && jsFamilyLanguages[f.entry.Name] {
 		if dir := detectDirective(src, tree, eng.lang); dir != "" {
 			res.fileDirectives[f.rel] = dir

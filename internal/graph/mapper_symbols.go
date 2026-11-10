@@ -42,6 +42,10 @@ type mapperEngine struct {
 	// incidental. nil when compilation fails — mapper_calls.go treats that
 	// as a per-file skip, the same policy outliner==nil already gets below.
 	calls *gts.FactProgram
+	// callQuery stands in for calls on Swift, where FactCalls extracts nothing
+	// (gotreesitter's isCallNode hardcodes its languages). Set only for Swift;
+	// calls stays nil there.
+	callQuery *gts.Query
 	// imports is the compiled module-specifier query for the JS family only
 	// (mapper_imports.go's tsImportsQuery). Python needs no query — gts's own
 	// ExtractImports covers it — so this stays nil there, and importsFromMapperTree
@@ -78,6 +82,9 @@ type mapperEngine struct {
 // current behavior (base has no lexical_declaration, so we still append) but
 // is resilient to unrelated upstream additions.
 func mapperTagsQuery(entry *grammars.LangEntry) string {
+	if entry.Name == "swift" {
+		return swiftTagsQuery
+	}
 	base := grammars.ResolveTagsQuery(*entry)
 	if jsFamilyLanguages[entry.Name] && !strings.Contains(base, "lexical_declaration") {
 		base += "\n(export_statement declaration: (lexical_declaration (variable_declarator name: (identifier) @name) @definition.constant))"
@@ -99,6 +106,29 @@ func mapperTagsQuery(entry *grammars.LangEntry) string {
 	return base
 }
 
+// swiftTagsQuery replaces, rather than augments, gotreesitter's builtin Swift
+// tags query: that one names (identifier) where Swift's grammar uses
+// simple_identifier, so it outlines types only. struct/enum/actor parse as
+// class_declaration and surface as class. An extension is a class_declaration
+// whose name is a user_type; capturing it nests the extension's members under
+// the extended type, and mergeSameQName then folds it into the type's row.
+const swiftTagsQuery = `
+(class_declaration name: (type_identifier) @name) @definition.class
+(class_declaration declaration_kind: "extension" name: (user_type (type_identifier) @name)) @definition.class
+(protocol_declaration name: (type_identifier) @name) @definition.interface
+(function_declaration name: (simple_identifier) @name) @definition.function
+(protocol_function_declaration name: (simple_identifier) @name) @definition.method
+(init_declaration "init" @name) @definition.constructor
+(source_file (property_declaration name: (pattern bound_identifier: (simple_identifier) @name)) @definition.variable)
+(class_body (property_declaration name: (pattern bound_identifier: (simple_identifier) @name)) @definition.variable)
+(enum_class_body (property_declaration name: (pattern bound_identifier: (simple_identifier) @name)) @definition.variable)
+`
+
+// mapperParseTimeoutMicros bounds one file's parse. Swift parse time is erratic —
+// a 104 KB file measured 11.2 s while typical files take 10-250 ms — and a
+// timed-out parse yields a partial tree, which scanMapperFile skips.
+const mapperParseTimeoutMicros = 2_000_000 // 2 s
+
 // mapperEngines caches one mapperEngine per language NAME for the lifetime
 // of a single scanMapperFiles call — per-run, not package-level. Manager
 // builds different repos concurrently, and a shared package-level cache
@@ -119,11 +149,15 @@ func (e mapperEngines) get(entry *grammars.LangEntry) *mapperEngine {
 	eng := &mapperEngine{}
 	if lang := entry.Language(); lang != nil {
 		eng.lang = lang
-		eng.parsers = gts.NewParserPool(lang)
+		eng.parsers = gts.NewParserPool(lang, gts.WithParserPoolTimeoutMicros(mapperParseTimeoutMicros))
 		if outliner, err := gts.NewOutliner(lang, mapperTagsQuery(entry)); err == nil {
 			eng.outliner = outliner
 		}
-		if calls, err := gts.NewFactProgram(lang, gts.FactCalls); err == nil {
+		if entry.Name == "swift" {
+			if q, err := gts.NewQuery(swiftCallsQuery, lang); err == nil {
+				eng.callQuery = q
+			}
+		} else if calls, err := gts.NewFactProgram(lang, gts.FactCalls); err == nil {
 			eng.calls = calls
 		}
 		if jsFamilyLanguages[entry.Name] {
@@ -176,21 +210,22 @@ func outlineMapperTree(eng *mapperEngine, f mapperFile, src []byte, tree *gts.Tr
 	for _, s := range syms {
 		out = append(out, buildMapperSymbols(s, "", f, src, tree, eng.lang, true, false)...)
 	}
-	if f.entry.Name == "python" {
+	if f.entry.Name == "python" || f.entry.Name == "swift" {
 		return mergeSameQName(out)
 	}
 	return out
 }
 
-// mergeSameQName points every repeat of a qname within one Python file
-// (property getter/setter, @overload stubs, a rebound module name) at the
+// mergeSameQName points every repeat of a qname within one Python or Swift
+// file (property getter/setter, @overload stubs, a rebound module name, Swift
+// overloads, a type plus its same-file extension) at the
 // first occurrence's row: two rows sharing a qname dead-end graph_symbol,
 // whose finest key is the qname. Each span keeps its own byte range, so a
 // call inside a later body still attributes to the shared row.
 //
-// Python only: a repeated name in one scope is one binding there, while in
-// TS a repeat means a lost container (methods of distinct unexported object
-// literals), i.e. different functions.
+// Python and Swift only: a repeated name in one scope is one binding (or one
+// overload set) there, while in TS a repeat means a lost container (methods
+// of distinct unexported object literals), i.e. different functions.
 func mergeSameQName(syms []mapperSym) []mapperSym {
 	first := map[string]*symRow{}
 	for i := range syms {
@@ -211,7 +246,7 @@ func mergeSameQName(syms []mapperSym) []mapperSym {
 // containment (empty at the top level); topLevel and parentExported drive
 // TS/TSX/JS export inheritance (design.md decision 6).
 func buildMapperSymbols(sym gts.OutlineSymbol, container string, f mapperFile, src []byte, tree *gts.Tree, lang *gts.Language, topLevel, parentExported bool) []mapperSym {
-	exported := mapperExported(sym, f.entry.Name, tree, lang, topLevel, parentExported)
+	exported := mapperExported(sym, f.entry.Name, src, tree, lang, topLevel, parentExported)
 
 	qname := f.modulePath + ":"
 	if container != "" {
@@ -258,15 +293,46 @@ func mapperSlice(src []byte, r gts.Range) string {
 // uses the leading-underscore convention independently at every depth;
 // TS/TSX/JS climbs the definition node's ancestors for an export_statement,
 // but only for top-level symbols — a nested symbol inherits its container's
-// flag instead (design.md decision 6).
-func mapperExported(sym gts.OutlineSymbol, lang string, tree *gts.Tree, gtsLang *gts.Language, topLevel, parentExported bool) bool {
+// flag instead (design.md decision 6). Swift's default access is internal,
+// so a declaration is exported unless it, or a container, is private or
+// fileprivate.
+func mapperExported(sym gts.OutlineSymbol, lang string, src []byte, tree *gts.Tree, gtsLang *gts.Language, topLevel, parentExported bool) bool {
 	if lang == "python" {
 		return !strings.HasPrefix(sym.Name, "_")
+	}
+	if lang == "swift" {
+		return (topLevel || parentExported) && !swiftPrivate(src, tree, gtsLang, sym.Range)
 	}
 	if !topLevel {
 		return parentExported
 	}
 	return mapperClimbsToExport(tree, gtsLang, sym.Range)
+}
+
+// swiftPrivate reports whether the declaration at rng carries a private or
+// fileprivate visibility modifier. private(set) only restricts the setter.
+func swiftPrivate(src []byte, tree *gts.Tree, lang *gts.Language, rng gts.Range) bool {
+	root := tree.RootNode()
+	if root == nil {
+		return false
+	}
+	n := root.NamedDescendantForByteRange(rng.StartByte, rng.EndByte)
+	if n == nil {
+		return false
+	}
+	for i := range n.ChildCount() {
+		mods := n.Child(i)
+		if mods.Type(lang) != "modifiers" {
+			continue
+		}
+		for j := range mods.ChildCount() {
+			if m := mods.Child(j); m.Type(lang) == "visibility_modifier" {
+				v := m.Text(src)
+				return v == "private" || v == "fileprivate"
+			}
+		}
+	}
+	return false
 }
 
 // mapperClimbsToExport climbs ancestors of the node at rng looking for an

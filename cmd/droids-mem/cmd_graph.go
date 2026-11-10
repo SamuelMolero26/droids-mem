@@ -67,7 +67,7 @@ func newGraphCmd() *cobra.Command {
 	var repo string
 	cmd := &cobra.Command{
 		Use:   "graph",
-		Short: "Query a repo's code graph — Go, Python, TypeScript, JavaScript",
+		Short: "Query a repo's code graph — Go, Python, TypeScript, JavaScript, Swift",
 		Long: `graph indexes a repo's symbols and call edges and answers surgical
 code questions without file crawling.
 

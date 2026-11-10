@@ -55,7 +55,12 @@ jobs:
           git diff --exit-code go.mod go.sum
 
       - name: Build
-        run: go build -tags "grammar_subset,grammar_subset_typescript,grammar_subset_tsx,grammar_subset_javascript,grammar_subset_python" ./cmd/droids-mem
+        run: go build -tags "grammar_subset,grammar_subset_typescript,grammar_subset_tsx,grammar_subset_javascript,grammar_subset_python,grammar_subset_swift" ./cmd/droids-mem
+
+      # Release binaries embed only the grammar subset; prove Swift parses on
+      # Linux under exactly those tags, not just in the untagged suite below.
+      - name: Swift under release grammar tags
+        run: go test -tags "grammar_subset,grammar_subset_typescript,grammar_subset_tsx,grammar_subset_javascript,grammar_subset_python,grammar_subset_swift" -run Swift ./internal/graph
 
       - name: Run tests
         run: go test -v -race -shuffle=on -coverprofile=coverage.out ./...

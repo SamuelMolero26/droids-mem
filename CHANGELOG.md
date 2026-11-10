@@ -8,6 +8,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Swift repos now get a code graph.** `.swift` files are indexed by the
+  syntactic mapper tier alongside Python/TS/JS: types, protocols, methods,
+  initializers, extensions (nested under the extended type) and member
+  properties, plus call edges resolved through the existing ladder.
+  SwiftPM `Tests/`, `*Tests.swift`, `Pods/`, `Carthage/` and `DerivedData/`
+  are excluded. Edges are heuristic (`precision: syntactic`), and files with
+  parse errors can lose later symbols. Every mapper parse is now capped at
+  2 s; a file that exceeds it is skipped and counted.
 - **Claude Code sessions and built-in subagents now receive graph-first
   lifecycle context.** Install manages a `SubagentStart` hook alongside
   `SessionStart`; both emit the same embedded guidance to select hidden or

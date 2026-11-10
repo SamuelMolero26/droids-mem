@@ -68,13 +68,13 @@ const (
 // that staging counts, and dedupe absorbs a redundant save.
 const serverInstructions = `droids-mem is your memory and code graph. Use it unprompted:
 1. Task start: mem_context, task_type = the git repo name, query = a short task description. Topic shift: mem_search.
-2. Go/Python/TS/JS code: graph_package to orient, graph_symbol for source + callers/callees, before grep or reading files. Before editing a function: graph_symbol direction=up depth=3; cite transitive_callers.
+2. Go/Python/TS/JS/Swift code: graph_package to orient, graph_symbol for source + callers/callees, before grep or reading files. Before editing a function: graph_symbol direction=up depth=3; cite transitive_callers.
 3. Learned something reusable: mem_save it.
 4. Run ends: mem_save ONE session_summary (what happened, learned, next). A host hook asking you to stage one counts.
 
 MEMORY: reuse the same task_type every session; mem_context without a query shows only recent lessons. Results are previews: mem_get an id for the full body. all_projects=true searches every repo; mem_corpus lists task_types when unsure. Kinds: error_resolution (problem + fix), task_pattern (repeatable approach), user_rule (user correction or preference). Re-saving is deduped. Reuse the first call's session_id.
 
-GRAPH: pass the project root as repo; re-query a stub's qname to expand it; 'to' returns a call path. Python/TS/JS edges are heuristic; verify critical findings in source.
+GRAPH: pass the project root as repo; re-query a stub's qname to expand it; 'to' returns a call path. Python/TS/JS/Swift edges are heuristic; verify critical findings in source.
 
 After each call, state its finding in one line, e.g. "Store.Save has 15 transitive callers".
 

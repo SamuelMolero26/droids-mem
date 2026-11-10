@@ -6,7 +6,7 @@
 // The engine is github.com/odvcencio/gotreesitter, a pure-Go tree-sitter
 // runtime (no CGO). Its subset tags are opt-in (//go:build !grammar_subset ||
 // grammar_subset_X): an untagged build embeds every grammar, a build carrying
-// the four grammar_subset_* tags embeds only the shipped four. tsx and
+// the grammar_subset_* tags embeds only the shipped mapper grammars. tsx and
 // javascript are separate languages from typescript, each a distinct
 // *gotreesitter.Language.
 package graph
@@ -21,14 +21,15 @@ import (
 	"github.com/odvcencio/gotreesitter/grammars"
 )
 
-// mapperLanguages restricts mapper-tier processing to the four grammars this
-// slice supports. Go is deliberately excluded: index.go's AST-based semantic
+// mapperLanguages restricts mapper-tier processing to the grammars this
+// tier supports. Go is deliberately excluded: index.go's AST-based semantic
 // tier already owns it.
 var mapperLanguages = map[string]bool{
 	"typescript": true,
 	"tsx":        true,
 	"javascript": true,
 	"python":     true,
+	"swift":      true,
 }
 
 // maxMapperFileBytes bounds a single mapper-tier file. The conversion stage
@@ -178,6 +179,13 @@ func isMapperTestFile(rel, lang string) bool {
 			return true
 		}
 		return strings.HasSuffix(stem, ".test") || strings.HasSuffix(stem, ".spec")
+	case "swift":
+		// SwiftPM puts test targets under a capitalized Tests/ dir, which the
+		// lowercase rule above misses; XCTest names files FooTests/FooTest.
+		if slices.Contains(dirs, "Tests") {
+			return true
+		}
+		return strings.HasSuffix(stem, "Tests") || strings.HasSuffix(stem, "Test")
 	default:
 		return false
 	}
