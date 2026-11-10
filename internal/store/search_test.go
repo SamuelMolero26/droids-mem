@@ -91,6 +91,28 @@ func TestSearch_FilterByTaskType(t *testing.T) {
 	}
 }
 
+// Save stores task_type trimmed and lowercased, so the search filter must apply
+// the same policy or a caller reusing its own spelling silently loses recall.
+func TestSearch_FilterByTaskType_NormalizesSpelling(t *testing.T) {
+	s := newTestStore(t)
+	seedMemories(t, s)
+
+	for _, tt := range []string{"email_sync", "Email_Sync", "  email_sync  "} {
+		resp, err := s.Search(context.Background(), store.SearchRequest{Query: "auth", TaskType: tt})
+		if err != nil {
+			t.Fatalf("Search(%q): %v", tt, err)
+		}
+		if len(resp.Results) == 0 {
+			t.Fatalf("Search(%q): want results, got none", tt)
+		}
+		for _, r := range resp.Results {
+			if r.TaskType != "email_sync" {
+				t.Errorf("Search(%q): want task_type email_sync, got %q", tt, r.TaskType)
+			}
+		}
+	}
+}
+
 func TestSearch_FilterByKind(t *testing.T) {
 	s := newTestStore(t)
 	seedMemories(t, s)
