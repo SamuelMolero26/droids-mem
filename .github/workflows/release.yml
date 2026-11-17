@@ -44,13 +44,16 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
+      # No cache: CI runs on main/develop write the Go build cache, and a
+      # poisoned entry restored here would be built into a binary that the
+      # attestation then signs as legitimate.
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
-          cache: true
-          cache-dependency-path: go.sum
+          cache: false
 
       - name: Resolve version
         id: version
@@ -138,6 +141,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - name: Download artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
