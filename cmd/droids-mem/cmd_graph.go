@@ -167,7 +167,8 @@ automatically when the repo changes.`,
 	var packageFlag string
 	packageCmd := &cobra.Command{
 		Use:         "package <path>",
-		Short:       "Show a package's exported surface (signatures only)",
+		Short:       "Show package or directory signatures",
+		Long:        "Show exported signatures for a package name or suffix. Use . for the repository overview or ./dir for an exact repo-relative directory.",
 		Args:        cobra.MaximumNArgs(1),
 		Annotations: bypass,
 		RunE: func(cmd *cobra.Command, args []string) error {

@@ -90,11 +90,11 @@ type graphPackageArgs struct {
 
 func graphPackageToolDef() mcp.Tool {
 	return mcp.NewTool("graph_package",
-		mcp.WithDescription(`Public surface of one Go/Python/TS/JS/Swift package: exported symbols as one-line signatures with first doc line, no bodies. Use to orient before graph_symbol. unexported_count = internal symbols, queryable by name via graph_symbol.`),
+		mcp.WithDescription(`Public surface of a Go/Python/TS/JS/Swift package or directory: exported signatures and first doc lines, no bodies. "." shows root symbols and a capped list of indexed source areas.`),
 		mcp.WithString("repo", mcp.Required(),
 			mcp.Description("Absolute path to the project root.")),
 		mcp.WithString("package", mcp.Required(),
-			mcp.Description("Path or suffix: slash ('internal/store'), dotted (Python module), bare ('store'), or dir.")),
+			mcp.Description("'.' for repo overview, './dir' for an exact repo-relative directory, or a package name (slash, dotted Python, or bare suffix).")),
 	)
 }
 
