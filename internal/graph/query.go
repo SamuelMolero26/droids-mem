@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -16,6 +17,7 @@ const (
 	maxPathDepth         = 10
 	maxMatches           = 20
 	maxPkgSymbols        = 200
+	maxRootAreas         = 12
 	maxNavigationResults = 32
 	// Hints are surface-neutral (ADR-0027): they name the action + the qname to
 	// re-query with, never a specific invocation ("graph_symbol" vs
@@ -878,7 +880,7 @@ func pathLevel(ctx context.Context, conn *sql.DB, frontier []int64, parent map[i
 // surface of one package.
 type PackageRequest struct {
 	Repo    string
-	Package string // package path or suffix, e.g. "internal/store"
+	Package string // package name/suffix, "." for the root, or "./dir" for an explicit directory
 }
 
 // PackageSymbol is one exported symbol's stub in a package surface.
@@ -890,6 +892,12 @@ type PackageSymbol struct {
 	File      string `json:"file"`
 	Line      int    `json:"line"`
 	Changed   bool   `json:"changed,omitempty"`
+}
+
+// PackageArea is an indexed top-level source directory, not a ranked match.
+type PackageArea struct {
+	Path  string `json:"path"`
+	Files int    `json:"files"`
 }
 
 // PackageResponse answers a scope-anchored query.
@@ -914,6 +922,9 @@ type PackageResponse struct {
 	SymbolsTotal int    `json:"symbols_total,omitempty"`
 	Truncated    bool   `json:"truncated,omitempty"`
 	Hint         string `json:"hint,omitempty"`
+	// Areas are returned only for the root. AreasTotal is set only when capped.
+	Areas      []PackageArea `json:"areas,omitempty"`
+	AreasTotal int           `json:"areas_total,omitempty"`
 }
 
 // isTestFile matches a Go _test.go path inside a SQL predicate. The backslash
@@ -932,8 +943,7 @@ type pkgCount struct {
 	mapper                   bool
 }
 
-// pkgCounts computes pkgCount in one pass, for either resolution tier's WHERE
-// clause.
+// pkgCounts computes pkgCount in one pass for the selected scope.
 func pkgCounts(ctx context.Context, conn *sql.DB, where string, args []any) (pkgCount, error) {
 	// where is a compile-time literal or placeholder ORs, never user text.
 	q := `SELECT
@@ -945,7 +955,7 @@ func pkgCounts(ctx context.Context, conn *sql.DB, where string, args []any) (pkg
 	var c pkgCount
 	var goRows int
 	err := conn.QueryRowContext(ctx, q, args...).Scan(&c.unexported, &c.tests, &c.total, &goRows)
-	// ponytail: tiers are disjoint per package, so "no .go rows" is the mapper.
+	// Go rows are the semantic tier; Go tests have different exclusion rules.
 	c.mapper = goRows == 0
 	return c, err
 }
@@ -1032,8 +1042,8 @@ func packageDirWhere(pkg string) (string, []any) {
 	return "(" + strings.Join(clauses, " OR ") + ")", args
 }
 
-// Package returns the exported surface of one package: signatures + first
-// doc line per symbol, never bodies.
+// Package returns exported signatures and first doc lines for a package or
+// directory. The root alias also lists a bounded set of top-level source areas.
 func (m *Manager) Package(ctx context.Context, req PackageRequest) (*PackageResponse, error) {
 	resp, err := m.pkgSurface(ctx, req)
 	if err != nil {
@@ -1056,8 +1066,16 @@ func (m *Manager) pkgSurface(ctx context.Context, req PackageRequest) (*PackageR
 	if strings.TrimSpace(req.Repo) == "" {
 		return nil, fmt.Errorf("repo is required: %w", ErrInvalidArgument)
 	}
-	if strings.TrimSpace(req.Package) == "" {
+	name := strings.TrimSpace(req.Package)
+	if name == "" {
 		return nil, fmt.Errorf("package is required: %w", ErrInvalidArgument)
+	}
+	explicit := name == "." || strings.HasPrefix(name, "./")
+	if explicit {
+		name = path.Clean(name)
+		if name == ".." || strings.HasPrefix(name, "../") {
+			return nil, fmt.Errorf("package path %q must stay in the repo: %w", req.Package, ErrInvalidArgument)
+		}
 	}
 	conn, release, fresh, err := m.ensureFresh(ctx, req.Repo)
 	if err != nil {
@@ -1066,64 +1084,44 @@ func (m *Manager) pkgSurface(ctx context.Context, req PackageRequest) (*PackageR
 	defer release() // hold the handle for every statement below, not just the first
 	m.bump(req.Repo, "package")
 
-	// First tier: exact or suffix (preserves Go and Python leaf behavior).
-	if resolved, err := resolvePackage(ctx, conn, req.Package); err == nil {
-		resp := &PackageResponse{Repo: req.Repo, Freshness: fresh, Package: resolved}
-		var counts pkgCount
-		if counts, err = pkgCounts(ctx, conn, `package = ?`, []any{resolved}); err != nil {
+	resp := &PackageResponse{Repo: req.Repo, Freshness: fresh, Package: name}
+	var where string
+	var args []any
+	switch {
+	case explicit && name == ".":
+		where = `instr(file, '/') = 0`
+		if err := loadRootAreas(ctx, conn, resp); err != nil {
 			return nil, err
 		}
-		resp.Unexported, resp.Tests = counts.unexported, counts.tests
-		rows, err := conn.QueryContext(ctx, `SELECT qname, kind, signature, doc, file, line FROM symbols
-			WHERE package = ? AND exported = 1 AND NOT `+isTestFile+` ORDER BY file, line LIMIT ?`,
-			resolved, maxPkgSymbols+1)
-		if err != nil {
-			return nil, err
+	case explicit:
+		where, args, err = explicitDirectoryWhere(ctx, conn, name)
+		resp.Package = "./" + name
+	default:
+		// Keep the legacy exact/suffix and mapper directory lookups in order.
+		resolved, resolveErr := resolvePackage(ctx, conn, name)
+		switch {
+		case resolveErr == nil:
+			resp.Package = resolved
+			where, args = `package = ?`, []any{resolved}
+		case errors.Is(resolveErr, ErrNotFound):
+			resp.Package = strings.Trim(name, "/")
+			where, args = packageDirWhere(resp.Package)
+		default:
+			return nil, resolveErr
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var s PackageSymbol
-			var doc string
-			if err := rows.Scan(&s.QName, &s.Kind, &s.Signature, &doc, &s.File, &s.Line); err != nil {
-				return nil, err
-			}
-			s.Doc = firstLine(doc)
-			resp.Symbols = append(resp.Symbols, s)
-		}
-		if err := rows.Err(); err != nil {
-			return nil, err
-		}
-		if len(resp.Symbols) > maxPkgSymbols {
-			resp.Symbols = resp.Symbols[:maxPkgSymbols]
-			resp.Truncated = true
-			resp.SymbolsTotal = counts.total
-		}
-		resp.Hint = packageHint(fresh, counts.mapper)
-		return resp, nil
-	} else if !errors.Is(err, ErrNotFound) {
+	}
+	if err != nil {
 		return nil, err
 	}
-
-	// Second tier: directory-level prefix aggregation for JS/TS (and Python dirs).
-	// No exact/suffix package exists — treat the query as a directory path and
-	// aggregate symbols from all descendant modules.
-	pkgNorm := strings.Trim(strings.TrimSpace(req.Package), "/")
-	where, args := packageDirWhere(pkgNorm)
-	var total int
-	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM symbols WHERE `+where, args...).Scan(&total); err != nil { // #nosec G202 -- where is built from placeholder ORs, not user string concatenation
-		return nil, err
-	}
-	if total == 0 {
-		return nil, fmt.Errorf("package %q: %w", req.Package, ErrNotFound)
-	}
-	resp := &PackageResponse{Repo: req.Repo, Freshness: fresh, Package: pkgNorm}
-	// Counts across the aggregated directory.
 	counts, err := pkgCounts(ctx, conn, where, args)
 	if err != nil {
 		return nil, err
 	}
+	if counts.total+counts.unexported+counts.tests == 0 && len(resp.Areas) == 0 {
+		return nil, fmt.Errorf("package %q: %w", req.Package, ErrNotFound)
+	}
 	resp.Unexported, resp.Tests = counts.unexported, counts.tests
-	sq := `SELECT qname, kind, signature, doc, file, line FROM symbols WHERE ` + where + ` AND exported = 1 AND NOT ` + isTestFile + ` ORDER BY file, line LIMIT ?` // #nosec G202 -- see above
+	sq := `SELECT qname, kind, signature, doc, file, line FROM symbols WHERE ` + where + ` AND exported = 1 AND NOT ` + isTestFile + ` ORDER BY file, line LIMIT ?` // #nosec G202 -- where contains only fixed predicates and placeholders
 	sargs := append(append([]any{}, args...), maxPkgSymbols+1)
 	rows, err := conn.QueryContext(ctx, sq, sargs...)
 	if err != nil {
@@ -1148,7 +1146,52 @@ func (m *Manager) pkgSurface(ctx context.Context, req PackageRequest) (*PackageR
 		resp.SymbolsTotal = counts.total
 	}
 	resp.Hint = packageHint(fresh, counts.mapper)
+	if len(resp.Areas) > 0 {
+		resp.Hint = addHint(resp.Hint, "areas are indexed top-level directories; query an area path to see its symbols")
+	}
 	return resp, nil
+}
+
+// explicitDirectoryWhere anchors the result on file paths, even when a Go or
+// Python package key is shared with files outside the requested directory.
+func explicitDirectoryWhere(ctx context.Context, conn *sql.DB, dir string) (string, []any, error) {
+	const subtree = `instr(file, ?) = 1`
+	const exact = subtree + ` AND instr(substr(file, length(?) + 1), '/') = 0 AND package IN (?, ?)`
+	prefix := dir + "/"
+	args := []any{prefix, prefix, dir, strings.ReplaceAll(dir, "/", ".")}
+	var found int
+	err := conn.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM symbols WHERE `+exact+`)`, args...).Scan(&found)
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve directory %q: %w", dir, err)
+	}
+	if found != 0 {
+		return exact, args, nil
+	}
+	return subtree, []any{prefix}, nil
+}
+
+func loadRootAreas(ctx context.Context, conn *sql.DB, resp *PackageResponse) error {
+	rows, err := conn.QueryContext(ctx, `SELECT './' || substr(file, 1, instr(file, '/') - 1) AS area,
+		COUNT(DISTINCT file), COUNT(*) OVER ()
+		FROM symbols WHERE instr(file, '/') > 0 AND NOT `+isTestFile+`
+		GROUP BY area ORDER BY area LIMIT ?`, maxRootAreas)
+	if err != nil {
+		return fmt.Errorf("query root source areas: %w", err)
+	}
+	defer rows.Close()
+
+	var total int
+	for rows.Next() {
+		var area PackageArea
+		if err := rows.Scan(&area.Path, &area.Files, &total); err != nil {
+			return err
+		}
+		resp.Areas = append(resp.Areas, area)
+	}
+	if total > len(resp.Areas) {
+		resp.AreasTotal = total
+	}
+	return rows.Err()
 }
 
 // packageHint assembles a package surface's hint with the tier-correct

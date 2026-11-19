@@ -3,6 +3,7 @@ package main_test
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -19,7 +20,9 @@ import (
 // the process cleanly (host-managed lifecycle).
 func TestE2E_ServeStdio(t *testing.T) {
 	workDir := t.TempDir()
-	cmd := exec.Command(binaryPath, "serve", "--stdio")
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binaryPath, "serve", "--stdio")
 	cmd.Env = append(os.Environ(),
 		"DROIDS_MEM_DB="+filepath.Join(workDir, "mem.db"),
 		"DROIDS_MEM_HOME="+workDir,
@@ -87,6 +90,16 @@ func TestE2E_ServeStdio(t *testing.T) {
 		if !names[want] {
 			t.Errorf("tools/list missing %s (got %v)", want, names)
 		}
+	}
+
+	if !testing.Short() {
+		repo := graphPackageAliasRepo(t)
+		id := 2
+		checkGraphPackageAliasCalls(t, repo, func(args string) (bool, string) {
+			id++
+			send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"graph_package","arguments":%s}}`, id, args))
+			return toolResultText(t, "graph_package", recv())
+		})
 	}
 
 	// Host-managed lifecycle: stdin EOF ends the process.

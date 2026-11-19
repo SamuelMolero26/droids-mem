@@ -208,6 +208,11 @@ func (s *server) callToolRaw(t *testing.T, sid, name, args string) (bool, string
 		"method":  "tools/call",
 		"params":  map[string]any{"name": name, "arguments": json.RawMessage(args)},
 	})
+	return toolResultText(t, name, resp)
+}
+
+func toolResultText(t *testing.T, name string, resp map[string]any) (bool, string) {
+	t.Helper()
 	result, ok := resp["result"].(map[string]any)
 	if !ok {
 		t.Fatalf("tools/call %s: missing result; resp=%v", name, resp)
