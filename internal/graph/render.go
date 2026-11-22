@@ -161,6 +161,15 @@ func RenderPackage(r *PackageResponse) string {
 			fmt.Fprintf(&b, "symbols_total: %d\n", r.SymbolsTotal)
 		}
 	}
+	if len(r.Areas) > 0 {
+		b.WriteString(header("areas", len(r.Areas), []string{"path", "files"}))
+		for _, area := range r.Areas {
+			b.WriteString(row(area.Path, strconv.Itoa(area.Files)))
+		}
+		if r.AreasTotal > 0 {
+			fmt.Fprintf(&b, "areas_total: %d\n", r.AreasTotal)
+		}
+	}
 	if r.Hint != "" {
 		fmt.Fprintf(&b, "hint: %s\n", r.Hint)
 	}

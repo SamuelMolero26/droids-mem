@@ -59,6 +59,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tuning.jsonl` in the state dir is left untouched.
 
 ### Fixed
+- **`graph_package` and `graph package` now accept `.` and `./dir`.**
+  `.` shows root signatures and a bounded list of source areas. `./dir`
+  resolves that exact repository-relative directory without falling back to
+  a similarly named package elsewhere (#230).
 - **A timed-out `graph_build_wait` no longer lists every file as changed
   after an upgrade.** While the cold build replacing a graph from an older
   binary ran, the timeout response qualified that old graph against the

@@ -82,7 +82,7 @@ The four memory kinds are `error_resolution`, `task_pattern`, `user_rule`, and
 | `mem_get` | Fetch one complete memory by ID |
 | `mem_corpus` | Summarize task types, memory kinds, and recent sessions |
 | `graph_symbol` | Return one symbol's source, callers, callees, and blast size |
-| `graph_package` | List a package's exported surface as signatures |
+| `graph_package` | List exported signatures for a package or directory; use `.` for a bounded repository overview |
 | `graph_build_wait` | Wait for a repository graph to become fresh |
 
 The graph tools require an absolute repository path. They are signatures-first:
@@ -95,8 +95,14 @@ Query a package before drilling into a symbol or checking its callers:
 
 ```sh
 droids-mem graph package internal/store --repo "$PWD"
+droids-mem graph package ./internal/store --repo "$PWD"
+droids-mem graph package . --repo "$PWD"
 droids-mem graph symbol Store.Save --repo "$PWD" --direction up --depth 3
 ```
+
+An explicit path such as `./internal/store` uses only files directly in that
+directory if they contain any indexed non-test symbol, exported or not.
+Otherwise it searches that directory and its descendants.
 
 | Languages | Precision | Meaning |
 |---|---|---|
