@@ -40,6 +40,90 @@ func writeGoFile(t *testing.T, path, body string) {
 	}
 }
 
+func graphPackageAliasRepo(t *testing.T) string {
+	t.Helper()
+	repo := filepath.Join(t.TempDir(), "checkout-fixture")
+	for _, dir := range []string{"nested", "other/missing"} {
+		if err := os.MkdirAll(filepath.Join(repo, dir), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeGoFile(t, filepath.Join(repo, "go.mod"), "module example.com/evidenceunit\n\ngo 1.21\n")
+	writeGoFile(t, filepath.Join(repo, "root.go"), "package worker\n\nfunc Root() {}\n")
+	writeGoFile(t, filepath.Join(repo, "nested", "work.go"), "package nested\n\nfunc Nested() {}\n")
+	writeGoFile(t, filepath.Join(repo, "other", "missing", "work.go"), "package missing\n\nfunc Decoy() {}\n")
+	return repo
+}
+
+func checkGraphPackageAliasCalls(t *testing.T, repo string, call func(args string) (bool, string)) {
+	t.Helper()
+	for _, tc := range []struct {
+		target string
+		want   []string
+	}{
+		{".", []string{"symbols[1]{", "evidenceunit.Root", "unexported:", "areas[2]{", "./nested,1"}},
+		{"./nested", []string{"symbols[1]{", "nested.Nested", "unexported:"}},
+		{"./missing", nil},
+	} {
+		args, err := json.Marshal(map[string]string{"repo": repo, "package": tc.target})
+		if err != nil {
+			t.Fatal(err)
+		}
+		isErr, text := call(string(args))
+		if tc.want == nil {
+			var envelope struct {
+				Error      string `json:"error"`
+				Retryable  bool   `json:"retryable"`
+				Suggestion string `json:"suggestion"`
+			}
+			err := json.Unmarshal([]byte(text), &envelope)
+			if !isErr || err != nil || envelope.Error != "not_found" || !envelope.Retryable || envelope.Suggestion == "" {
+				t.Errorf("%s: expected a structured not_found tool error, got isError=%v: %s", tc.target, isErr, text)
+			}
+			continue
+		}
+		if isErr {
+			t.Errorf("%s: unexpected tool error: %s", tc.target, text)
+			continue
+		}
+		for _, want := range tc.want {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s: missing %q in:\n%s", tc.target, want, text)
+			}
+		}
+	}
+}
+
+func TestE2E_GraphPackageAliasesHTTPAndCLI(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts an MCP server and indexes a Go fixture")
+	}
+	repo, home := graphPackageAliasRepo(t), t.TempDir()
+	s := startServer(t)
+	defer s.stop()
+	sid := s.initSession(t)
+
+	checkGraphPackageAliasCalls(t, repo, func(args string) (bool, string) {
+		var req struct{ Package string }
+		if err := json.Unmarshal([]byte(args), &req); err != nil {
+			t.Fatal(err)
+		}
+		isErr, text := s.callToolRaw(t, sid, "graph_package", args)
+		if req.Package == "./missing" {
+			env, code := graphErrEnvelope(t, home, "graph", "package", req.Package, "--repo", repo)
+			if code != 3 || env.Code != "not_found" {
+				t.Errorf("CLI exit=%d error=%+v, want exit 3/not_found", code, env)
+			}
+		} else {
+			out, code := graphCLI(t, home, "graph", "package", req.Package, "--repo", repo)
+			if code != 0 || strings.TrimSpace(out) != text {
+				t.Errorf("%s: CLI exit=%d; CLI/MCP mismatch:\n%s\n---\n%s", req.Package, code, out, text)
+			}
+		}
+		return isErr, text
+	})
+}
+
 // brokenGoRepo returns a temp Go module that cannot type-check, so any graph
 // build against it fails with the same underlying cause (repo failed to load
 // or type-check) that issue #72's two error paths share.
